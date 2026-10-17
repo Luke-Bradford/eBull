@@ -13072,3 +13072,21 @@ neighbouring container and match it.**
 - Enforced in: `scripts/audit_3227_dera_nature_compaction.py` (census + `--edgar`);
   `app/services/ownership_observations.py::INSIDER_HOLDING_LINE_SUM_LATERAL` (nature no longer a condition);
   `tests/test_3227_holding_line_sum.py` (`compacted_nature_does_not_decide`).
+
+### A Section 16 amendment is partial by rule, and excluding a row before DISTINCT ON can resurrect a stale one (#3227)
+
+- Symptom: an original Form 4 and its 4/A both stayed live in the insiders `_current` projection whenever the
+  amendment moved a line to another key. RWT `0001104659-26-109010` restates its original's one `I` "by Trust" line
+  as `D`, so the rollup summed both and rendered 1,358,566 for a 679,283 holding. The first fix excluded the original
+  before `DISTINCT ON`. On keys the amendment had left, that let the key fall back to an older filing's value, which the original had
+  already superseded. RWT's `indirect` went back to April's 579,283, the same holding 100,000 shares earlier.
+- Prevention: before writing "the amendment replaces the original", read the form's amendment instruction. Form 4
+  General Instruction 9 and Form 3 General Instruction 8 say "Do not repeat lines … not being amended". So an
+  original is superseded only when the amendment carries a counterpart for EVERY one of its lines. And when a filter
+  removes the newest row of a key, decide what the key should hold then. "The next row down" is a claim the newer row
+  had already overruled, so pair the pre-`DISTINCT ON` exclusion with a winner-level drop for keys it would expose.
+- Planner half: a correlated `NOT EXISTS` used as a shared fragment can be pulled up into an anti-join over the whole
+  relation. Here it evaluated supersession for every Form 3/4 on file on each refresh (MSFT 0.29s → 1.55s). `OFFSET 0`
+  keeps it a per-row subplan. Time a shared fragment on both the single and the batch path; the two plans differ.
+- Enforced in: `app/services/ownership_observations.py::INSIDER_SUPERSEDED_BY_AMENDMENT_FILTER` and
+  `_INSIDER_SUPERSEDED_KEY_DROP`; `tests/test_3227_amendment_restatement.py`; `scripts/ab_3227_amendment_restatement.py`.

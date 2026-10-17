@@ -439,6 +439,210 @@ INSIDER_WINNER_ORDER_TAIL: Final[LiteralString] = """
                         source_document_id ASC
 """
 
+# #3227 — an observation from an original Form 3/4 is NOT a candidate once a later amendment
+# provably restates every one of its lines. ``AND``-fragment for a ``WHERE`` over an UNALIASED
+# ``FROM ownership_insiders_observations``; it filters candidates BEFORE ``DISTINCT ON``, so on a key
+# the amendment also reports the amendment's row wins. A key the amendment moved its lines OFF is
+# the refreshers' ``_INSIDER_SUPERSEDED_KEY_DROP`` below.
+#
+# Why. A filing's ``_current`` keys are its D/I (XML) or its relationship flag (DERA ``:NDT:`` /
+# ``:NDH:``). When an amendment moves a line to another key — RWT ``0001104659-26-109010``
+# restates its original's one line (P 100,000 → 679,283) as ``D`` where the original said ``I``
+# "by Trust" — the original's row and the amendment's row are both newest on their own key and the
+# rollup SUMs them (#905): 1,358,566 rendered for a 679,283 holding. Same-key pairs were already
+# right (``filed_at DESC`` lets the amendment win).
+#
+# Source rule. Form 4 General Instruction 9, and Form 3 General Instruction 8 word for word:
+# an amendment that adds lines provides "each line being added"; one that amends lines provides
+# "the complete line or lines being amended, as amended"; and "Do not repeat lines of transaction
+# information that were disclosed in the original Form and are not being amended." So an
+# amendment is PARTIAL by rule and does NOT supersede its original wholesale. A line it does carry
+# is that line as amended; so when it carries a counterpart for EVERY original line, the original
+# has no line left standing. But a line it carries may equally be an ADDED line (9(a) / 8(a)),
+# which stands beside the original rather than replacing it, and the table does not say which.
+# Line correspondence has no published key, so it is fixed BY CONSTRUCTION: the same document
+# position (row number, Table I/II) carrying the same holding or transaction — security title,
+# and for a Form 4 the transaction date, code and transacted shares; for a Form 3 the shares. A
+# correction of D/I, nature, price or post-transaction balance keeps that identity; an added
+# line is another transaction and does not (Codex ckpt-2: equal line COUNTS alone cannot tell an
+# addition from a correction). Any other shape refuses: a corrected amount, code or date, and
+# an amendment carrying fewer or more lines.
+# Form 5 is out of scope: its amendment instruction is not cited here.
+#
+# The link amendment → original is the filing's own ``<dateOfOriginalSubmission>``
+# (``insider_filings.date_of_original_submission``) naming the original's SEC filing date, the
+# same issuer, the same ``period_of_report`` and at least one shared reporting owner. The date
+# names no accession, so when the owner filed another candidate base form for that period the
+# link is ambiguous and refuses (Codex ckpt-2) — searched by issuer as well as instrument, since
+# share-class siblings can carry different bookkeeping ``instrument_id`` values. The link itself
+# stays on ``instrument_id`` (indexed); a sibling pair it misses refuses, which is today's
+# behaviour — 1 of 7,961 issuer-matched amendment links on 2026-10-17 (census query on the
+# #3227 slice close-out comment). And the
+# outer row's holder must have a live observation from the amendment on this instrument, so the
+# exclusion can only hand a holder from the original to its restatement, never leave it empty.
+#
+# The date is compared in a window, not for equality: no SEC filing date is stored, and
+# ``sec_filing_manifest.filed_at`` is a date on most Form 3/4 rows but an acceptance time on some
+# (42,590 of 1,316,617 carry a time of day, 2026-10-17; re-derive with ``SELECT count(*), count(*)
+# FILTER (WHERE (filed_at AT TIME ZONE 'UTC')::time <> '00:00') FROM sec_filing_manifest WHERE form
+# IN ('3','4','3/A','4/A')``). An acceptance after 17:30 ET is dated
+# the next business day, so the link accepts ``dateOfOriginalSubmission`` from the original's ET
+# date to 3 days later (a Friday-evening acceptance dated Monday), and the ambiguity search
+# mirrors that window so it sees every candidate the link could take (Codex ckpt-2).
+#
+# ⚠ Reach is the accessions both of whose XML we parsed (``insider_filings`` + the line tables);
+# a DERA-only original or amendment never matches, so it keeps today's behaviour. An amendment
+# of an amendment is out of scope (``document_type`` must be the base form + ``/A``).
+#
+# ⚠ ``OFFSET 0`` is load-bearing: it stops the planner pulling the ``NOT EXISTS`` up into an
+# anti-join, which evaluated supersession for every Form 3/4 on file on EVERY refresh (MSFT
+# 0.29s → 1.55s). Kept as a correlated subplan it is index lookups on the row's own accession.
+#
+# ⚠ THREE readers share this, like ``INSIDER_WINNER_ORDER_TAIL`` (#3232): both ``_current``
+# refreshers and ``ownership_history._insiders_history``. The refreshers also apply
+# ``_INSIDER_SUPERSEDED_KEY_DROP`` below. Re-derive the population with
+#   PYTHONPATH=. uv run python -m scripts.ab_3227_amendment_restatement
+INSIDER_SUPERSEDED_BY_AMENDMENT_FILTER: Final[LiteralString] = """
+                  AND NOT EXISTS (
+                      SELECT 1
+                        FROM insider_filings o
+                        JOIN sec_filing_manifest om ON om.accession_number = o.accession_number
+                       WHERE o.accession_number = ownership_insiders_observations.source_accession
+                         AND o.document_type IN ('3', '4')
+                         AND NOT o.is_tombstone
+                         AND EXISTS (
+                             SELECT 1
+                               FROM insider_filings a
+                              WHERE a.instrument_id     = o.instrument_id
+                                AND a.period_of_report  = o.period_of_report
+                                AND a.document_type     = o.document_type || '/A'
+                                AND a.date_of_original_submission
+                                    BETWEEN (om.filed_at AT TIME ZONE 'America/New_York')::date
+                                        AND (om.filed_at AT TIME ZONE 'America/New_York')::date + 3
+                                AND NOT a.is_tombstone
+                                AND EXISTS (
+                                    SELECT 1
+                                      FROM insider_filers fa
+                                      JOIN insider_filers fo ON fo.filer_cik = fa.filer_cik
+                                     WHERE fa.accession_number = a.accession_number
+                                       AND fo.accession_number = o.accession_number
+                                )
+                                AND NOT EXISTS (
+                                    SELECT 1
+                                      FROM insider_filings o2
+                                      JOIN sec_filing_manifest om2 ON om2.accession_number = o2.accession_number
+                                      JOIN insider_filers f2 ON f2.accession_number = o2.accession_number
+                                      JOIN insider_filers fa2
+                                        ON fa2.accession_number = a.accession_number
+                                       AND fa2.filer_cik = f2.filer_cik
+                                     WHERE (o2.issuer_cik = o.issuer_cik OR o2.instrument_id = o.instrument_id)
+                                       AND o2.period_of_report = o.period_of_report
+                                       AND o2.document_type    = o.document_type
+                                       AND o2.accession_number <> o.accession_number
+                                       AND (om2.filed_at AT TIME ZONE 'America/New_York')::date
+                                           BETWEEN a.date_of_original_submission - 3 AND a.date_of_original_submission
+                                )
+                                AND EXISTS (
+                                    SELECT 1
+                                      FROM ownership_insiders_observations ao
+                                     WHERE ao.instrument_id       = ownership_insiders_observations.instrument_id
+                                       AND ao.holder_identity_key = ownership_insiders_observations.holder_identity_key
+                                       AND ao.source_accession    = a.accession_number
+                                       AND ao.known_to IS NULL
+                                )
+                                AND CASE WHEN o.document_type = '3' THEN
+                                        (SELECT count(*) FROM insider_initial_holdings h
+                                          WHERE h.accession_number = o.accession_number) > 0
+                                    AND (SELECT count(*) FROM insider_initial_holdings h
+                                          WHERE h.accession_number = o.accession_number)
+                                      = (SELECT count(*) FROM insider_initial_holdings h
+                                          WHERE h.accession_number = a.accession_number)
+                                    AND NOT EXISTS (
+                                        SELECT 1 FROM insider_initial_holdings h
+                                         WHERE h.accession_number = o.accession_number
+                                           AND NOT EXISTS (
+                                               SELECT 1 FROM insider_initial_holdings g
+                                                WHERE g.accession_number = a.accession_number
+                                                  AND g.row_num        = h.row_num
+                                                  AND g.is_derivative  = h.is_derivative
+                                                  AND g.security_title IS NOT DISTINCT FROM h.security_title
+                                                  AND g.shares         IS NOT DISTINCT FROM h.shares
+                                           )
+                                    )
+                                ELSE
+                                        (SELECT count(*) FROM insider_transactions t
+                                          WHERE t.accession_number = o.accession_number) > 0
+                                    AND (SELECT count(*) FROM insider_transactions t
+                                          WHERE t.accession_number = o.accession_number)
+                                      = (SELECT count(*) FROM insider_transactions t
+                                          WHERE t.accession_number = a.accession_number)
+                                    AND NOT EXISTS (
+                                        SELECT 1 FROM insider_transactions t
+                                         WHERE t.accession_number = o.accession_number
+                                           AND NOT EXISTS (
+                                               SELECT 1 FROM insider_transactions u
+                                                WHERE u.accession_number = a.accession_number
+                                                  AND u.txn_row_num    = t.txn_row_num
+                                                  AND u.is_derivative  = t.is_derivative
+                                                  AND u.security_title IS NOT DISTINCT FROM t.security_title
+                                                  AND u.txn_date       IS NOT DISTINCT FROM t.txn_date
+                                                  AND u.txn_code       IS NOT DISTINCT FROM t.txn_code
+                                                  AND u.shares         IS NOT DISTINCT FROM t.shares
+                                           )
+                                    )
+                                END
+                             OFFSET 0
+                         )
+                      OFFSET 0
+                  )
+"""
+
+# #3227 — companion to ``INSIDER_SUPERSEDED_BY_AMENDMENT_FILTER`` for the two ``_current``
+# refreshers: drop a winner that won only because a superseded observation on its key was
+# excluded. ``AND``-fragment appended after ``_INSIDER_DUAL_PIPELINE_DECOLLISION`` (winner alias
+# ``w``).
+#
+# Why. Excluding the original before ``DISTINCT ON`` hands a key the amendment also reports to the
+# amendment, which is what same-key pairs need (an amendment filed the same day as its original
+# used to lose the accession-order tie). But on a key the amendment moved its lines OFF, the key
+# fell back to an older filing's value that the original had already superseded. RWT's
+# ``indirect`` went to April's 579,283 beside the 4/A's ``direct`` 679,283, the same holding
+# 100,000 shares later; TE's ``beneficial`` (a DERA
+# relationship key, which a 4/A not yet in the dataset cannot refill) went to a stale 48,877,960.
+# The original was the newest word on that key, and its every line now stands on other keys as
+# amended; nothing newer re-establishes the old value, so the key goes.
+#
+# "Outranked" mirrors the winner ORDER BY for the two sources a superseded row can carry:
+# ``form4`` before ``form3``, then ``period_end``, then ``filed_at``. Strictly: an amendment
+# that ties its original on both dates stays. And the superseded row must have been FILED after
+# the winner: a winner filed later is newer evidence, and that is what the amendment itself is.
+# It guards an amendment row that ranks below its own original on one key — a DERA ``:NDT:``
+# ``period_end`` is the line's transaction date, so the two pipelines' dates can differ. It
+# changed no key on the 2026-10-17 population; it is there so the rule cannot drop a restatement.
+#
+# The clause does NOT re-run the filter, and needs not: ``w`` is the top candidate of its key
+# among the live rows the filter kept, so a live ``form3``/``form4`` row of that key that outranks
+# it can only be one the filter excluded. (Re-running it per winner took the A/B past 5× its
+# runtime.) A row
+# with a NULL ``period_end`` or ``filed_at`` compares NULL and never drops a key.
+_INSIDER_SUPERSEDED_KEY_DROP: Final[LiteralString] = """
+            AND NOT EXISTS (
+                SELECT 1
+                  FROM ownership_insiders_observations s
+                 WHERE s.instrument_id       = w.instrument_id
+                   AND s.holder_identity_key = w.holder_identity_key
+                   AND s.ownership_nature    = w.ownership_nature
+                   AND s.known_to IS NULL
+                   AND s.source IN ('form3', 'form4')
+                   AND (
+                       (CASE s.source WHEN 'form4' THEN 1 ELSE 2 END)
+                           < (CASE w.source WHEN 'form4' THEN 1 WHEN 'form3' THEN 2 ELSE 10 END)
+                       OR (s.source = w.source AND (s.period_end, s.filed_at) > (w.period_end, w.filed_at))
+                   )
+                   AND s.filed_at > w.filed_at
+            )
+"""
+
 # #3227 item 3a — a winning ``:NDH:`` (holdings) line is replaced by the SUM of its
 # accession's Table I lines for that owner, when those lines are provably distinct holdings of
 # ONE class. ``LEFT JOIN LATERAL`` fragment; the caller aliases the winner row ``w`` (exposing
@@ -614,6 +818,7 @@ def refresh_insiders_current(
                         source_url, filed_at, period_start, period_end, shares
                     FROM ownership_insiders_observations
                     WHERE instrument_id = %(iid)s AND known_to IS NULL
+                    {INSIDER_SUPERSEDED_BY_AMENDMENT_FILTER}
                     ORDER BY
                         holder_identity_key,
                         ownership_nature,
@@ -640,6 +845,7 @@ def refresh_insiders_current(
                   FROM winners w
                 {INSIDER_HOLDING_LINE_SUM_LATERAL}
                 {_INSIDER_DUAL_PIPELINE_DECOLLISION}
+                {_INSIDER_SUPERSEDED_KEY_DROP}
             ) AS src
             ON tgt.instrument_id = %(iid)s
                AND tgt.holder_identity_key = src.holder_identity_key
@@ -2341,6 +2547,7 @@ def refresh_insiders_current_batch(
                         source_url, filed_at, period_start, period_end, shares
                     FROM ownership_insiders_observations
                     WHERE instrument_id = ANY(%(ids)s::bigint[]) AND known_to IS NULL
+                    {INSIDER_SUPERSEDED_BY_AMENDMENT_FILTER}
                     ORDER BY
                         instrument_id,
                         holder_identity_key,
@@ -2368,6 +2575,7 @@ def refresh_insiders_current_batch(
                   FROM winners w
                 {INSIDER_HOLDING_LINE_SUM_LATERAL}
                 {_INSIDER_DUAL_PIPELINE_DECOLLISION}
+                {_INSIDER_SUPERSEDED_KEY_DROP}
             ) AS src
             ON tgt.instrument_id = src.instrument_id
                AND tgt.holder_identity_key = src.holder_identity_key
