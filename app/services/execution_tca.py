@@ -50,9 +50,10 @@ Descriptive only; nothing here enters a decision.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections import Counter, defaultdict
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any, Final, Literal
 
@@ -62,6 +63,7 @@ from psycopg.types.json import Jsonb
 
 from app.providers.broker import BrokerPosition, BrokerProvider, BrokerWhatIfCostResponse, BrokerWhatIfOrder
 from app.providers.market_data import Quote
+from app.services.cost_model import BANDS, PriceBand, band_for
 from app.services.strategy_paper_executor import _age_ok, _component_amount
 from app.services.strategy_position_manager import ExitEvidence
 
@@ -483,6 +485,8 @@ class ExitTca:
     symbol: str | None
     closed_at: datetime
     fill: Decimal | None
+    #: The position's single open fill, which keys its cost band (``cost_model``: fixed for the life of a position).
+    entry_fill: Decimal | None
     kind: ExitKind | None
     #: The engine's exit order; None for a broker-side close.
     order_id: int | None
@@ -507,6 +511,7 @@ class ExitTca:
 _EXITS_SQL: Final = """
     SELECT ow.strategy_trade_id, ow.broker_position_id, t.instrument_id, i.symbol,
            cl.n_closes, cl.fill, cl.closed_at, cl.stop_level, cl.take_level,
+           CASE WHEN op.n_opens = 1 THEN op.entry_fill END AS entry_fill,
            ex.order_id, ex.created_at,
            a.outcome, a.received_at, a.quoted_at, a.bid, a.ask,
            w.outcome AS what_if_outcome, w.cost AS what_if_cost, w.ticket_amount,
@@ -532,6 +537,12 @@ _EXITS_SQL: Final = """
              WHERE te.environment = COALESCE(en.broker_environment, 'demo') AND te.event_kind = 'close'
                AND te.position_id = ow.broker_position_id
       ) cl
+      CROSS JOIN LATERAL (
+            SELECT count(*) AS n_opens, min(te.price) AS entry_fill
+              FROM trade_events te
+             WHERE te.environment = COALESCE(en.broker_environment, 'demo') AND te.event_kind = 'open'
+               AND te.position_id = ow.broker_position_id
+      ) op
       LEFT JOIN LATERAL (
             -- The latest close the strategy sent that the broker did not refuse.
             SELECT o.order_id, o.created_at
@@ -642,6 +653,7 @@ def exit_tca(row: dict[str, Any]) -> ExitTca:
         symbol=row["symbol"],
         closed_at=row["closed_at"],
         fill=fill,
+        entry_fill=row["entry_fill"],
         kind=kind,
         order_id=None if row["order_id"] is None else int(row["order_id"]),
         submitted_at=row["created_at"],
@@ -668,11 +680,86 @@ def load_exit_tca(conn: Conn, *, since: date) -> list[ExitTca]:
     return [exit_tca(r) for r in rows]
 
 
+BandSide = Literal["entry", "exit"]
+
+
+@dataclass(frozen=True)
+class BandRow:
+    """One week, side and cost band of measured fills, beside what ``cost_model`` charges that band."""
+
+    #: Monday of the fill's ISO week (UTC).
+    week: date
+    side: BandSide
+    #: The band of the position's entry fill; None when that fill is unknown.
+    band: PriceBand | None
+    fills: int
+    #: Per-side cost against the arrival mid (``execution``), a fraction, comparable with ``model_half_spread``.
+    executions: tuple[Decimal, ...]
+    #: The broker's what-if cost rate, a fraction, comparable with ``model_spread`` (#2598: the what-if spread
+    #: matched the quoted spread at a median 0.995x).
+    what_ifs: tuple[Decimal, ...]
+
+    @property
+    def model_half_spread(self) -> Decimal | None:
+        """``cost_model``'s per-side charge for the band, as a fraction (``PriceBand.half_spread``)."""
+        return None if self.band is None else self.band.half_spread
+
+    @property
+    def model_spread(self) -> Decimal | None:
+        """The band's full p75 spread as a fraction: both sides' charge, from the same fraction property."""
+        return None if self.band is None else 2 * self.band.half_spread
+
+
+def _week(at: datetime) -> date:
+    if at.tzinfo is None:
+        # astimezone would read a naive stamp as local time. The loaders read TIMESTAMPTZ, so they never send one.
+        raise ValueError("a fill time must be timezone-aware")
+    day = at.astimezone(UTC).date()
+    return day - timedelta(days=day.weekday())
+
+
+def band_rows(entries: Sequence[EntryTca], exits: Sequence[ExitTca]) -> list[BandRow]:
+    """Filled entries and engine exits grouped by fill week, side and the cost band of the position's entry fill.
+    Stop and target closes are left out: they are costed against their level, not a mid, so they have no figure
+    comparable with a spread."""
+    fills: Counter[tuple[date, BandSide, PriceBand | None]] = Counter()
+    executions: dict[tuple[date, BandSide, PriceBand | None], list[Decimal]] = defaultdict(list)
+    what_ifs: dict[tuple[date, BandSide, PriceBand | None], list[Decimal]] = defaultdict(list)
+
+    def add(
+        at: datetime, side: BandSide, keyed_on: Decimal | None, execution: Decimal | None, what_if: Decimal | None
+    ) -> None:
+        key = (_week(at), side, None if keyed_on is None else band_for(keyed_on))
+        fills[key] += 1
+        if execution is not None:
+            executions[key].append(execution)
+        if what_if is not None:
+            what_ifs[key].append(what_if)
+
+    for e in entries:
+        if e.fill is not None and e.filled_at is not None:
+            add(e.filled_at, "entry", e.fill, None if e.costs is None else e.costs.execution, e.what_if_cost)
+    for x in exits:
+        if x.kind == "engine" and x.fill is not None:
+            add(x.closed_at, "exit", x.entry_fill, x.execution, x.what_if_cost)
+
+    def rank(key: tuple[date, BandSide, PriceBand | None]) -> tuple[date, BandSide, int]:
+        week, side, band = key
+        return week, side, len(BANDS) if band is None else BANDS.index(band)
+
+    return [
+        BandRow(key[0], key[1], key[2], fills[key], tuple(executions[key]), tuple(what_ifs[key]))
+        for key in sorted(fills, key=rank)
+    ]
+
+
 __all__ = [
     "ARRIVAL_MAX_AGE_SECONDS",
     "ArrivalFacts",
     "ArrivalOutcome",
     "ArrivalQuote",
+    "BandRow",
+    "BandSide",
     "CloseWhatIfOutcome",
     "EntryCosts",
     "EntryTca",
@@ -680,6 +767,7 @@ __all__ = [
     "ExitKind",
     "ExitTca",
     "GapUnmeasured",
+    "band_rows",
     "classify_exit",
     "close_cost",
     "entry_costs",
