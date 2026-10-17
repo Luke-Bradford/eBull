@@ -12935,3 +12935,15 @@ neighbouring container and match it.**
   only genuine write failures, and the reader can tell a bad input from a lost write.
 - Enforced in: `app/services/execution_tca.py::record_arrival_quote`; sql/500's outcome CHECK;
   `tests/test_execution_tca_db.py::test_a_quote_with_a_non_positive_bid_is_recorded_unusable_and_the_order_still_submits`.
+
+### A join on `orders.broker_environment` drops every order written before #3614 recorded it (#3611)
+
+- Failure (#3611 slice 2, dev-DB run before push): the exit readout matched close events with
+  `trade_events.environment = orders.broker_environment`. Strategy orders written before #3614 carry a NULL
+  environment, so equality was never true and the only engine exit on the dev DB (SPY.RTH, 2026-09-23) vanished from a
+  readout that reported "exits: 0" rather than an error.
+- Prevention: a join or filter on `orders.broker_environment` states what a NULL means. For strategy orders it means
+  demo: the strategy writers were demo-only before #3614 started recording the column, and every trade event of a
+  NULL-environment strategy order's position is `demo` on the dev DB (8 of 8, 2026-10-17). Run a new reader on the
+  dev DB and compare its row count with the population it should cover before trusting a zero.
+- Enforced in: `app/services/execution_tca.py::_EXITS_SQL` and `_ENTRIES_SQL` (`COALESCE(..., 'demo')`).

@@ -9,7 +9,7 @@ intents are persisted; unchanged bars and polling heartbeats write no rows.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -65,6 +65,10 @@ _ADVISORY_HASH_SEED = 0
 #: ⚠ Spelled out again in ``sql/462``'s material-identity index predicate, which cannot
 #: import it: renaming this means a migration rebuilding that index.
 EDIT_NEVER_SUBMITTED: Final = "edit_never_submitted"
+
+#: Records evidence for an exit order (its id) about to close a broker position, before the close is submitted (#3611;
+#: built by ``execution_tca.exit_evidence``). Defined here, the caller's side, so this module imports no readout code.
+ExitEvidence = Callable[[int, BrokerPosition], None]
 
 
 class StrategyPositionManagerError(StrategyControlError):
@@ -1141,6 +1145,8 @@ def _submit_close(
         "rerank_exit",
     ],
     core_rebalance_intent_id: int | None = None,
+    exit_evidence: ExitEvidence | None = None,
+    position: BrokerPosition | None = None,
 ) -> PositionManagerResult:
     request_id = uuid4()
     with conn.transaction():
@@ -1174,6 +1180,17 @@ def _submit_close(
             "UPDATE strategy_trades SET status='closing', updated_at=now() WHERE strategy_trade_id=%s",
             (owned.strategy_trade_id,),
         )
+    # #3611: evidence only, after the order exists and before the submitting marker, so a crash inside it leaves a
+    # close that provably never reached the broker. Its own failure must never stop the close.
+    if exit_evidence is not None and position is not None:
+        idle = conn.info.transaction_status == TransactionStatus.IDLE
+        try:
+            exit_evidence(order_id, position)
+        except Exception:
+            logger.warning("exit evidence for order %s not recorded", order_id, exc_info=True)
+        # A hook that left its own transaction open must not carry it into the marker's commit.
+        if idle and conn.info.transaction_status != TransactionStatus.IDLE:
+            conn.rollback()
     # ⚠ Its own committed transaction, deliberately not folded into the intent
     # above: folding them would make the marker commit WITH the intent, so every
     # close would read as "may have reached the broker" and the separation would
@@ -1634,8 +1651,13 @@ def manage_owned_position(
     now: datetime | None = None,
     core_rebalance_intent_id: int | None = None,
     expected_ownership_id: int | None = None,
+    exit_evidence: ExitEvidence | None = None,
 ) -> PositionManagerResult:
     """Verify or de-risk one exact owned position.
+
+    ``exit_evidence`` is called with the exit order's id and the observed broker position before an explicit
+    ``close_reason`` or age-out close is submitted (#3611, ``execution_tca.exit_evidence``). Best-effort: it cannot
+    stop the close.
 
     Kill switches intentionally do not block this path: they block new risk,
     while fixed-stop repair, ratcheting, timeout and explicit closes reduce
@@ -1793,6 +1815,8 @@ def manage_owned_position(
                 owned=owned,
                 trigger_code=close_reason or "timeout",
                 core_rebalance_intent_id=core_rebalance_intent_id,
+                exit_evidence=exit_evidence,
+                position=position,
             )
 
         # ⚠⚠ THE CORE ARM USED TO RETURN "exempt" HERE.  Reversed by operator
@@ -1939,6 +1963,7 @@ def manage_owned_position(
 
 
 __all__ = [
+    "ExitEvidence",
     "PositionManagerResult",
     "RatchetBar",
     "StrategyPositionManagerError",
