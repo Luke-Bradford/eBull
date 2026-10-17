@@ -13023,3 +13023,17 @@ neighbouring container and match it.**
 - Enforced in: `app/services/etf_total_return_reader.py::PRICE_RETURN_POOLS` (comment); `tests/test_etf_total_return_reader.py::test_dbc_distributes_so_it_is_not_a_pool_and_its_2022_months_are_flagged`
   and `::test_the_pool_list_changes_only_with_its_distribution_evidence` (pins the list, because the test DB holds no
   research corpus to measure each member).
+
+### A vendor timestamp field is not an authority until it has been measured against the archived source, across captures (#3714)
+
+- Symptom: `sec_filing_manifest.accepted_at` was taken from the submissions JSON `acceptanceDateTime`, and the skill
+  said "it is UTC". The field is serialised with `Z`, but its value for the same filing moved by ±4/5 h between
+  three captures (08-22, 10-06, 10-17). It was early in some captures and late in others. Our stored values held
+  whichever capture happened to be read, including early values, which are look-ahead for an instant reader.
+- Prevention: before trusting a timestamp field as a knowledge time, compare it with the archived primary document
+  (here `<ACCEPTANCE-DATETIME>` in `.hdr.sgml`) on a sample, and compare **two captures** of the field itself. A
+  field that changes between captures for an immutable event is not an authority. Record the measured error set,
+  not the serialisation format.
+- Enforced in: `scripts/measure_3714_acceptance.py` (`manifest`, `captures`, `cik`, `atom`);
+  `docs/proposals/etl/2026-10-17-3714-sec-acceptance-authority.md`; `docs/data-sources/sec-bulk-archives.md`
+  (gotcha corrected). The sole-writer trigger lands with the implementation.
