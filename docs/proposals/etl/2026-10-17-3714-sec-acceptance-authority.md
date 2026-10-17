@@ -4,10 +4,10 @@ Status: spec rev 4, 2026-10-17. Rung: judgement artefact (Codex ckpt-1), then a 
 
 History:
 - **Rev 1** drew 31 findings. Its `filed_at` half moved to **#3869**, its bundle-clock half to **#3870**.
-- **Rev 3** drew 36 findings, resolved in rev 4 (disposition table at the end).
 - **Rev 2** drew 35 findings. Rev 3 adopts the simpler design Codex proposed there: the header is the sole writer
   of `accepted_at`, and it carries its own evidence. That removes the two-authority merge, the quarantine race and
   the old-writer deploy barrier.
+- **Rev 3** drew 36 findings, resolved in rev 4 (disposition table at the end).
 
 ## Scope
 

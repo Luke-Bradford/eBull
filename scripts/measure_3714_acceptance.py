@@ -5,9 +5,10 @@ Read-only. Reference = ``<ACCEPTANCE-DATETIME>`` in ``<accession>.hdr.sgml``: 14
 Eastern local time. Offsets are reported in SECONDS as ``surface - header``; negative = the surface claims an
 EARLIER instant (look-ahead).
 
-Every header fetch is classified, never collapsed to "absent": ``found`` (200, an SGML header carrying the tag),
-``absent`` (200, a valid header for that accession without the tag), ``invalid`` (200 but not that accession's
-header), or ``http_<status>``.
+Every header fetch is classified, never collapsed to "absent": ``found`` (one valid tag in one header block for
+exactly that accession), ``absent`` (a valid block without the tag), ``invalid_value`` (the tag's value is not 14
+digits, not a calendar time, or a DST gap/fold wall time), ``bad_response`` (a 200 that is not exactly one header
+block for that accession, or carries a duplicated tag), ``http_<status>`` or ``transport_error``.
 
 Subcommands (accession-level rows go to ``--out`` as JSON lines; a counter goes to stdout):
 
@@ -44,25 +45,55 @@ import psycopg
 from app.config import Settings
 
 NEW_YORK: Final = ZoneInfo("America/New_York")
-_HEADER_TAG: Final = re.compile(r"<ACCEPTANCE-DATETIME>(\d{14})")
+_TAG_LINE: Final = re.compile(r"^<ACCEPTANCE-DATETIME>(.*)$", re.M)
+_ACCESSION_LINE: Final = re.compile(r"^<ACCESSION-NUMBER>(.*)$", re.M)
+_DIGITS14: Final = re.compile(r"[0-9]{14}")
 #: This script's own pacing between SEC requests. It bounds only this loop; it does not coordinate with the jobs
 #: process, so run it off the manifest worker's busy windows.
 _PAUSE_S: Final = 0.15
 
 
+def eastern_to_utc(raw: str) -> datetime | None:
+    """14-digit Eastern wall clock -> aware UTC, or None for a non-calendar value or a DST gap / fold wall time."""
+    if not _DIGITS14.fullmatch(raw):
+        return None
+    try:
+        wall = datetime.strptime(raw, "%Y%m%d%H%M%S")
+    except ValueError:
+        return None
+    first, second = wall.replace(tzinfo=NEW_YORK, fold=0), wall.replace(tzinfo=NEW_YORK, fold=1)
+    if first.utcoffset() != second.utcoffset():
+        return None  # fall-back fold: two instants share this wall time
+    utc = first.astimezone(UTC)
+    if utc.astimezone(NEW_YORK).replace(tzinfo=None) != wall:
+        return None  # spring-forward gap: this wall time never happened
+    return utc
+
+
 def header_acceptance(client: httpx.Client, cik: int, accession: str) -> tuple[str, datetime | None]:
+    """Classify one header fetch: found / absent / invalid_value / bad_response / http_<status> / transport_error."""
     bare = accession.replace("-", "")
-    response = client.get(f"https://www.sec.gov/Archives/edgar/data/{cik}/{bare}/{accession}.hdr.sgml")
-    time.sleep(_PAUSE_S)
+    try:
+        response = client.get(f"https://www.sec.gov/Archives/edgar/data/{cik}/{bare}/{accession}.hdr.sgml")
+    except httpx.HTTPError:
+        return "transport_error", None
+    finally:
+        time.sleep(_PAUSE_S)
     if response.status_code != 200:
         return f"http_{response.status_code}", None
     text = response.text
-    if not text.startswith("<SEC-HEADER>") or f"<ACCESSION-NUMBER>{accession}" not in text:
-        return "invalid", None
-    match = _HEADER_TAG.search(text)
-    if match is None:
+    if not text.startswith("<SEC-HEADER>") or text.count("</SEC-HEADER>") != 1:
+        return "bad_response", None
+    block = text[: text.index("</SEC-HEADER>")]
+    if [m.strip() for m in _ACCESSION_LINE.findall(block)] != [accession]:
+        return "bad_response", None
+    tags = _TAG_LINE.findall(block)
+    if len(tags) > 1:
+        return "bad_response", None
+    if not tags:
         return "absent", None
-    return "found", datetime.strptime(match.group(1), "%Y%m%d%H%M%S").replace(tzinfo=NEW_YORK)
+    utc = eastern_to_utc(tags[0].strip())
+    return ("found", utc) if utc is not None else ("invalid_value", None)
 
 
 def _seconds(a: datetime, b: datetime) -> int:
@@ -80,13 +111,12 @@ def _write(out: Path | None, rows: list[dict[str, Any]]) -> None:
 
 def manifest(settings: Settings, n: int, seed: float, since: str | None, out: Path | None) -> None:
     with psycopg.connect(settings.database_url) as conn:
-        conn.execute("SELECT setseed(%s)", (seed,))
         rows = conn.execute(
             """
             SELECT accession_number, cik, source, accepted_at, created_at FROM sec_filing_manifest
-            WHERE accepted_at IS NOT NULL AND source LIKE 'sec\\_%%'
+            WHERE accepted_at IS NOT NULL AND left(source, 4) = 'sec_'
               AND (%(since)s::timestamptz IS NULL OR created_at > %(since)s::timestamptz)
-            ORDER BY accession_number LIMIT 1000000
+            ORDER BY accession_number
             """,
             {"since": since},
         ).fetchall()
@@ -166,6 +196,8 @@ def cik(settings: Settings, cik_number: int, n: int, out: Path | None) -> None:
     padded = f"{cik_number:010d}"
     with _client(settings) as client:
         recent = client.get(f"https://data.sec.gov/submissions/CIK{padded}.json").json()["filings"]["recent"]
+        if len(recent["accessionNumber"]) != len(recent["acceptanceDateTime"]):
+            raise ValueError(f"CIK{padded}: unequal accessionNumber/acceptanceDateTime arrays")
         total = len(recent["accessionNumber"])
         picks = range(0, total, max(1, total // n))
         counts: collections.Counter[tuple[str, int | None]] = collections.Counter()
