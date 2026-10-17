@@ -75,11 +75,11 @@ SELECT w.source_accession, w.holder_cik,
   FROM w JOIN ownership_insiders_observations o
     ON o.instrument_id = w.instrument_id AND o.holder_identity_key = w.holder_identity_key
    AND o.ownership_nature = w.ownership_nature AND o.source = w.source AND o.period_end = w.period_end
-   AND o.known_to IS NULL AND o.source_document_id LIKE split_part(w.source_document_id, ':', 1) || ':NDH:%%'
+   AND o.known_to IS NULL AND o.source_document_id LIKE split_part(w.source_document_id, ':', 1) || ':NDH:%'
  WHERE NOT EXISTS (
        SELECT 1 FROM ownership_insiders_observations x
         WHERE x.instrument_id = w.instrument_id AND x.known_to IS NULL
-          AND x.source_document_id LIKE split_part(w.source_document_id, ':', 1) || ':NDH:%%'
+          AND x.source_document_id LIKE split_part(w.source_document_id, ':', 1) || ':NDH:%'
           AND x.holder_identity_key <> w.holder_identity_key)
  GROUP BY w.instrument_id, w.holder_identity_key, w.ownership_nature, w.source,
           w.source_accession, w.holder_cik
