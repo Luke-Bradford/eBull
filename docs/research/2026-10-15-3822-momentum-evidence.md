@@ -244,6 +244,49 @@ and the book out of sample. `momentum_tournament.py` runs each one through `mome
 stretches of lagging. The demo book is scored live against SPY and against a random-30 control, and the stop rule
 above applies.
 
+## Theme cap: tested, not adopted (added 2026-10-17)
+
+The FF-12 cap could not target the 2026 theme (#3839), so #3842 grouped names by what they did instead.
+`momentum_theme_cap.py` states its method and decision rule in its docstring:
+- **Returns:** daily, over the 126 sessions ending at the formation month's last bar.
+- **Grouping:** Pearson correlation on each pair's common sessions, Mantegna's distance √(2(1−ρ)), average linkage,
+  cut at K = 12 groups to match the FF-12 count.
+- **Cap:** adapted from the skill's 2× rule. A group's benchmark weight is its name share of the universe, and the
+  cap is floored at 1 name. Two things differ from the sector cap besides the grouping: it used market-cap share,
+  and it had no floor.
+- **Adoption rule:** lower max drawdown and an annual return no lower than the book's, in both windows. The
+  2024-10..2026-08 stretch is out of sample for the book, but not for this cap, which was designed after that
+  stretch's crash.
+
+Reproduce (dev DB, 2026-10-17):
+`PYTHONPATH=. uv run python -W ignore::RuntimeWarning scripts/research_3822/momentum_theme_cap.py`
+
+| 0.1% per side | per year | max DD | worst month |
+|---|---|---|---|
+| Book, 2014-11..2024-09 (Intrader) | +16.97% | 22.0% | −15.3% |
+| Theme cap K=12, same window | +15.11% | 27.4% | −15.3% |
+| Book, 2024-10..2026-08 (PWB, survivor-only) | +35.02% | 21.7% | −21.7% |
+| Theme cap K=12, same window | +36.17% | 21.7% | −21.7% |
+
+- **Decision: not adopted.** The backtest fails both conditions: the cap costs 1.9 points a year and adds 5.4 points
+  of drawdown.
+- **Why it misses the theme.** In the 2026-06 formation one group holds 28 of the book's 30 names: AXTI, SNDK, TSEM,
+  CIEN, WDC, LITE, TER, MU, STX, GLW, LRCX and others, including some crypto miners. That group is 56% of the
+  universe, so its cap is 33 and never binds. July loses −21.7% either way.
+  - The universe's largest group has a share of at least 50%, and so a cap of at least 30, in 113 of 119 backtest
+    formations and in all 23 out-of-sample ones.
+  - Its count in the book rises under the cap, from 20.1 to 22.6 a formation in the backtest. The cap mostly evicts
+    names from small groups.
+- **K=24** (a sensitivity, not part of the decision): the theme group falls to a 27% share with a cap of 16. That cuts
+  the July 2026 loss to −9.3% and gives +43.3% a year out of sample with an 11.6% drawdown. Over the backtest decade
+  it costs 2.9 points a year and adds 5.0 points of drawdown, so it fails the rule there too. The out-of-sample gain
+  is real for that specification on that stretch, but the stretch contains the crash the cap was designed for, so it
+  does not count as independent evidence.
+- **First run, corrected:** the first run zero-filled missing sessions and counted multi-session moves as daily
+  returns (Codex checkpoint 1). The fix moved the K=12 backtest from 15.16% / 28.0% to 15.11% / 27.4%. The verdict is
+  unchanged.
+- **Shared treatment:** both arms use `momentum_oos.run()` and its 0% cash-out.
+
 ## Live rule
 
 `app/services/momentum_book.py`; the live data is eToro `price_daily` (split-adjusted, no dividends, so price momentum).
