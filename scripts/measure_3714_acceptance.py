@@ -37,63 +37,32 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final
-from zoneinfo import ZoneInfo
 
 import httpx
 import psycopg
 
 from app.config import Settings
+from app.providers.implementations.sec_header import classify_header, header_url
 
-NEW_YORK: Final = ZoneInfo("America/New_York")
-_TAG_LINE: Final = re.compile(r"^<ACCEPTANCE-DATETIME>(.*)$", re.M)
-_ACCESSION_LINE: Final = re.compile(r"^<ACCESSION-NUMBER>(.*)$", re.M)
-_DIGITS14: Final = re.compile(r"[0-9]{14}")
 #: This script's own pacing between SEC requests. It bounds only this loop; it does not coordinate with the jobs
 #: process, so run it off the manifest worker's busy windows.
 _PAUSE_S: Final = 0.15
 
 
-def eastern_to_utc(raw: str) -> datetime | None:
-    """14-digit Eastern wall clock -> aware UTC, or None for a non-calendar value or a DST gap / fold wall time."""
-    if not _DIGITS14.fullmatch(raw):
-        return None
-    try:
-        wall = datetime.strptime(raw, "%Y%m%d%H%M%S")
-    except ValueError:
-        return None
-    first, second = wall.replace(tzinfo=NEW_YORK, fold=0), wall.replace(tzinfo=NEW_YORK, fold=1)
-    if first.utcoffset() != second.utcoffset():
-        return None  # fall-back fold: two instants share this wall time
-    utc = first.astimezone(UTC)
-    if utc.astimezone(NEW_YORK).replace(tzinfo=None) != wall:
-        return None  # spring-forward gap: this wall time never happened
-    return utc
-
-
 def header_acceptance(client: httpx.Client, cik: int, accession: str) -> tuple[str, datetime | None]:
-    """Classify one header fetch: found / absent / invalid_value / bad_response / http_<status> / transport_error."""
-    bare = accession.replace("-", "")
+    """Classify one header fetch with the job's own rule (``sec_header.classify_header``); a non-200 reads
+    ``http_<status>`` here for the sample counters."""
+    url = header_url(str(cik), accession)
     try:
-        response = client.get(f"https://www.sec.gov/Archives/edgar/data/{cik}/{bare}/{accession}.hdr.sgml")
+        response = client.get(url)
     except httpx.HTTPError:
         return "transport_error", None
     finally:
         time.sleep(_PAUSE_S)
-    if response.status_code != 200:
+    check = classify_header(accession, url, response.status_code, response.text)
+    if check.outcome == "http_error":
         return f"http_{response.status_code}", None
-    text = response.text
-    if not text.startswith("<SEC-HEADER>") or text.count("</SEC-HEADER>") != 1:
-        return "bad_response", None
-    block = text[: text.index("</SEC-HEADER>")]
-    if [m.strip() for m in _ACCESSION_LINE.findall(block)] != [accession]:
-        return "bad_response", None
-    tags = _TAG_LINE.findall(block)
-    if len(tags) > 1:
-        return "bad_response", None
-    if not tags:
-        return "absent", None
-    utc = eastern_to_utc(tags[0].strip())
-    return ("found", utc) if utc is not None else ("invalid_value", None)
+    return check.outcome, check.acceptance_utc
 
 
 def _seconds(a: datetime, b: datetime) -> int:

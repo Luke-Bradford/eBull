@@ -238,7 +238,6 @@ def record_manifest_entry(
     subject_id: str,
     instrument_id: int | None,
     filed_at: datetime,
-    accepted_at: datetime | None = None,
     primary_document_url: str | None = None,
     is_amendment: bool = False,
     amends_accession: str | None = None,
@@ -262,7 +261,10 @@ def record_manifest_entry(
     Validates the issuer-vs-instrument cross-check at the call site:
     issuer-scoped rows MUST have ``instrument_id`` set; non-issuer rows
     MUST have ``instrument_id=None``. The DB CHECK constraint catches
-    violations too; raising here gives a clearer error trail."""
+    violations too; raising here gives a clearer error trail.
+
+    ``accepted_at`` is not written here (#3714): its only writer is ``sec_acceptance_refill``, from the EDGAR header,
+    and the table trigger holds the column against any other write."""
     if subject_type == "issuer":
         if instrument_id is None:
             raise ValueError(
@@ -300,12 +302,12 @@ def record_manifest_entry(
             INSERT INTO sec_filing_manifest (
                 accession_number, cik, form, source,
                 subject_type, subject_id, instrument_id,
-                filed_at, accepted_at, primary_document_url,
+                filed_at, primary_document_url,
                 is_amendment, amends_accession, ingest_status
             ) VALUES (
                 %(accession)s, %(cik)s, %(form)s, %(source)s,
                 %(stype)s, %(sid)s, %(iid)s,
-                %(filed_at)s, %(accepted_at)s, %(url)s,
+                %(filed_at)s, %(url)s,
                 %(is_amend)s, %(amends)s, %(ingest_status)s
             )
             -- ``ingest_status`` is applied ONLY on INSERT; the ON CONFLICT
@@ -321,7 +323,6 @@ def record_manifest_entry(
                 subject_id = EXCLUDED.subject_id,
                 instrument_id = EXCLUDED.instrument_id,
                 filed_at = EXCLUDED.filed_at,
-                accepted_at = COALESCE(EXCLUDED.accepted_at, sec_filing_manifest.accepted_at),
                 primary_document_url = COALESCE(
                     EXCLUDED.primary_document_url, sec_filing_manifest.primary_document_url
                 ),
@@ -339,7 +340,6 @@ def record_manifest_entry(
                 "sid": subject_id.strip(),
                 "iid": instrument_id,
                 "filed_at": filed_at,
-                "accepted_at": accepted_at,
                 "url": primary_document_url,
                 "is_amend": is_amendment,
                 "amends": amends_accession,

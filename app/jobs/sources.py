@@ -70,6 +70,7 @@ Lane = Literal[
     "sec_manifest",
     "sec_per_cik",
     "sec_expected_filings",
+    "sec_acceptance",
     "sec_filing_docs",
     "sec_insider_backfill",
     "sec_insider_ingest",
@@ -228,6 +229,10 @@ the rate — it does not.
   ``sec.last_modified.per_cik_poll`` namespace) have no other lane writer.
   Scheduled-only, so NOT added to the ``bootstrap_stages.lane`` CHECK (like
   ``sec_manifest`` / ``db_liveness`` / ``db_retry``).
+* ``sec_acceptance`` — ``sec_acceptance_refill`` only (#3714). A fire holds the lane for its whole header
+  request budget (500 per 10 min), which on ``sec_rate`` would starve the producers. Its only shared write target is
+  ``sec_filing_manifest.accepted_at``, which no other job can write (table trigger). Scheduled-only, so NOT added
+  to the ``bootstrap_stages.lane`` CHECK.
 * ``sec_expected_filings`` — ``expected_filings_poller`` only (#1788). The 15-min
   targeted submissions.json poll for instruments in an expected 10-Q/10-K window.
   Own lane so its high cadence can't lose the JobLock race to the hourly

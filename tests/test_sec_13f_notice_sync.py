@@ -26,7 +26,6 @@ def _row(*, cik: str, form: str, accession: str) -> FilingIndexRow:
         form=form,
         source=None,  # NT maps to None (deliberately out of the manifest set)
         filed_at=datetime(2026, 5, 8, tzinfo=UTC),
-        accepted_at=None,
         primary_document_url=None,
         is_amendment=form.endswith("/A"),
     )

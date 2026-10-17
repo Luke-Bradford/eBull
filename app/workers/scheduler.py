@@ -547,6 +547,8 @@ JOB_TAX_FX_REFRESH = "tax_fx_refresh"
 JOB_TAX_BROKER_EVIDENCE_REFRESH = "tax_broker_evidence_refresh"
 # #3841 slice 2 — point-in-time market cap steps on a measured price basis.
 JOB_MARKET_CAP_PIT_REBUILD = "market_cap_pit_rebuild"
+# #3714 — sole writer of sec_filing_manifest.accepted_at, from the EDGAR header.
+JOB_SEC_ACCEPTANCE_REFILL = "sec_acceptance_refill"
 # #2450 — bounded demo execution/reconciliation/owned-position health loop.
 JOB_STRATEGY_PAPER_CYCLE = "strategy_paper_cycle"
 # #2942 half 2 slice B — ask the broker about recommendation orders stuck at
@@ -2917,6 +2919,21 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         ),
         cadence=Cadence.daily(hour=8, minute=20),
         catch_up_on_boot=True,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_SEC_ACCEPTANCE_REFILL,
+        display_name="SEC acceptance time from the EDGAR header (#3714)",
+        # Own lane: a fire holds it for its whole request budget, which would starve the sec_rate producers.
+        source="sec_acceptance",
+        description=(
+            "Every 10 minutes — fetches up to 500 archived EDGAR submission headers and writes each one's "
+            "<ACCEPTANCE-DATETIME> (Eastern local time) to sec_filing_manifest.accepted_at, with the check stored "
+            "beside it. New priority-form filings first, then the frozen pre-#3714 values, oldest accession first. "
+            "Nothing else can write that column. FAILS when it attempted rows and none got a final answer."
+        ),
+        cadence=Cadence.every_n_minutes(interval=10),
+        catch_up_on_boot=False,
         prerequisite=_bootstrap_complete,
     ),
     ScheduledJob(
@@ -7259,6 +7276,25 @@ def market_cap_pit_rebuild() -> None:
             )
         tracker.row_count = report.steps
         tracker.note = f"build={report.build_id} instruments={report.instruments} steps={report.steps}"
+
+
+def sec_acceptance_refill() -> None:
+    """Write ``accepted_at`` from the EDGAR header (#3714; ``app/services/sec_acceptance_refill.py``)."""
+    from app.providers.implementations.sec_header import fetch_header_acceptance
+    from app.services.sec_acceptance_refill import run_sec_acceptance_refill
+
+    with _tracked_job(JOB_SEC_ACCEPTANCE_REFILL) as tracker:
+        # Autocommit: each row's check and accepted_at commit together in their own transaction.
+        with connect_job(autocommit=True) as conn, SecFilingsProvider(user_agent=settings.sec_user_agent) as provider:
+            report = run_sec_acceptance_refill(
+                conn, lambda cik, accession: fetch_header_acceptance(provider, cik, accession)
+            )
+        tracker.row_count = report.final
+        tracker.note = f"selected={report.selected} results={dict(report.results)}"
+        if report.attempted and not report.final:
+            raise RuntimeError(
+                f"sec_acceptance_refill: no final header answer in {report.attempted} rows: {tracker.note}"
+            )
 
 
 def tax_fx_refresh() -> None:

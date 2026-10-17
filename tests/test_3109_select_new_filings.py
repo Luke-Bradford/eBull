@@ -33,7 +33,6 @@ def _row(accession: str, form: str, source: str | None, day: int) -> FilingIndex
         form=form,
         source=source,  # type: ignore[arg-type]
         filed_at=datetime(2026, 4, day, tzinfo=UTC),
-        accepted_at=None,
         primary_document_url=None,
         is_amendment=False,
     )
