@@ -238,7 +238,8 @@ history reader and the rollup read the observation's `shares`; the A/B diffs all
   2026-06-01 Form 4 outranks the 2026-03-18 Form 3 on the `indirect` key.
   - `mnso_shape` counts 697 live XML `indirect` keys over 506 instruments whose owner filed a
     multi-vehicle Form 3 earlier. That is a candidate population, not a verified loss.
-  - Carry-forward across filings is the next slice. The 8,835 same-form opening matches are
+  - Carry-forward across filings is the next slice. The 8,723 same-form opening matches (7,304
+    same-form only + 1,419 matching both) are
     where its identity evidence starts. They are not yet a key: equal balance plus a normalised
     name can coincide.
 - **Running totals that leave no trace.** A running total passes only if no line opens at

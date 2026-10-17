@@ -40,7 +40,7 @@ per-form sum there counts one block once per fund.
 from __future__ import annotations
 
 import argparse
-from typing import LiteralString
+from typing import Final, LiteralString
 
 import psycopg
 
@@ -50,7 +50,7 @@ from app.config import settings
 # completeness test (condition 2) sees the lines the writers drop.  ``nat`` is the spec's
 # normalised nature: ASCII alphanumerics only, lower case; '' is "blank".  D lines are one
 # series whatever their nature text (the spec's definition of a form).
-_LINES = """
+_LINES: Final[LiteralString] = """
 CREATE TEMP TABLE c_lines AS
 SELECT t.instrument_id, t.accession_number, nullif(btrim(t.filer_cik), '') AS filer_cik,
        t.txn_row_num, t.txn_date, t.txn_code,
@@ -71,7 +71,7 @@ SELECT t.instrument_id, t.accession_number, nullif(btrim(t.filer_cik), '') AS fi
 # Candidates (condition 1): the filer has I lines under more than one normalised nature, blank
 # counted as a nature here so a blank line reaches condition 2 and refuses there.  A null or
 # blank CIK keeps today's grouping and value, so it is excluded and counted separately.
-_CANDIDATES = """
+_CANDIDATES: Final[LiteralString] = """
 CREATE TEMP TABLE c_cand AS
 SELECT instrument_id, accession_number, filer_cik
   FROM c_lines
@@ -82,7 +82,7 @@ HAVING count(DISTINCT nat) > 1
 
 # One row per candidate, every condition evaluated over the filer's WHOLE non-derivative table
 # in the accession (D and I lines), as the spec requires.  A "form" is (D/I, normalised nature).
-_CONDITIONS = """
+_CONDITIONS: Final[LiteralString] = """
 CREATE TEMP TABLE c_eval AS
 WITH x AS (
     SELECT l.*,
@@ -135,7 +135,7 @@ SELECT x0.instrument_id, x0.accession_number, x0.filer_cik,
 # match on another form (an I line of another nature, or a D line) and on no line of its own
 # form is a running total carried across filings.  A unit with no filing time cannot be checked
 # and refuses (``no_time``).
-_HIST = """
+_HIST: Final[LiteralString] = """
 CREATE TEMP TABLE c_hist AS
 SELECT t.instrument_id, nullif(btrim(t.filer_cik), '') AS filer_cik, m.filed_at, t.security_title,
        t.direct_indirect AS di, t.post_transaction_shares AS bal,
@@ -160,7 +160,7 @@ SELECT h.instrument_id, nullif(btrim(h.filer_cik), ''), m.filed_at, h.security_t
    AND (h.instrument_id, nullif(btrim(h.filer_cik), '')) IN (SELECT instrument_id, filer_cik FROM c_cand)
 """
 
-_CROSS_FILING = """
+_CROSS_FILING: Final[LiteralString] = """
 CREATE TEMP TABLE c_xf AS
 WITH firsts AS (
     SELECT DISTINCT ON (l.instrument_id, l.accession_number, l.filer_cik, l.nat)
@@ -185,7 +185,7 @@ SELECT f.*,
  WHERE f.pre <> 0
 """
 
-_VERDICT = """
+_VERDICT: Final[LiteralString] = """
 CASE WHEN NOT complete THEN '2 incomplete'
      WHEN NOT one_title THEN '3 multi_title'
      WHEN NOT one_owner THEN '4 joint_or_owner_mismatch'
@@ -198,7 +198,7 @@ CASE WHEN NOT complete THEN '2 incomplete'
      ELSE 'sums' END
 """
 
-_WINNER = """
+_WINNER: Final[LiteralString] = """
 EXISTS (SELECT 1 FROM ownership_insiders_current oc
          WHERE oc.instrument_id = e.instrument_id
            AND oc.source_accession = e.accession_number

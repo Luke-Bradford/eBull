@@ -13119,5 +13119,10 @@ neighbouring container and match it.**
   form's balance, in the same filing or an earlier one. Any contradiction refuses to today's value. Test the
   discriminator in both directions. Codex constructed reverse-order, NULL-predicate and history-scope counterexamples
   that the first draft passed.
-- Enforced in: `docs/specs/ownership/2026-10-17-3227-form4-vehicle-balance.md`;
-  `scripts/census_3227_form4_vehicle_balance.py`; the build PR will add the helper and its tests.
+- Count consistency (review bot, PR #3878): a spec that quotes a derived count went stale when the census was
+  re-run and split one bucket in two ("8,835 same-form" became 7,304 + 1,419 = 8,723). After every census re-run,
+  re-derive each quoted count by re-adding its components from the new output, and grep the spec for every number
+  that came from the old output.
+- Enforced in: nothing mechanical yet. The rule lives in
+  `docs/specs/ownership/2026-10-17-3227-form4-vehicle-balance.md` and is measured by
+  `scripts/census_3227_form4_vehicle_balance.py`. The helper and tests that enforce it land with the build PR.
