@@ -6,13 +6,16 @@ import pytest
 
 from app.services.finra_short_interest_ingest import is_cqs_suffix_symbol, normalise_symbol
 
+_SUFFIXED = ["TpC", "BCpC", "AUBpA", "CpN", "ABRpD", "XYZr", "XYZw", "XYZpw", "XYZpAw", "XYZrw", "SKYD/WSw"]
 
-@pytest.mark.parametrize("symbol", ["TpC", "BCpC", "AUBpA", "CpN", "ABRpD", "XYZr", "XYZw", "XYZpw"])
+
+@pytest.mark.parametrize("symbol", _SUFFIXED)
 def test_suffix_symbols_are_recognised(symbol: str) -> None:
     assert is_cqs_suffix_symbol(symbol)
 
 
-@pytest.mark.parametrize("symbol", ["TPC", "BCPC", "AAPL", "BRK.A", "BRKA", "ABRPRD", "T"])
+# A whole-symbol casing change must still resolve, not vanish into the filter.
+@pytest.mark.parametrize("symbol", ["TPC", "BCPC", "AAPL", "BRK.A", "BRKA", "ABRPRD", "T", "aapl", "Aapl", "TPCx"])
 def test_common_and_upper_case_symbols_are_not(symbol: str) -> None:
     assert not is_cqs_suffix_symbol(symbol)
 

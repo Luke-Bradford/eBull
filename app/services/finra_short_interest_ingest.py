@@ -49,7 +49,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, Final
 from uuid import UUID
 
 import psycopg
@@ -116,6 +116,12 @@ def normalise_symbol(symbol: str) -> str:
     return _NORMALISE_RE.sub("", symbol.upper())
 
 
+# #3437: upper-case root (dots / slashes allowed, ``SKYD/WS``) followed by a
+# lowercase CQS type indicator: ``p`` + optional class letter, ``r``, ``w``,
+# and their when-issued forms ``pw`` / ``pAw`` / ``rw``.
+_CQS_SUFFIX_RE: Final = re.compile(r"[A-Z0-9./]+(?:p[A-Z]?w?|rw?|w)")
+
+
 def is_cqs_suffix_symbol(symbol: str) -> bool:
     """True when a FINRA symbol carries a SIAC/CQS lowercase type suffix (#3437).
 
@@ -125,8 +131,12 @@ def is_cqs_suffix_symbol(symbol: str) -> bool:
     "Symbology for CQS Symbols"). Such a symbol is never the common stock, and
     ``normalise_symbol`` would upper-case it onto an unrelated ticker (``TpC`` →
     ``TPC``), so callers must not resolve it.
+
+    Anchored to that shape rather than "has a lowercase letter", so a feed that
+    lower-cased whole symbols (``aapl``) would still resolve instead of being
+    silently dropped.
     """
-    return any(ch.islower() for ch in symbol)
+    return _CQS_SUFFIX_RE.fullmatch(symbol) is not None
 
 
 def build_preloaded_symbol_resolver(
