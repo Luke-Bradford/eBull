@@ -374,12 +374,12 @@ def sync_insiders(
     # ``limit`` caps ROWS, so a capped scan can end part-way through an accession, and a partial
     # group would write a partial sum. Drop the trailing accession whenever the cap was reached; it
     # is the only one that can be cut, and an uncapped run (the scheduled one) never trims.
+    summary.rows_scanned += len(rows)  # counted before the trim: every fetched row was scanned
     if limit is not None and rows and len(rows) >= limit:
         tail = (rows[-1]["instrument_id"], rows[-1]["accession_number"])
         rows = [r for r in rows if (r["instrument_id"], r["accession_number"]) != tail]
 
     lines = [_StoredForm3Line.from_row(row) for row in rows]
-    summary.rows_scanned += len(lines)
     for _, acc_lines in groupby(lines, key=lambda line: (line.row["instrument_id"], line.row["accession_number"])):
         group = list(acc_lines)
         shares_by_key = form3_observation_shares(group, owner_count=int(group[0].row["owner_count"]))
