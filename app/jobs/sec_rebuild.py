@@ -333,7 +333,6 @@ def _discovery_pass(
                     subject_id=sid,
                     instrument_id=instrument_id,
                     filed_at=row.filed_at,
-                    accepted_at=row.accepted_at,
                     primary_document_url=row.primary_document_url,
                     is_amendment=row.is_amendment,
                 )
@@ -440,7 +439,6 @@ def _walk_secondary_pages(
                     subject_id=subject_id,
                     instrument_id=instrument_id,
                     filed_at=row.filed_at,
-                    accepted_at=row.accepted_at,
                     primary_document_url=row.primary_document_url,
                     is_amendment=row.is_amendment,
                 )

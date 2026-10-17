@@ -143,7 +143,6 @@ def run_atom_fast_lane(
                 subject_id=subject.subject_id,
                 instrument_id=subject.instrument_id,
                 filed_at=row.filed_at,
-                accepted_at=row.accepted_at,
                 primary_document_url=row.primary_document_url,
                 is_amendment=row.is_amendment,
             )

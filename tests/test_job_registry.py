@@ -74,6 +74,8 @@ _ALLOWED_SOURCES: frozenset[Lane] = frozenset(
         # own lane so its high cadence can't lose the JobLock race to the
         # hourly per-CIK poll. See app/jobs/sources.py::Lane.
         "sec_expected_filings",
+        # #3714 — sec_acceptance_refill, header acceptance writer.
+        "sec_acceptance",
         # #1540 — sec_filing_documents_ingest (@:35, ~96s/tick sole writer of
         # filing_documents) + sec_insider_transactions_backfill (@:45 tail
         # drainer) extracted from sec_rate into their own single-job lanes.

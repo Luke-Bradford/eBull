@@ -130,7 +130,6 @@ def parse_daily_index(body: bytes, *, default_filed_at: date) -> Iterator[Filing
             form=form,
             source=map_form_to_source(form),
             filed_at=filed_at,
-            accepted_at=None,
             primary_document_url=primary_url,
             is_amendment=is_amendment_form(form),
         )

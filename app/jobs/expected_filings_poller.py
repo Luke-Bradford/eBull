@@ -460,7 +460,6 @@ def run_expected_filings_poller(
             subject_id=str(row.instrument_id),
             instrument_id=row.instrument_id,
             filed_at=match.filed_at,
-            accepted_at=match.accepted_at,
             primary_document_url=match.primary_document_url,
             is_amendment=match.is_amendment,
         )

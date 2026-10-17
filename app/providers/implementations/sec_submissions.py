@@ -101,7 +101,8 @@ class FilingIndexRow:
     # ``None`` when the form is not in the manifest source set
     # (e.g. ``S-1``, ``CORRESP``); discovery layer can skip these.
     filed_at: datetime
-    accepted_at: datetime | None
+    # No ``accepted_at`` (#3714): the submissions JSON / Atom acceptance moves by the ET offset between captures,
+    # so ``sec_filing_manifest.accepted_at`` is written from the EDGAR header only (``sec_acceptance_refill``).
     primary_document_url: str | None
     is_amendment: bool
 
@@ -223,9 +224,6 @@ def parse_submissions_page(
                 form=form,
                 source=map_form_to_source(form),
                 filed_at=_parse_filed_at(filing_date, accepted_str),
-                accepted_at=(
-                    datetime.fromisoformat(accepted_str.rstrip("Z")).replace(tzinfo=UTC) if accepted_str else None
-                ),
                 primary_document_url=primary_url,
                 is_amendment=is_amendment_form(form),
             )

@@ -632,7 +632,6 @@ def _run_first_install_drain_inner(
                     subject_id=subject.subject_id,
                     instrument_id=subject.instrument_id,
                     filed_at=row.filed_at,
-                    accepted_at=row.accepted_at,
                     primary_document_url=row.primary_document_url,
                     is_amendment=row.is_amendment,
                 )
@@ -757,7 +756,6 @@ def _drain_secondary_pages(
                     subject_id=subject.subject_id,
                     instrument_id=subject.instrument_id,
                     filed_at=row.filed_at,
-                    accepted_at=row.accepted_at,
                     primary_document_url=row.primary_document_url,
                     is_amendment=row.is_amendment,
                 )
@@ -946,7 +944,6 @@ def _enqueue_n_csr_for_trust(
                 subject_id=trust_cik,
                 instrument_id=None,
                 filed_at=row.filed_at,
-                accepted_at=row.accepted_at,
                 primary_document_url=row.primary_document_url,
                 is_amendment=row.is_amendment,
             )
@@ -1015,7 +1012,6 @@ def _enqueue_n_csr_for_trust(
                         subject_id=trust_cik,
                         instrument_id=None,
                         filed_at=row.filed_at,
-                        accepted_at=row.accepted_at,
                         primary_document_url=row.primary_document_url,
                         is_amendment=row.is_amendment,
                     )

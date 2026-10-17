@@ -613,7 +613,6 @@ def _ingest_one_filer(
                 subject_id=subject_id,
                 instrument_id=None,
                 filed_at=row.filed_at,
-                accepted_at=row.accepted_at,
                 primary_document_url=row.primary_document_url,
                 is_amendment=row.is_amendment,
             )

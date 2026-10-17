@@ -21,7 +21,6 @@ def _row(form: str, *, is_amendment: bool = False, source: str | None = "sec_10q
         form=form,
         source=source,  # type: ignore[arg-type]
         filed_at=datetime(2026, 8, 1, tzinfo=UTC),
-        accepted_at=None,
         primary_document_url=None,
         is_amendment=is_amendment,
     )

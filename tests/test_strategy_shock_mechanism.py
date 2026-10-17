@@ -249,6 +249,8 @@ def test_material_sec_loader_uses_acceptance_items_and_conservative_fallback(
         """,
         (instrument_id,),
     )
+    # #3714: only the header writer may set accepted_at (sql/502 trigger); the fixture stands in for it.
+    conn.execute("SELECT set_config('ebull.acceptance_writer', 'header', true)")
     conn.execute(
         """
         INSERT INTO sec_filing_manifest (

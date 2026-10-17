@@ -324,6 +324,17 @@ class SecFilingsProvider(FilingsProvider):
             gate=_gate,
             on_429=incr_sec_429,
         )
+        # #3714: the submission-header fetch counts one wire request as one attempt, so its client never retries;
+        # the refill job owns the backoff. Same host, clock, lock and gate as ``_http_tickers``.
+        self._http_header = ResilientClient(
+            self._tickers_client,
+            min_request_interval_s=_MIN_REQUEST_INTERVAL_S,
+            max_retries=0,
+            shared_last_request=_PROCESS_RATE_LIMIT_CLOCK,
+            shared_throttle_lock=_PROCESS_RATE_LIMIT_LOCK,
+            gate=_gate,
+            on_429=incr_sec_429,
+        )
 
     def __enter__(self) -> SecFilingsProvider:
         return self
@@ -650,6 +661,16 @@ class SecFilingsProvider(FilingsProvider):
             return None
         resp.raise_for_status()
         return resp.text
+
+    def fetch_submission_header(self, absolute_url: str) -> tuple[int, str]:
+        """One GET of an archived ``<accession>.hdr.sgml`` (#3714): ``(status, body)``, no retry.
+
+        A 429 / 5xx raises ``httpx.HTTPStatusError`` (the no-retry client's final-attempt rule); any other status is
+        returned for ``sec_header.classify_header``. The only caller is ``sec_header.fetch_header_acceptance``, whose
+        result is written to ``sec_acceptance_checks`` in the same transaction as the ``accepted_at`` it backs.
+        """
+        resp = self._http_header.get(absolute_url)
+        return resp.status_code, resp.text
 
     # ------------------------------------------------------------------
     # CIK mapping (for service layer to populate external_identifiers)

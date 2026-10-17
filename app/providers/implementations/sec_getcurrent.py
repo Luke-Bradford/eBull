@@ -101,19 +101,20 @@ def parse_getcurrent_atom(body: bytes) -> Iterator[FilingIndexRow]:
         if not form:
             continue
 
-        # ``updated`` carries the SEC-accepted timestamp.
-        accepted_at: datetime | None = None
+        # ``updated`` carries the SEC-accepted timestamp. It sets ``filed_at`` only (#3869 owns that column);
+        # ``accepted_at`` comes from the EDGAR header alone (#3714, ``sec_acceptance_refill``).
+        updated: datetime | None = None
         filed_at: datetime
         if updated_el is not None and updated_el.text:
             try:
-                accepted_at = datetime.fromisoformat(updated_el.text)
-                if accepted_at.tzinfo is None:
-                    accepted_at = accepted_at.replace(tzinfo=UTC)
+                updated = datetime.fromisoformat(updated_el.text)
+                if updated.tzinfo is None:
+                    updated = updated.replace(tzinfo=UTC)
                 else:
-                    accepted_at = accepted_at.astimezone(UTC)
+                    updated = updated.astimezone(UTC)
             except ValueError:
-                accepted_at = None
-        filed_at = accepted_at if accepted_at is not None else datetime.now(tz=UTC)
+                updated = None
+        filed_at = updated if updated is not None else datetime.now(tz=UTC)
 
         # #3590 — the ``alternate`` link is the filing INDEX page, not a
         # document; recording it as the primary document made every Form
@@ -130,7 +131,6 @@ def parse_getcurrent_atom(body: bytes) -> Iterator[FilingIndexRow]:
             form=form.strip(),
             source=map_form_to_source(form),
             filed_at=filed_at,
-            accepted_at=accepted_at,
             primary_document_url=primary_url,
             is_amendment=is_amendment_form(form),
         )
