@@ -116,6 +116,19 @@ def normalise_symbol(symbol: str) -> str:
     return _NORMALISE_RE.sub("", symbol.upper())
 
 
+def is_cqs_suffix_symbol(symbol: str) -> bool:
+    """True when a FINRA symbol carries a SIAC/CQS lowercase type suffix (#3437).
+
+    Source rule: CQS symbology writes the security-type indicator in lowercase
+    after the root — ``p`` preferred, ``r`` rights, ``w`` when issued (``TpC``
+    = preferred series C of root ``T``; Cboe US equities symbology reference,
+    "Symbology for CQS Symbols"). Such a symbol is never the common stock, and
+    ``normalise_symbol`` would upper-case it onto an unrelated ticker (``TpC`` →
+    ``TPC``), so callers must not resolve it.
+    """
+    return any(ch.islower() for ch in symbol)
+
+
 def build_preloaded_symbol_resolver(
     conn: psycopg.Connection[Any],
 ) -> Callable[[str], int | None]:
@@ -283,6 +296,13 @@ def ingest_settlement_file(
                     f"FINRA body settlementDate mismatch at settlement_date={settlement_date}: "
                     f"symbolCode={symbol!r} carries settlementDate={settlement_raw!r}"
                 )
+
+            # #3437: same rule as the RegSHO ingest. Stored SI files carry none
+            # (`scripts/repair_3437_regsho_suffix_rows.py` prints the scan); this
+            # holds the rule by construction.
+            if is_cqs_suffix_symbol(symbol):
+                skipped_no_instrument_match += 1
+                continue
 
             # Ambiguity check BEFORE resolver call (resolver returns None
             # for both ambiguous + no-match; disambiguate for the counter).

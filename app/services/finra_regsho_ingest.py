@@ -54,6 +54,7 @@ import psycopg
 # resolver shape (closure with ``ambiguous_keys`` attribute).
 from app.services.finra_short_interest_ingest import (
     HeaderCorruptionError,
+    is_cqs_suffix_symbol,
     normalise_symbol,
 )
 
@@ -255,6 +256,13 @@ def ingest_regsho_daily_file(
             short_exempt = row.short_exempt_volume
             total_vol = row.total_volume
             market_stripped = row.market
+
+            # #3437: a CQS suffix symbol (``TpC``) is a preferred / right /
+            # when-issued line, never the common, and upper-casing it lands on an
+            # unrelated ticker. Our universe holds no such securities.
+            if is_cqs_suffix_symbol(symbol):
+                skipped_no_instrument_match += 1
+                continue
 
             # Ambiguity check BEFORE resolver call (resolver returns
             # None for both unknown + ambiguous; disambiguate for the
