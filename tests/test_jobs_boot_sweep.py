@@ -10,7 +10,9 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-from app.jobs.boot_sweep import run_boot_freshness_sweep
+import pytest
+
+from app.jobs.boot_sweep import RETRY_DEADLINE_S, RETRY_INTERVAL_S, run_boot_freshness_sweep
 from app.services.sync_orchestrator.types import (
     SyncAlreadyRunning,
     SyncResult,
@@ -47,14 +49,78 @@ def test_dispatches_with_behind_scope_and_boot_sweep_trigger() -> None:
     assert kwargs["linked_request_id"] is None
 
 
-def test_swallows_sync_already_running() -> None:
-    """Another sync racing the sweep must not propagate."""
+class _Clock:
+    """A monotonic clock that only ``sleep`` advances."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+    def monotonic(self) -> float:
+        return self.now
+
+
+def _busy(active_id: int | None = 99) -> SyncAlreadyRunning:
+    return SyncAlreadyRunning(SyncScope.behind(), active_sync_run_id=active_id)
+
+
+def test_a_high_frequency_holder_is_waited_out_then_the_sweep_dispatches() -> None:
+    """#3784: catch-up's high-frequency sync held the slot for 7.7 s on 2026-10-13 and the sweep was dropped."""
     import os
 
     os.environ.pop("EBULL_SKIP_BOOT_SWEEP", None)
+    clock = _Clock()
     with patch("app.jobs.boot_sweep.run_sync") as run:
-        run.side_effect = SyncAlreadyRunning(SyncScope.behind(), active_sync_run_id=99)
-        run_boot_freshness_sweep()  # must not raise
+        run.side_effect = [_busy(), _busy(), SyncResult(sync_run_id=2, outcomes={})]
+        run_boot_freshness_sweep(
+            sleep=clock.sleep, monotonic=clock.monotonic, active_scope=lambda _id: "high_frequency"
+        )
+    assert run.call_count == 3
+    assert clock.sleeps == [RETRY_INTERVAL_S, RETRY_INTERVAL_S]
+
+
+def test_a_holder_that_finished_between_the_conflict_and_the_lookup_is_retried() -> None:
+    import os
+
+    os.environ.pop("EBULL_SKIP_BOOT_SWEEP", None)
+    clock = _Clock()
+    with patch("app.jobs.boot_sweep.run_sync") as run:
+        run.side_effect = [_busy(None), SyncResult(sync_run_id=2, outcomes={})]
+        run_boot_freshness_sweep(sleep=clock.sleep, monotonic=clock.monotonic, active_scope=lambda _id: None)
+    assert run.call_count == 2
+
+
+@pytest.mark.parametrize("holder", ["full", "behind"])
+def test_a_full_or_behind_holder_covers_the_sweep(holder: str) -> None:
+    import os
+
+    os.environ.pop("EBULL_SKIP_BOOT_SWEEP", None)
+    clock = _Clock()
+    with patch("app.jobs.boot_sweep.run_sync") as run:
+        run.side_effect = _busy()
+        run_boot_freshness_sweep(sleep=clock.sleep, monotonic=clock.monotonic, active_scope=lambda _id: holder)
+    run.assert_called_once()
+    assert clock.sleeps == []
+
+
+def test_a_holder_past_the_deadline_gives_up_with_a_warning() -> None:
+    """Another sync racing the sweep must not propagate, and the wait is bounded."""
+    import os
+
+    os.environ.pop("EBULL_SKIP_BOOT_SWEEP", None)
+    clock = _Clock()
+    with patch("app.jobs.boot_sweep.run_sync") as run, patch("app.jobs.boot_sweep.logger") as log:
+        run.side_effect = _busy()
+        run_boot_freshness_sweep(
+            sleep=clock.sleep, monotonic=clock.monotonic, active_scope=lambda _id: "high_frequency"
+        )  # must not raise
+    assert clock.now <= RETRY_DEADLINE_S
+    assert run.call_count == int(RETRY_DEADLINE_S // RETRY_INTERVAL_S) + 1
+    log.warning.assert_called_once()
 
 
 def test_swallows_arbitrary_exceptions() -> None:
@@ -91,3 +157,18 @@ def test_boot_sweep_thread_target_swallows_unexpected_escape() -> None:
     ):
         _run_boot_freshness_sweep_thread()  # must not raise
     log.exception.assert_called_once()
+
+
+def test_a_failed_holder_lookup_keeps_waiting_rather_than_dropping_the_sweep() -> None:
+    import os
+
+    os.environ.pop("EBULL_SKIP_BOOT_SWEEP", None)
+    clock = _Clock()
+
+    def lookup(_id: int | None) -> str | None:
+        raise RuntimeError("connection refused")
+
+    with patch("app.jobs.boot_sweep.run_sync") as run:
+        run.side_effect = [_busy(), SyncResult(sync_run_id=2, outcomes={})]
+        run_boot_freshness_sweep(sleep=clock.sleep, monotonic=clock.monotonic, active_scope=lookup)
+    assert run.call_count == 2

@@ -12947,3 +12947,14 @@ neighbouring container and match it.**
   NULL-environment strategy order's position is `demo` on the dev DB (8 of 8, 2026-10-17). Run a new reader on the
   dev DB and compare its row count with the population it should cover before trusting a zero.
 - Enforced in: `app/services/execution_tca.py::_EXITS_SQL` and `_ENTRIES_SQL` (`COALESCE(..., 'demo')`).
+
+### Every I/O call inside a best-effort retry loop needs its own guard (#3784)
+
+- Failure (PR #3863, review bot round 1): the boot sweep's new wait loop looked up the scope of the sync holding the
+  slot with a DB query. Only the function's outer `except Exception` guarded that query, so one transient connection
+  error ended the loop and dropped the sweep, which is the exact failure the loop existed to fix.
+- Prevention: when a retry loop sits inside a best-effort function's catch-all, guard each I/O call the loop makes
+  between attempts on its own, and map its failure to the loop's "unknown, keep waiting" state. The outer catch-all
+  is for leaving the function, not for leaving the loop. Test the helper raising.
+- Enforced in: `app/jobs/boot_sweep.py::run_boot_freshness_sweep`;
+  `tests/test_jobs_boot_sweep.py::test_a_failed_holder_lookup_keeps_waiting_rather_than_dropping_the_sweep`.
