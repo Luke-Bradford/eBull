@@ -116,8 +116,8 @@ forms with a non-zero opening (12,729):
 - 7,304 equal an earlier balance of only the same form;
 - 1,419 equal both a same-form and an other-form balance;
 - 265 equal only another form's balance, which is running-total evidence and refused as 5c;
-- 3,741 equal nothing earlier that we hold;
-- 182 have no filing time and are refused as 5c.
+- 3,741 equal nothing earlier that we hold. That includes 182 with no filing time, which
+  cannot match anything and are refused as 5c. The four buckets sum to 12,729.
 
 Within `sums` (5,805 forms): 3,782 match only the same form, 125 match both, and 1,898 match
 neither. The 0 other-only matches there follow from the verdict, so they are not independent
