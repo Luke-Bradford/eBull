@@ -56,8 +56,11 @@ RowResult = Literal[
     "vanished",
 ]
 
+# ``m.cik`` must build a header URL (``header_url``); a row that cannot is never fetched, so it cannot poison a fire,
+# and the census still counts it as never-attempted.
 _READY: Final[LiteralString] = """
-    (c.accession_number IS NULL
+    m.cik ~ '^[0-9]{10}$'
+    AND (c.accession_number IS NULL
      OR (c.next_retry_at IS NOT NULL AND c.next_retry_at <= %(now)s)
      OR (c.next_retry_at IS NULL AND c.policy_version < %(policy)s))
 """

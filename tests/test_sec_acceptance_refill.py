@@ -169,6 +169,10 @@ def test_sparse_t3_hands_its_floor_to_t2(ebull_test_conn: psycopg.Connection[tup
     for accession in t2:
         _baseline(conn, accession, "sec_form4")
     _baseline(conn, t3, "sec_13d")
+    # A CIK that cannot build a header URL is never selected (it would raise in ``header_url``).
+    bad = _manifest(conn, 651, "sec_13d")
+    conn.execute("UPDATE sec_filing_manifest SET cik = 'NOT-A-CIK' WHERE accession_number = %s", (bad,))
+    _baseline(conn, bad, "sec_13d")
     picked = select_ready(conn, budget=10, now=NOW)
     assert [(row.cohort, row.accession_number) for row in picked] == [("T2", a) for a in t2[:9]] + [("T3", t3)]
 
