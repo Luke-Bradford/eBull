@@ -303,6 +303,28 @@ def record_insider_observation(
 # Rule 13d-3. Used in both refresh functions after a CTE named ``winners`` exposing
 # ``instrument_id, holder_cik, source_accession, source_document_id``.
 # Spec: docs/specs/etl/2026-06-28-insider-dual-pipeline-decollision-refresh.md.
+#
+# #3227 — a second clause, storage-only (fix B has no counterpart, so the parity above covers the
+# first clause alone). One Form 3 snapshot is sometimes on file under TWO accessions with the same
+# ``period_end`` — a duplicate submission or a 3/A restating it (VFS ``0001185185-26-001269`` and
+# ``0001193125-26-114080`` carry the same three lines). The XML winner then comes from one and the
+# ``:NDH:`` winner from the other, so the same-accession clause misses the pair, and because the
+# ``:NDH:`` nature is the relationship flag the two land on different keys and the rollup SUMs them
+# (#905). The clause drops a ``:NDH:`` winner only when a plain ``form3`` winner for the same holder
+# and ``period_end`` holds, in its own accession's ``insider_initial_holdings``, an IDENTICAL line —
+# same title, D/I and shares — for EVERY live ``:NDH:`` line of the winner's accession under the
+# winner's key, each line matched by the plain winner of the nature its own D/I maps to (so a
+# snapshot with both D and I lines de-collides too — Codex ckpt-2). The winner's own line is in
+# that set, so "no unmatched line" also means "at least one matched". And that plain winner must
+# hold its whole D/I group's total in that accession — a line present in the accession is counted
+# in the winner only then; where ``form3_observation_shares`` refused to sum (two classes, a
+# repeated nature) the winner is one line and nothing is dropped (Codex ckpt-2). Every line, not just the
+# winner's own: ``INSIDER_HOLDING_LINE_SUM_LATERAL`` can make the winner carry the sum of all of
+# them (Codex ckpt-2), and a partial match would drop the unmatched ones. That is the whole set
+# restated, provably already counted by the XML winner; anything short of it is left alone.
+# ``nature_of_ownership`` is deliberately NOT matched: the two VFS submissions word one line "By
+# Vingroup" and "By Vingroup Joint Stock Company", and DERA and XML disagree on the nature of 18.5%
+# of lines whose title, shares and D/I agree (#3227 item 2's cross-check).
 _INSIDER_DUAL_PIPELINE_DECOLLISION: Final[str] = """
             WHERE NOT (
                 w.source_document_id ~ ':(NDT|NDH):'
@@ -312,6 +334,48 @@ _INSIDER_DUAL_PIPELINE_DECOLLISION: Final[str] = """
                        AND p.holder_cik IS NOT DISTINCT FROM w.holder_cik
                        AND p.source_accession = w.source_accession
                        AND p.source_document_id !~ ':(NDT|NDH):'
+                )
+            )
+            AND NOT (
+                w.source = 'form3'
+                AND w.source_document_id ~ ':NDH:[0-9]+$'
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM ownership_insiders_observations wl
+                     WHERE wl.instrument_id       = w.instrument_id
+                       AND wl.holder_identity_key = w.holder_identity_key
+                       AND wl.ownership_nature    = w.ownership_nature
+                       AND wl.source              = w.source
+                       AND wl.period_end          = w.period_end
+                       AND wl.known_to IS NULL
+                       AND wl.source_document_id LIKE split_part(w.source_document_id, ':', 1) || ':NDH:%%'
+                       AND NOT EXISTS (
+                           SELECT 1
+                             FROM winners p
+                             JOIN insider_initial_holdings h
+                               ON h.accession_number = p.source_accession
+                              AND h.filer_cik IS NOT DISTINCT FROM p.holder_cik
+                              AND NOT h.is_derivative
+                              AND h.security_title  = wl.security_title
+                              AND h.direct_indirect = wl.direct_indirect
+                              AND h.shares          = wl.shares
+                            WHERE p.instrument_id = w.instrument_id
+                              AND p.holder_cik IS NOT DISTINCT FROM w.holder_cik
+                              AND p.source = 'form3'
+                              AND p.source_document_id !~ ':'
+                              AND p.period_end = w.period_end
+                              AND p.source_accession IS DISTINCT FROM w.source_accession
+                              AND p.ownership_nature =
+                                  CASE wl.direct_indirect WHEN 'I' THEN 'indirect' WHEN 'D' THEN 'direct' END
+                              AND p.shares = (
+                                  SELECT sum(g.shares)
+                                    FROM insider_initial_holdings g
+                                   WHERE g.accession_number = p.source_accession
+                                     AND g.filer_cik IS NOT DISTINCT FROM p.holder_cik
+                                     AND NOT g.is_derivative
+                                     AND g.direct_indirect = wl.direct_indirect
+                              )
+                       )
                 )
             )
 """

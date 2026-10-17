@@ -42,6 +42,59 @@ def _seed_instrument(conn: psycopg.Connection[tuple], *, iid: int, symbol: str) 
 
 
 class TestSyncInsiders:
+    @staticmethod
+    def _seed_form3(conn: psycopg.Connection[tuple], iid: int, accession: str, lines: list[tuple[int, str]]) -> None:
+        conn.execute(
+            "INSERT INTO insider_filings (accession_number, instrument_id, document_type, primary_document_url)"
+            " VALUES (%s, %s, '3', 'https://example.test/x.xml')",
+            (accession, iid),
+        )
+        conn.execute(
+            "INSERT INTO insider_filers (accession_number, filer_cik, filer_name)"
+            " VALUES (%s, '0000000042', 'Line Filer')",
+            (accession,),
+        )
+        for row_num, (shares, nature) in enumerate(lines):
+            conn.execute(
+                """
+                INSERT INTO insider_initial_holdings (
+                    instrument_id, accession_number, row_num, filer_cik, filer_name, as_of_date,
+                    security_title, shares, is_derivative, direct_indirect, nature_of_ownership
+                ) VALUES (%s, %s, %s, '0000000042', 'Line Filer', '2026-03-18', 'Common', %s, FALSE, 'I', %s)
+                """,
+                (iid, accession, row_num, shares, nature),
+            )
+
+    @staticmethod
+    def _indirect_shares(conn: psycopg.Connection[tuple], accession: str) -> list[Decimal]:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT shares FROM ownership_insiders_observations"
+                " WHERE source = 'form3' AND source_document_id = %s AND ownership_nature = 'indirect'",
+                (accession,),
+            )
+            return [r[0] for r in cur.fetchall()]
+
+    def test_form3_distinct_lines_sum_and_a_capped_scan_never_writes_a_partial_sum(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    ) -> None:
+        """#3227 — the weekly sync writes the SAME value as the live XML writer (the sum of an
+        owner's distinct Table I lines of one class), and a ``limit`` that cuts an accession
+        part-way leaves that accession unwritten rather than half-summed."""
+        conn = ebull_test_conn
+        _seed_instrument(conn, iid=3_227_001, symbol="LSUM")
+        self._seed_form3(conn, 3_227_001, "0000000042-26-000001", [(100, "By A"), (200, "By B"), (300, "By C")])
+        conn.commit()
+
+        sync_insiders(conn, limit=2)  # cuts the only accession after two of its three lines
+        conn.commit()
+        assert self._indirect_shares(conn, "0000000042-26-000001") == []
+
+        sync_insiders(conn)
+        conn.commit()
+        assert self._indirect_shares(conn, "0000000042-26-000001") == [Decimal(600)]
+
     def test_form4_transactions_mirror_to_observations(
         self,
         ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811

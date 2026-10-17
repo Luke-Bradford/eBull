@@ -33,6 +33,7 @@ PR 3.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -46,7 +47,6 @@ from app.services import raw_filings
 from app.services.filings import reconcile_mislinked_ownership_filing_events
 from app.services.insider_transactions import (
     ParsedForm3,
-    ParsedHolding,
     _canonical_form_4_url,
     lookup_sec_filed_at,
     parse_form_3_xml,
@@ -411,14 +411,10 @@ def _record_form3_observations_for_filing(
     ``ownership_observations_sync.sync_insiders``:
 
       - Filter: ``shares IS NOT NULL`` AND ``is_derivative = FALSE``.
-      - Group key: ``(filer_cik, direct_indirect)``. Last row per group
-        wins by ``row_num`` ordering — matches the legacy batch sync
-        in ownership_observations_sync.sync_insiders, where iterating
-        every insider_initial_holdings row sequentially with the same
-        observation natural key produced a "last write wins" effect.
-        Codex review: summing instead would change observed-shares
-        semantics for filings with multi-class common stock listed
-        under one filer/nature.
+      - Group key: ``(filer_cik, direct_indirect)``; the group's shares
+        come from :func:`form3_observation_shares` — the SUM of its
+        lines when they are provably distinct holdings of one class
+        (#3227), else the last line by ``row_num``.
       - ``ownership_nature``: ``'indirect'`` when direct_indirect='I',
         else ``'direct'``.
     """
@@ -426,23 +422,10 @@ def _record_form3_observations_for_filing(
     if as_of is None:
         return
 
-    latest: dict[tuple[str | None, str | None], ParsedHolding] = {}
-    for holding in parsed.holdings:
-        if holding.is_derivative:
-            continue
-        if holding.shares is None:
-            continue
-        # Defensive: bot review flagged a None-comparison crash risk
-        # on row_num. Schema declares row_num NOT NULL but parser
-        # paths can in principle emit a None on malformed XML — guard
-        # explicitly rather than relying on the schema.
-        if holding.row_num is None:
-            continue
-        key = (holding.filer_cik, holding.direct_indirect)
-        prior = latest.get(key)
-        if prior is None or (prior.row_num is not None and holding.row_num > prior.row_num):
-            latest[key] = holding
-
+    latest = form3_observation_shares(
+        parsed.holdings,
+        owner_count=len({f.filer_cik for f in parsed.filers}),
+    )
     if not latest:
         return
 
@@ -456,10 +439,7 @@ def _record_form3_observations_for_filing(
         )
 
     run_id = uuid4()
-    for (filer_cik, direct_indirect), holding in latest.items():
-        shares = holding.shares
-        if shares is None:
-            continue
+    for (filer_cik, direct_indirect), shares in latest.items():
         holder_name = _filer_name_for(parsed, filer_cik)
         if not holder_name and not filer_cik:
             continue
@@ -481,6 +461,109 @@ def _record_form3_observations_for_filing(
             ingest_run_id=run_id,
             shares=shares,
         )
+
+
+class Form3HoldingLine(Protocol):
+    """The Table I fields :func:`form3_observation_shares` reads. ``ParsedHolding`` satisfies
+    it, and so does a stored ``insider_initial_holdings`` row (``sync_insiders``)."""
+
+    @property
+    def row_num(self) -> int | None: ...
+    @property
+    def is_derivative(self) -> bool: ...
+    @property
+    def filer_cik(self) -> str | None: ...
+    @property
+    def security_title(self) -> str | None: ...
+    @property
+    def shares(self) -> Decimal | None: ...
+    @property
+    def direct_indirect(self) -> str | None: ...
+    @property
+    def nature_of_ownership(self) -> str | None: ...
+
+
+def form3_observation_shares(
+    holdings: Iterable[Form3HoldingLine],
+    *,
+    owner_count: int,
+) -> dict[tuple[str | None, str | None], Decimal]:
+    """Shares for each ``(filer_cik, direct_indirect)`` observation of ONE Form 3 accession.
+
+    The observation key carries no class and no nature, so several Table I lines can share it.
+    Form 3 General Instruction 5(b)(iii): "Report securities beneficially owned directly on a
+    separate line from those beneficially owned indirectly. Report different forms of indirect
+    ownership on separate lines." One person's holding of ONE class is therefore the sum of that
+    class's lines — the rule ``INSIDER_HOLDING_LINE_SUM_LATERAL`` (#3227 item 3a) applies to the
+    DERA ``:NDH:`` rows, applied here at the XML writer. MNSO's founder files five ``I`` lines of
+    ``Ordinary shares``, one per holding vehicle; the last alone is 257,849,197 of 789,541,061.
+
+    A group SUMS only when every condition below holds; otherwise it keeps its last line by
+    ``row_num`` (the pre-#3227 behaviour), never a partial sum. The conditions are 3a's, minus
+    its D/I-label guard (an XML observation's nature IS the line's D/I):
+      * the group's D/I is known (``D`` or ``I``) — the parser maps a missing or invalid one to
+        ``None``, which the caller labels ``direct``, so a sum there would invent a direct total;
+      * >1 line in the group, every one with non-negative shares;
+      * every line has a non-blank title, and the group has ONE title — classes never sum
+        (CNH's common + special voting shares). Exact match, so a re-spelled title refuses;
+      * the group's natures are pairwise distinct — each line a separate form of ownership.
+        Repeated ``D`` lines with no nature are not something the rule explains, so they refuse;
+      * no two of the filer's lines of that title carry the same amount, across D AND I. Instr.
+        5(b)(iv) lets an indirect line restate an entity's whole holding, so one block can
+        appear twice (YPF ``0000903423-08-000197``); equal amounts cannot be told apart from a
+        restatement, so they refuse, fixed by construction;
+      * one reporting owner on the filing. On a joint filing the parser attributes every line to
+        the first owner (``ParsedHolding.filer_cik``), so a sum would credit one co-filer with
+        the other co-filers' blocks.
+    """
+    lines = form3_observation_lines(holdings)
+    groups: dict[tuple[str | None, str | None], list[Form3HoldingLine]] = {}
+    for h in lines:
+        groups.setdefault((h.filer_cik, h.direct_indirect), []).append(h)
+
+    out: dict[tuple[str | None, str | None], Decimal] = {}
+    for key, group in groups.items():
+        line_sum = _line_sum_if_distinct(key, group, lines, owner_count=owner_count)
+        last = group[-1].shares
+        assert last is not None  # form3_observation_lines keeps share-bearing lines only
+        out[key] = line_sum if line_sum is not None else last
+    return out
+
+
+def form3_observation_lines[L: Form3HoldingLine](holdings: Iterable[L]) -> list[L]:
+    """The lines a Form 3 observation is built from — non-derivative, share-bearing, ordered by
+    ``row_num``. Exposed so a caller pairing a group with its last line's metadata
+    (``sync_insiders``) filters exactly as :func:`form3_observation_shares` does."""
+    return sorted(
+        (h for h in holdings if not h.is_derivative and h.shares is not None and h.row_num is not None),
+        key=lambda h: h.row_num or 0,
+    )
+
+
+def _line_sum_if_distinct(
+    key: tuple[str | None, str | None],
+    group: list[Form3HoldingLine],
+    lines: list[Form3HoldingLine],
+    *,
+    owner_count: int,
+) -> Decimal | None:
+    """The group's SUM when every condition in :func:`form3_observation_shares` holds, else None."""
+    if key[1] not in ("D", "I") or owner_count != 1 or len(group) < 2:
+        return None
+    if any(h.shares is None or h.shares < 0 for h in group):
+        return None
+    titles = {h.security_title for h in group}
+    if len(titles) != 1:
+        return None
+    title = next(iter(titles))
+    if title is None or not title.strip():
+        return None
+    if len({h.nature_of_ownership or "" for h in group}) != len(group):
+        return None
+    same_title = [h.shares for h in lines if h.filer_cik == key[0] and h.security_title == title]
+    if len(set(same_title)) != len(same_title):
+        return None
+    return sum((h.shares for h in group if h.shares is not None), Decimal(0))
 
 
 def _filer_name_for(parsed: ParsedForm3, filer_cik: str | None) -> str:

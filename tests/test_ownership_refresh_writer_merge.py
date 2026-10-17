@@ -824,3 +824,161 @@ def test_dual_pipeline_decollision_keeps_ndt_when_plain_sibling_superseded(conn,
     assert "0000000000-24-000001" not in docs  # older plain 'direct' superseded out
     # No plain sibling for accession A survives into _current → keep its ':NDT:'.
     assert "0000000000-24-000001:NDT:7" in docs
+
+
+# ----------------------------------------------------------------------
+# #3227: one Form 3 snapshot under two accessions — the ':NDH:' line restated by the other
+# accession's XML winner is dropped; a line the XML accession does NOT carry is kept.
+# ----------------------------------------------------------------------
+def _seed_form3_obs(
+    conn,
+    iid: int,
+    *,
+    doc_id: str,
+    nature: oo.OwnershipNature,
+    shares: int,
+    direct_indirect: str | None = None,
+) -> None:
+    oo.record_insider_observation(
+        conn,
+        instrument_id=iid,
+        holder_cik="0000000042",
+        holder_name="Duplicate Filer",
+        ownership_nature=nature,
+        source="form3",
+        source_document_id=doc_id,
+        source_accession=doc_id.split(":")[0],
+        source_field=None,
+        source_url=None,
+        filed_at=datetime(2026, 3, 20, tzinfo=UTC),
+        period_start=None,
+        period_end=date(2026, 3, 18),
+        ingest_run_id=uuid4(),
+        shares=Decimal(shares),
+        security_title="Ordinary Shares" if direct_indirect else None,
+        direct_indirect=direct_indirect,
+        nature_of_ownership="By X" if direct_indirect else None,
+    )
+
+
+@pytest.mark.parametrize("batch", [False, True], ids=["single", "batch"])
+def test_cross_accession_ndh_restatement_is_dropped(conn, seeded_instrument_id, batch):
+    iid = seeded_instrument_id
+    xml_acc = "0000000000-26-000001"
+    with conn.cursor() as cur:
+        for row_num, (nature, shares) in enumerate((("By X", 100), ("By Y", 200))):
+            cur.execute(
+                """
+                INSERT INTO insider_initial_holdings (
+                    instrument_id, accession_number, row_num, filer_cik, filer_name, as_of_date,
+                    security_title, shares, is_derivative, direct_indirect, nature_of_ownership
+                ) VALUES (%s, %s, %s, '0000000042', 'Duplicate Filer', '2026-03-18',
+                          'Ordinary Shares', %s, FALSE, 'I', %s)
+                """,
+                (iid, xml_acc, row_num, shares, nature),
+            )
+    # XML winner from accession 1: the indirect sum of both lines.
+    _seed_form3_obs(conn, iid, doc_id=xml_acc, nature="indirect", shares=300)
+    # Accession 2 restates line "By X" via the dataset — relationship-labelled 'direct'.
+    _seed_form3_obs(conn, iid, doc_id="0000000000-26-000002:NDH:1", nature="direct", shares=100, direct_indirect="I")
+    # Accession 3 ('beneficial', its own key): the winning line (:NDH:1, 200) is one accession 1
+    # carries; its sibling (150) is not. A partial match must not drop the winner, which can carry
+    # the sum of both (Codex ckpt-2) — a winner-line-only match would.
+    _seed_form3_obs(
+        conn, iid, doc_id="0000000000-26-000003:NDH:1", nature="beneficial", shares=200, direct_indirect="I"
+    )
+    _seed_form3_obs(
+        conn, iid, doc_id="0000000000-26-000003:NDH:2", nature="beneficial", shares=150, direct_indirect="I"
+    )
+    conn.commit()
+
+    if batch:
+        oo.refresh_insiders_current_batch(conn, instrument_ids=[iid])
+    else:
+        oo.refresh_insiders_current(conn, instrument_id=iid)
+    conn.commit()
+
+    docs = _current_docs(conn, iid)
+    assert xml_acc in docs
+    assert "0000000000-26-000002:NDH:1" not in docs  # same line restated → counted once
+    assert {"0000000000-26-000003:NDH:1", "0000000000-26-000003:NDH:2"} & docs  # partial match → kept
+
+
+def test_cross_accession_ndh_restatement_with_d_and_i_lines_is_dropped(conn, seeded_instrument_id):
+    """Codex ckpt-2: a restated snapshot carrying both a D and an I line de-collides — each line is
+    matched by the XML winner of its own nature, not by one shared winner."""
+    iid = seeded_instrument_id
+    xml_acc = "0000000000-26-000011"
+    with conn.cursor() as cur:
+        for row_num, (di, shares) in enumerate((("D", 50), ("I", 100))):
+            cur.execute(
+                """
+                INSERT INTO insider_initial_holdings (
+                    instrument_id, accession_number, row_num, filer_cik, filer_name, as_of_date,
+                    security_title, shares, is_derivative, direct_indirect, nature_of_ownership
+                ) VALUES (%s, %s, %s, '0000000042', 'Duplicate Filer', '2026-03-18',
+                          'Ordinary Shares', %s, FALSE, %s, NULL)
+                """,
+                (iid, xml_acc, row_num, shares, di),
+            )
+    _seed_form3_obs(conn, iid, doc_id=xml_acc, nature="direct", shares=50)
+    _seed_form3_obs(conn, iid, doc_id=xml_acc, nature="indirect", shares=100)
+    # The dataset relabels both lines of the restating accession 'beneficial' (one key).
+    _seed_form3_obs(
+        conn, iid, doc_id="0000000000-26-000012:NDH:1", nature="beneficial", shares=100, direct_indirect="I"
+    )
+    _seed_form3_obs(conn, iid, doc_id="0000000000-26-000012:NDH:2", nature="beneficial", shares=50, direct_indirect="D")
+    conn.commit()
+
+    oo.refresh_insiders_current(conn, instrument_id=iid)
+    conn.commit()
+
+    docs = _current_docs(conn, iid)
+    assert xml_acc in docs
+    assert not {"0000000000-26-000012:NDH:1", "0000000000-26-000012:NDH:2"} & docs
+
+
+def test_cross_accession_ndh_kept_when_xml_winner_is_not_the_group_total(conn, seeded_instrument_id):
+    """Codex ckpt-2: both lines exist in the XML accession, but the XML winner holds only the
+    last (the writer refused to sum two classes) — the larger ``:NDH:`` line is NOT counted there,
+    so it must survive."""
+    iid = seeded_instrument_id
+    xml_acc = "0000000000-26-000021"
+    with conn.cursor() as cur:
+        for row_num, (title, shares) in enumerate((("Class A", 300), ("Class B", 100))):
+            cur.execute(
+                """
+                INSERT INTO insider_initial_holdings (
+                    instrument_id, accession_number, row_num, filer_cik, filer_name, as_of_date,
+                    security_title, shares, is_derivative, direct_indirect, nature_of_ownership
+                ) VALUES (%s, %s, %s, '0000000042', 'Duplicate Filer', '2026-03-18', %s, %s, FALSE, 'I', 'By X')
+                """,
+                (iid, xml_acc, row_num, title, shares),
+            )
+    _seed_form3_obs(conn, iid, doc_id=xml_acc, nature="indirect", shares=100)
+    oo.record_insider_observation(
+        conn,
+        instrument_id=iid,
+        holder_cik="0000000042",
+        holder_name="Duplicate Filer",
+        ownership_nature="direct",
+        source="form3",
+        source_document_id="0000000000-26-000022:NDH:1",
+        source_accession="0000000000-26-000022",
+        source_field=None,
+        source_url=None,
+        filed_at=datetime(2026, 3, 20, tzinfo=UTC),
+        period_start=None,
+        period_end=date(2026, 3, 18),
+        ingest_run_id=uuid4(),
+        shares=Decimal(300),
+        security_title="Class A",
+        direct_indirect="I",
+        nature_of_ownership="By X",
+    )
+    conn.commit()
+
+    oo.refresh_insiders_current(conn, instrument_id=iid)
+    conn.commit()
+
+    assert "0000000000-26-000022:NDH:1" in _current_docs(conn, iid)

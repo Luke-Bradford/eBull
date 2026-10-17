@@ -47,6 +47,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from itertools import groupby
 from typing import Any
 from uuid import uuid4
 
@@ -131,6 +132,34 @@ def _refresh_for_instruments(
 # ---------------------------------------------------------------------------
 # Insiders (Form 4 + Form 3)
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _StoredForm3Line:
+    """A stored ``insider_initial_holdings`` line, shaped for ``form3_observation_shares``."""
+
+    row: dict[str, Any]
+    row_num: int | None
+    is_derivative: bool
+    filer_cik: str | None
+    security_title: str | None
+    shares: Decimal | None
+    direct_indirect: str | None
+    nature_of_ownership: str | None
+
+    @classmethod
+    def from_row(cls, row: dict[str, Any]) -> _StoredForm3Line:
+        cik = row["filer_cik"]
+        return cls(
+            row=row,
+            row_num=row["row_num"],
+            is_derivative=bool(row["is_derivative"]),
+            filer_cik=(str(cik).strip() or None) if cik is not None else None,
+            security_title=row["security_title"],
+            shares=Decimal(row["shares"]) if row["shares"] is not None else None,
+            direct_indirect=row["direct_indirect"],
+            nature_of_ownership=row["nature_of_ownership"],
+        )
 
 
 def sync_insiders(
@@ -305,12 +334,19 @@ def sync_insiders(
     if since is not None:
         where += " AND iih.as_of_date >= %(since)s"
 
+    # ``owner_count`` uses set semantics, like the live writer's ``len({f.filer_cik for f in
+    # parsed.filers})``: a DISTINCT subselect counts a NULL as one value, where ``count(DISTINCT
+    # col)`` would skip it. ``insider_filers.filer_cik`` is NOT NULL today (sql/057); this keeps the
+    # two writers equal without relying on that.
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             f"""
-            SELECT iih.instrument_id, iih.accession_number,
-                   iih.filer_cik, iih.filer_name,
+            SELECT iih.instrument_id, iih.accession_number, iih.row_num,
+                   iih.filer_cik, iih.filer_name, iih.is_derivative,
+                   iih.security_title, iih.nature_of_ownership,
                    iih.shares, iih.as_of_date, iih.direct_indirect,
+                   (SELECT count(*) FROM (SELECT DISTINCT x.filer_cik FROM insider_filers x
+                     WHERE x.accession_number = iih.accession_number) d) AS owner_count,
                    f.primary_document_url,
                    COALESCE(m.filed_at, fe.filing_date::timestamp AT TIME ZONE 'UTC') AS sec_filed_at
             FROM insider_initial_holdings iih
@@ -322,48 +358,68 @@ def sync_insiders(
             LEFT JOIN sec_filing_manifest m
               ON m.accession_number = iih.accession_number
             {where}
+            ORDER BY iih.instrument_id, iih.accession_number, iih.row_num
             {limit_sql}
             """,
             params,
         )
         rows = cur.fetchall()
 
-    for row in rows:
-        summary.rows_scanned += 1
-        cik = row["filer_cik"]
-        if cik is not None:
-            cik = str(cik).strip() or None
-        name = str(row["filer_name"] or "").strip()
-        if not name and cik is None:
-            summary.orphans.append(f"insider_initial_holdings accession={row['accession_number']} (no cik or name)")
-            continue
-        nature = "indirect" if (row["direct_indirect"] == "I") else "direct"
-        try:
-            record_insider_observation(
-                conn,
-                instrument_id=int(row["instrument_id"]),
-                holder_cik=cik,
-                holder_name=name or (cik or "UNKNOWN"),
-                ownership_nature=nature,  # type: ignore[arg-type]
-                source="form3",
-                source_document_id=str(row["accession_number"]),
-                source_accession=str(row["accession_number"]),
-                source_field=None,
-                source_url=str(row["primary_document_url"]) if row["primary_document_url"] else None,
-                # #899 — SEC filing timestamp (manifest → filing_events);
-                # as_of_date fallback only for rows with neither.
-                filed_at=row["sec_filed_at"]
-                if row["sec_filed_at"] is not None
-                else datetime.combine(row["as_of_date"], datetime.min.time(), tzinfo=UTC),
-                period_start=None,
-                period_end=row["as_of_date"],
-                ingest_run_id=run_id,
-                shares=Decimal(row["shares"]),
-            )
-            summary.observations_recorded += 1
-            instruments_touched.add(int(row["instrument_id"]))
-        except Exception as exc:
-            summary.orphans.append(f"insider_initial_holdings accession={row['accession_number']}: {exc}")
+    # #3227 — one observation per (filer, D/I) per accession, its shares from the SAME rule the
+    # live XML writer applies (``form3_observation_shares``). Iterating the lines one by one let the
+    # ON CONFLICT upsert keep whichever line came last in an unordered scan, and this weekly job
+    # then overwrote the live writer's value with it.
+    from app.services.insider_form3_ingest import form3_observation_lines, form3_observation_shares
+
+    # ``limit`` caps ROWS, so a capped scan can end part-way through an accession, and a partial
+    # group would write a partial sum. Drop the trailing accession whenever the cap was reached; it
+    # is the only one that can be cut, and an uncapped run (the scheduled one) never trims.
+    summary.rows_scanned += len(rows)  # counted before the trim: every fetched row was scanned
+    if limit is not None and rows and len(rows) >= limit:
+        tail = (rows[-1]["instrument_id"], rows[-1]["accession_number"])
+        rows = [r for r in rows if (r["instrument_id"], r["accession_number"]) != tail]
+
+    lines = [_StoredForm3Line.from_row(row) for row in rows]
+    for _, acc_lines in groupby(lines, key=lambda line: (line.row["instrument_id"], line.row["accession_number"])):
+        group = list(acc_lines)
+        shares_by_key = form3_observation_shares(group, owner_count=int(group[0].row["owner_count"]))
+        # Same filter as the helper, so the metadata row is the line whose shares it would keep. The
+        # SELECT already drops derivative and shareless rows; this keeps the pairing true by construction.
+        last_by_key = {(line.filer_cik, line.direct_indirect): line.row for line in form3_observation_lines(group)}
+        for key, shares in shares_by_key.items():
+            row = last_by_key[key]
+            cik = key[0]
+            name = str(row["filer_name"] or "").strip()
+            if not name and cik is None:
+                summary.orphans.append(f"insider_initial_holdings accession={row['accession_number']} (no cik or name)")
+                continue
+            nature = "indirect" if (row["direct_indirect"] == "I") else "direct"
+            try:
+                record_insider_observation(
+                    conn,
+                    instrument_id=int(row["instrument_id"]),
+                    holder_cik=cik,
+                    holder_name=name or (cik or "UNKNOWN"),
+                    ownership_nature=nature,  # type: ignore[arg-type]
+                    source="form3",
+                    source_document_id=str(row["accession_number"]),
+                    source_accession=str(row["accession_number"]),
+                    source_field=None,
+                    source_url=str(row["primary_document_url"]) if row["primary_document_url"] else None,
+                    # #899 — SEC filing timestamp (manifest → filing_events);
+                    # as_of_date fallback only for rows with neither.
+                    filed_at=row["sec_filed_at"]
+                    if row["sec_filed_at"] is not None
+                    else datetime.combine(row["as_of_date"], datetime.min.time(), tzinfo=UTC),
+                    period_start=None,
+                    period_end=row["as_of_date"],
+                    ingest_run_id=run_id,
+                    shares=shares,
+                )
+                summary.observations_recorded += 1
+                instruments_touched.add(int(row["instrument_id"]))
+            except Exception as exc:
+                summary.orphans.append(f"insider_initial_holdings accession={row['accession_number']}: {exc}")
 
     summary.instruments_refreshed = _refresh_for_instruments(
         conn,
