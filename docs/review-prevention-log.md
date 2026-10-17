@@ -12924,3 +12924,14 @@ neighbouring container and match it.**
   `tests/test_execution_tca_db.py::test_the_arrival_quote_is_recorded_before_the_order_is_sent_and_measures_the_fill`.
   Skill text for `.claude/skills/data-engineer` is posted on #2403, because `.claude/**` is write-refused from the
   loop worktree.
+
+### Classify a best-effort evidence row before its insert, so a CHECK cannot turn a bad input into a missing row (#3611)
+
+- Failure (PR #3860, review bot round 1): `record_arrival_quote` wrote every returned quote as `quoted`. A quote with
+  a non-positive bid violated the table's CHECK, the contained insert rolled back, and the reader saw
+  `arrival_missing`, which is the same thing it sees when the write never ran.
+- Prevention: when a best-effort write's CHECK can reject an input, give that input its own outcome value and
+  classify it in code before the insert (here `unusable`, keeping the values as returned). Containment then catches
+  only genuine write failures, and the reader can tell a bad input from a lost write.
+- Enforced in: `app/services/execution_tca.py::record_arrival_quote`; sql/500's outcome CHECK;
+  `tests/test_execution_tca_db.py::test_a_quote_with_a_non_positive_bid_is_recorded_unusable_and_the_order_still_submits`.

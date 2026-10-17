@@ -11,6 +11,7 @@
 -- order is still submitted. `quoted_at` is the rate's own timestamp from eToro, never the fetch time; eToro serves
 -- some US equities a quote 1–2 hours late (#3833), so the readout judges the quote's age, not the row's.
 --   'quoted'     — eToro returned a rate for the instrument; `quoted_at`, `bid`, `ask` hold it.
+--   'unusable'   — eToro returned a rate with a non-positive bid or ask; the values are kept as returned.
 --   'not_quoted' — the rates call succeeded and omitted the instrument.
 --   'failed'     — the rates call raised.
 -- Writer: `app.services.execution_tca.record_arrival_quote` (called by `momentum_book_executor`).
@@ -22,15 +23,18 @@ CREATE TABLE IF NOT EXISTS strategy_order_arrival_quotes (
     order_id     BIGINT PRIMARY KEY REFERENCES orders(order_id) ON DELETE RESTRICT,
     requested_at TIMESTAMPTZ NOT NULL,
     received_at  TIMESTAMPTZ NOT NULL,
-    outcome      TEXT NOT NULL CHECK (outcome IN ('quoted', 'not_quoted', 'failed')),
+    outcome      TEXT NOT NULL CHECK (outcome IN ('quoted', 'unusable', 'not_quoted', 'failed')),
     quoted_at    TIMESTAMPTZ,
     bid          NUMERIC,
     ask          NUMERIC,
     CHECK (received_at >= requested_at),
     CHECK (
-        CASE WHEN outcome = 'quoted'
-             THEN quoted_at IS NOT NULL AND bid IS NOT NULL AND ask IS NOT NULL AND bid > 0 AND ask > 0
-             ELSE quoted_at IS NULL AND bid IS NULL AND ask IS NULL
+        CASE outcome
+            WHEN 'quoted'
+                THEN quoted_at IS NOT NULL AND bid IS NOT NULL AND ask IS NOT NULL AND bid > 0 AND ask > 0
+            WHEN 'unusable'
+                THEN quoted_at IS NOT NULL AND bid IS NOT NULL AND ask IS NOT NULL AND NOT (bid > 0 AND ask > 0)
+            ELSE quoted_at IS NULL AND bid IS NULL AND ask IS NULL
         END
     )
 );

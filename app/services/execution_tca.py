@@ -50,7 +50,7 @@ ARRIVAL_MAX_AGE_SECONDS: Final = 60
 ArrivalQuote = Callable[[int], Quote | None]
 
 #: ``strategy_order_arrival_quotes.outcome`` (sql/500).
-ArrivalOutcome = Literal["quoted", "not_quoted", "failed"]
+ArrivalOutcome = Literal["quoted", "unusable", "not_quoted", "failed"]
 
 Unmeasured = Literal[
     "no_fill",
@@ -59,6 +59,7 @@ Unmeasured = Literal[
     "arrival_missing",
     "arrival_failed",
     "arrival_not_quoted",
+    "arrival_unusable",
     "arrival_stale",
     "arrival_future_dated",
     "arrival_crossed",
@@ -81,7 +82,13 @@ def record_arrival_quote(
     outcome: ArrivalOutcome = "failed"
     try:
         quote = arrival_quote(instrument_id)
-        outcome = "quoted" if quote is not None else "not_quoted"
+        # Classified before the insert, so a bad quote is recorded as such rather than dropped by the CHECK.
+        if quote is None:
+            outcome = "not_quoted"
+        elif quote.bid > 0 and quote.ask > 0:
+            outcome = "quoted"
+        else:
+            outcome = "unusable"
     except Exception:
         logger.warning("arrival quote for order %s (instrument %s) unavailable", order_id, instrument_id, exc_info=True)
     received_at = clock()
@@ -128,20 +135,25 @@ class EntryCosts:
     arrival_unmeasured: Unmeasured | None
 
 
-def _arrival_reason(arrival: ArrivalFacts | None) -> Unmeasured | None:
+def _usable_quote(arrival: ArrivalFacts | None) -> tuple[Decimal, Decimal] | Unmeasured:
+    """The arrival bid and ask, or why they cannot be used."""
     if arrival is None:
         return "arrival_missing"
     if arrival.outcome == "failed":
         return "arrival_failed"
     if arrival.outcome == "not_quoted":
         return "arrival_not_quoted"
-    assert arrival.quoted_at is not None and arrival.bid is not None and arrival.ask is not None
+    if arrival.outcome == "unusable":
+        return "arrival_unusable"
+    quoted_at, bid, ask = arrival.quoted_at, arrival.bid, arrival.ask
+    if quoted_at is None or bid is None or ask is None:
+        raise ValueError("a 'quoted' arrival row without its quote")  # sql/500's CHECK forbids it
     # The executor's freshness rule: a future stamp beyond its skew allowance is as unusable as an old one.
-    if not _age_ok(arrival.quoted_at, now=arrival.received_at, max_seconds=ARRIVAL_MAX_AGE_SECONDS):
-        return "arrival_future_dated" if arrival.quoted_at > arrival.received_at else "arrival_stale"
-    if arrival.ask < arrival.bid:
+    if not _age_ok(quoted_at, now=arrival.received_at, max_seconds=ARRIVAL_MAX_AGE_SECONDS):
+        return "arrival_future_dated" if quoted_at > arrival.received_at else "arrival_stale"
+    if ask < bid:
         return "arrival_crossed"
-    return None
+    return bid, ask
 
 
 def entry_costs(*, decision: Decimal, fill: Decimal, arrival: ArrivalFacts | None) -> EntryCosts:
@@ -154,17 +166,17 @@ def entry_costs(*, decision: Decimal, fill: Decimal, arrival: ArrivalFacts | Non
         if arrival is None or arrival.quoted_at is None
         else Decimal(str((arrival.received_at - arrival.quoted_at).total_seconds()))
     )
-    reason = _arrival_reason(arrival)
-    if reason is not None:
-        return EntryCosts(shortfall, None, None, None, None, age, reason)
-    assert arrival is not None and arrival.bid is not None and arrival.ask is not None
-    mid = (arrival.bid + arrival.ask) / 2
+    usable = _usable_quote(arrival)
+    if isinstance(usable, str):
+        return EntryCosts(shortfall, None, None, None, None, age, usable)
+    bid, ask = usable
+    mid = (bid + ask) / 2
     return EntryCosts(
         shortfall=shortfall,
         delay=mid / decision - 1,
         execution=fill / mid - 1,
         effective_spread=2 * abs(fill - mid) / mid,
-        quoted_spread=(arrival.ask - arrival.bid) / mid,
+        quoted_spread=(ask - bid) / mid,
         arrival_age_seconds=age,
         arrival_unmeasured=None,
     )
@@ -245,6 +257,8 @@ def entry_tca(row: dict[str, Any]) -> EntryTca:
         if fill is None or not fill.is_finite() or fill <= 0:
             unmeasured = "fill_price_unusable"
         else:
+            # quote_ask > 0 is a CHECK (strategy_entry_preflights_quote_ask_positive, sql/438) and the SQL keeps only
+            # non-NULL rows, so entry_costs' positivity guard cannot fire on a stored decision price.
             costs = entry_costs(decision=Decimal(row["quote_ask"]), fill=fill, arrival=arrival)
             unmeasured = None
     return EntryTca(

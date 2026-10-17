@@ -40,6 +40,7 @@ def test_a_fill_below_the_mid_is_a_negative_execution_cost_and_a_positive_effect
         (None, "arrival_missing"),
         (_arrival(outcome="failed"), "arrival_failed"),
         (_arrival(outcome="not_quoted"), "arrival_not_quoted"),
+        (ArrivalFacts("unusable", AT, AT, Decimal("0"), Decimal("100")), "arrival_unusable"),
         (_arrival(age_s=ARRIVAL_MAX_AGE_SECONDS + 1), "arrival_stale"),
         (_arrival(age_s=-6), "arrival_future_dated"),
         (_arrival("100.2", "100.1"), "arrival_crossed"),
