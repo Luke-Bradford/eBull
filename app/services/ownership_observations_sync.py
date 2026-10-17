@@ -145,7 +145,6 @@ class _StoredForm3Line:
     security_title: str | None
     shares: Decimal | None
     direct_indirect: str | None
-    nature_of_ownership: str | None
 
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> _StoredForm3Line:
@@ -158,7 +157,6 @@ class _StoredForm3Line:
             security_title=row["security_title"],
             shares=Decimal(row["shares"]) if row["shares"] is not None else None,
             direct_indirect=row["direct_indirect"],
-            nature_of_ownership=row["nature_of_ownership"],
         )
 
 
@@ -343,7 +341,7 @@ def sync_insiders(
             f"""
             SELECT iih.instrument_id, iih.accession_number, iih.row_num,
                    iih.filer_cik, iih.filer_name, iih.is_derivative,
-                   iih.security_title, iih.nature_of_ownership,
+                   iih.security_title,
                    iih.shares, iih.as_of_date, iih.direct_indirect,
                    (SELECT count(*) FROM (SELECT DISTINCT x.filer_cik FROM insider_filers x
                      WHERE x.accession_number = iih.accession_number) d) AS owner_count,

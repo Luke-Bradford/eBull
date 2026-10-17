@@ -106,9 +106,22 @@ _CASES = [
         id="two_classes_refuse",
     ),
     pytest.param(
+        # Two trusts both worded "By Trust" are two holdings (0001209191-22-029116 on EDGAR).
         (_Line(1, "100", nature="By Trust"), _Line(2, "900", nature="By Trust")),
-        "100",
-        id="repeated_form_refuses",
+        "1000",
+        id="repeated_form_sums",
+    ),
+    pytest.param(
+        # KEY 0000091576-25-000084 as DERA stores it: the D line wears a later line's nature and
+        # the last line is blank (NATURE_OF_OWNERSHIP is compacted). Nature must not decide.
+        (
+            _Line(1, "62970", di="D", nature="By Trust"),
+            _Line(2, "87715", nature="By Trust"),
+            _Line(3, "5954", nature="By Trust"),
+            _Line(4, "12900"),
+        ),
+        "169539",
+        id="compacted_nature_does_not_decide",
     ),
     pytest.param(
         (_Line(1, "100"), _Line(2, "900", nature="By Trust")),

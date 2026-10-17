@@ -317,8 +317,8 @@ def record_insider_observation(
 # snapshot with both D and I lines de-collides too — Codex ckpt-2). The winner's own line is in
 # that set, so "no unmatched line" also means "at least one matched". And that plain winner must
 # hold its whole D/I group's total in that accession — a line present in the accession is counted
-# in the winner only then; where ``form3_observation_shares`` refused to sum (two classes, a
-# repeated nature) the winner is one line and nothing is dropped (Codex ckpt-2). Every line, not just the
+# in the winner only then; where ``form3_observation_shares`` refused to sum (two classes, an
+# equal amount) the winner is one line and nothing is dropped (Codex ckpt-2). Every line, not just the
 # winner's own: ``INSIDER_HOLDING_LINE_SUM_LATERAL`` can make the winner carry the sum of all of
 # them (Codex ckpt-2), and a partial match would drop the unmatched ones. That is the whole set
 # restated, provably already counted by the XML winner; anything short of it is left alone.
@@ -464,11 +464,6 @@ INSIDER_WINNER_ORDER_TAIL: Final[LiteralString] = """
 #     cannot be proved distinct;
 #   * ONE ``security_title`` — lines of different classes never sum (CNH's common + special
 #     voting shares; ADS vs ordinary). Exact string match, so a re-spelled title refuses;
-#   * lines pairwise distinct on ``(title, D/I, nature)`` — each is a separate form of ownership
-#     as the instruction requires; a repeated form is not something the rule explains. ⚠ The
-#     SUM is invariant to a permutation of ``nature_of_ownership`` across one accession's lines
-#     (the 18.5% DERA-vs-XML discordance on #3227); this distinctness TEST is not — a permutation
-#     across D and I lines can create or remove a duplicate triple, so it can move eligibility;
 #   * no two lines carry the same amount. Form 3 Instr. 5(b)(iv) lets an indirect line report
 #     the entity's ENTIRE holding, so one block can legitimately appear twice — YPF's
 #     ``0000903423-08-000197`` reports the same 58,603,606 ADSs once ``D`` and once ``I``
@@ -490,6 +485,23 @@ INSIDER_WINNER_ORDER_TAIL: Final[LiteralString] = """
 #     count those indirect holdings twice against an XML ``indirect`` row from another filing
 #     (Codex ckpt-1 on #3227). A ``beneficial`` winner is MAXed
 #     against the additive sum there, so it needs no such guard.
+# ``nature_of_ownership`` is deliberately NOT a condition (#3227, 2026-10-17). It used to be: the
+# lines had to be pairwise distinct on ``(title, D/I, nature)``. Two reasons it went:
+#   * the rule does not ask for it. Instr. 4(b)(iii) / 5(b)(iii) requires separate lines for
+#     different forms; nothing in it limits a form to one line, and Form 4 Instr. 4(a)(i) asks for
+#     "total beneficial ownership ... for each class", which is every line of the class. Two
+#     unequal ``D`` lines (ASTE ``0001140361-18-001899``: 1,409 + 2,429) or two "By Trust" lines
+#     (``0001209191-22-029116``: 350 + 50, by EDGAR) are two holdings. The restatement shape the
+#     test was guarding is an EQUAL block (Instr. 4(b)(iv)), which the amount test refuses;
+#   * on these rows the DERA column is not the filing's. ``NONDERIV_HOLDING.NATURE_OF_OWNERSHIP``
+#     is positionally COMPACTED: when a line has no ``<natureOfOwnership>`` element, the next
+#     line's nature moves up onto it and the last line goes blank. MSBI ``0001466026-26-000008``
+#     on EDGAR is ``D`` (none), ``I`` Red Bird, ``I`` Summit, ``I`` J.M. Schultz; DERA has ``D`` Red
+#     Bird, ..., ``I`` blank. Over Form 3 accessions whose lines align with our XML parse, every
+#     nature disagreement is exactly this (2026-10-17: 3,787 of 38,299). So a nature test here
+#     decided eligibility on a shifted column; on the one-class ``_current`` groups whose answer
+#     depended on where the blanks sit, EDGAR says it was wrong on 35 of 49. Re-derive both with
+#       PYTHONPATH=. uv run python -m scripts.audit_3227_dera_nature_compaction --edgar
 # The winner's provenance is unchanged: ``source_document_id`` still names one line of the
 # accession, and ``shares`` becomes that accession's single-class total for the owner.
 #
@@ -516,8 +528,6 @@ INSIDER_HOLDING_LINE_SUM_LATERAL: Final[LiteralString] = """
                        AND min(o.shares) >= 0
                        AND min(length(btrim(o.security_title))) > 0
                        AND count(DISTINCT o.security_title) = 1
-                       AND count(DISTINCT (o.security_title, o.direct_indirect,
-                                           COALESCE(o.nature_of_ownership, ''))) = count(*)
                        AND count(DISTINCT o.shares) = count(*)
                        AND NOT EXISTS (
                            SELECT 1
