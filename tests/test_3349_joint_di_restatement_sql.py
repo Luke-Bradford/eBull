@@ -1,4 +1,4 @@
-"""#3349 — ``_INSIDER_JOINT_DI_RESTATEMENT_SQL`` against a real DB.
+"""#3349 — ``_INSIDER_JOINT_DIRECT_LINES_SQL`` and the flag it drives, against a real DB.
 
 Each case changes ONE clause of the predicate from the flagged STAA shape, so each clause is
 pinned by a fixture it alone rejects (prevention-log, #2240).

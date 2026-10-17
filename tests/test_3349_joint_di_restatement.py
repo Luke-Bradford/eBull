@@ -1,7 +1,7 @@
 """#3349 — a joint filing's ``indirect`` restatement of the same owner's ``direct`` block is
 counted once, not as a second Section-16 lot.
 
-The SQL flag (``_INSIDER_JOINT_DI_RESTATEMENT_SQL``) is pinned against a real DB in
+The SQL lookup (``_INSIDER_JOINT_DIRECT_LINES_SQL``) is pinned against a real DB in
 ``tests/test_3349_joint_di_restatement_sql.py``. These pin what the rollup does with it.
 """
 
@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
+
+import pytest
 
 from app.services.ownership_rollup import (
     _Candidate,
@@ -97,16 +99,19 @@ def test_a_sole_restatement_row_is_still_the_figure() -> None:
     assert total == Decimal("1000")
 
 
-def test_owner_once_figure_is_the_block_not_twice_it() -> None:
+@pytest.mark.parametrize("direct_shares", ["1000", "500"], ids=["equal", "direct_smaller_than_restatement"])
+def test_owner_once_figure_is_the_direct_lot_through_the_pooling_pass(direct_shares: str) -> None:
     """End to end through owner-once, including the Form 3 + Form 4 pooling pass, which
-    classifies additive lots on its own (``_merge_section16_forms``)."""
+    classifies additive lots on its own (``_merge_section16_forms``). The pooling pass puts the
+    restatement in its overlap bucket; ``_source_rows_and_total`` must still drop it before any
+    MAX, so a stale 1,000 cannot beat a 500 ``direct`` (review WARNING on #3867)."""
     form3_direct = _Candidate(
         source="form3",
         priority_rank=2,
         filer_cik="0001278386",
         filer_name="BROADWOOD PARTNERS, L.P.",
         filer_type=None,
-        shares=Decimal("1000"),
+        shares=Decimal(direct_shares),
         as_of_date=date(2025, 1, 1),
         accession_number="0000919574-25-000001",
         source_row_id=3,
@@ -123,4 +128,5 @@ def test_owner_once_figure_is_the_block_not_twice_it() -> None:
     )
     by_category = _reconcile_owner_once(holders)
     [owner] = by_category["insiders"]
-    assert owner.shares == Decimal("1000")
+    assert owner.shares == Decimal(direct_shares)
+    assert [(d.accession_number, d.shares) for d in owner.dropped_sources] == [(_ACCN, Decimal("1000"))]
