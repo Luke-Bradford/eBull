@@ -7848,6 +7848,9 @@ def momentum_book() -> None:
                 latest_bar=lambda instrument_id: next(
                     iter(reversed(market.get_intraday_candles(instrument_id, "OneMinute", 1))), None
                 ),
+                # #3611: the quote fetched just before each submission, for transaction-cost analysis. The fields
+                # that measure it (rate timestamp, bid, ask) land in strategy_order_arrival_quotes (sql/500).
+                arrival_quote=market.get_quote,
             )
         tracker.row_count = result.entries
         tracker.note = result.note

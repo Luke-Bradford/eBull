@@ -12910,3 +12910,28 @@ neighbouring container and match it.**
   `tests/test_pit_market_cap_build_db.py::test_trades_reader_keeps_only_the_instruments_own_issuer`. The ingest fix is
   #3854. Skill text for `.claude/skills/data-sources/sec-edgar.md` is posted on #2403, because `.claude/**` is
   write-refused from the loop worktree.
+
+### A historical read joins the policy revision's event, not the live policy row (#3611)
+
+- Failure (PR for #3611, Codex checkpoint 2): the TCA reader joined `strategy_execution_policies` on
+  `(deployment_id, revision = preflight.policy_revision)` to recover the cost-stress multiplier an entry was priced
+  with. That table's primary key is `deployment_id` alone and holds only the current revision, so every entry
+  evaluated before a policy change would lose its multiplier, and its what-if cost would read as unknown.
+- Prevention: anything that reads a policy term AS IT WAS when a past row was written joins
+  `strategy_execution_policy_events` on `(deployment_id, revision)`, which is unique and append-only. The live table
+  is for gates deciding now.
+- Enforced in: `app/services/execution_tca.py::_ENTRIES_SQL`;
+  `tests/test_execution_tca_db.py::test_the_arrival_quote_is_recorded_before_the_order_is_sent_and_measures_the_fill`.
+  Skill text for `.claude/skills/data-engineer` is posted on #2403, because `.claude/**` is write-refused from the
+  loop worktree.
+
+### Classify a best-effort evidence row before its insert, so a CHECK cannot turn a bad input into a missing row (#3611)
+
+- Failure (PR #3860, review bot round 1): `record_arrival_quote` wrote every returned quote as `quoted`. A quote with
+  a non-positive bid violated the table's CHECK, the contained insert rolled back, and the reader saw
+  `arrival_missing`, which is the same thing it sees when the write never ran.
+- Prevention: when a best-effort write's CHECK can reject an input, give that input its own outcome value and
+  classify it in code before the insert (here `unusable`, keeping the values as returned). Containment then catches
+  only genuine write failures, and the reader can tell a bad input from a lost write.
+- Enforced in: `app/services/execution_tca.py::record_arrival_quote`; sql/500's outcome CHECK;
+  `tests/test_execution_tca_db.py::test_a_quote_with_a_non_positive_bid_is_recorded_unusable_and_the_order_still_submits`.

@@ -20,6 +20,10 @@ endpoint serves some US equities a quote 1–2 hours late while their candles st
 for such a name, the broker's live what-if spread replaces the delayed quote's spread flag, and the preflight records
 ``price_reference = 'candle_close'``. A candle that cannot be read, or is itself too old, leaves the ``quote_stale``
 deferral in place.
+
+Between the durable authority and the broker write, the instrument's quote is fetched once more and recorded as the
+order's arrival quote (#3611, ``execution_tca``). It is evidence only: a failed fetch or write is recorded or logged,
+and the order is submitted either way.
 """
 
 from __future__ import annotations
@@ -36,6 +40,7 @@ from psycopg.pq import TransactionStatus
 from app.providers.broker import BrokerAccountRiskSnapshot, BrokerProvider, BrokerWhatIfOrder
 from app.providers.market_data import IntradayBar
 from app.services import momentum_book as mb
+from app.services.execution_tca import ArrivalQuote, record_arrival_quote
 from app.services.market_data import DEFAULT_MAX_SPREAD_PCT
 from app.services.momentum_book_intent import MomentumIntent, load_intent
 from app.services.strategy_control_plane import (
@@ -188,6 +193,7 @@ def _execute_locked(
     signal_id: int,
     clock: Callable[[], datetime],
     latest_bar: LatestBar | None,
+    arrival_quote: ArrivalQuote | None,
 ) -> PaperExecutionResult:
     now = clock()
     owner = conn.execute(
@@ -291,6 +297,10 @@ def _execute_locked(
             stressed_cost=stressed_cost,
             cost_basis=cost_basis,
         )
+    if arrival_quote is not None:
+        record_arrival_quote(
+            conn, order_id=order_id, instrument_id=intent.instrument_id, arrival_quote=arrival_quote, clock=clock
+        )
     return _submit_recorded_order(
         conn,
         broker=broker,
@@ -312,10 +322,12 @@ def execute_momentum_signal(
     signal_id: int,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     latest_bar: LatestBar | None = None,
+    arrival_quote: ArrivalQuote | None = None,
 ) -> PaperExecutionResult:
     """Evaluate one entry and, only if every gate passes, submit it to demo. Serialised with the paper, trial and pot
     paths under the same allocator lock. ``clock`` is read at the start and again when the broker costs arrive.
-    ``latest_bar`` returns an instrument's latest OneMinute candle; without it a delayed quote defers (#3833)."""
+    ``latest_bar`` returns an instrument's latest OneMinute candle; without it a delayed quote defers (#3833).
+    ``arrival_quote`` fetches the instrument's quote just before submission, recorded for cost analysis (#3611)."""
     if conn.info.transaction_status != TransactionStatus.IDLE:
         raise StrategyPaperExecutionError("momentum-book execution requires an idle connection")
     with _allocator_lock(conn):
@@ -325,6 +337,7 @@ def execute_momentum_signal(
             signal_id=signal_id,
             clock=lambda: clock().astimezone(UTC),
             latest_bar=latest_bar,
+            arrival_quote=arrival_quote,
         )
 
 
