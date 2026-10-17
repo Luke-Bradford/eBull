@@ -332,6 +332,10 @@ class Holder:
     # holder carries the largest of its lots' and each :class:`HolderLot` its own, so a
     # consumer can tell which counted component the flag belongs to. 0 otherwise.
     joint_filing_lines: int = 0
+    # #3349 — ``True`` when this ``indirect`` row restates the same owner's ``direct`` block
+    # on a joint accession (``_INSIDER_JOINT_DIRECT_LINES_SQL``), so it is never counted:
+    # :func:`_source_rows_and_total` folds it into provenance. ``False`` otherwise.
+    joint_di_restatement: bool = False
 
 
 @dataclass(frozen=True)
@@ -890,6 +894,9 @@ class _Candidate:
     # Table I lines this owner reports on a joint ``:NDH:`` accession, of which
     # ``shares`` is one (#3227 item 4, ``_INSIDER_JOINT_FILING_LINES_SQL``). 0 otherwise.
     joint_filing_lines: int = 0
+    # ``True`` on an ``indirect`` row restating the same owner's ``direct`` block on a joint
+    # accession (#3349, ``_INSIDER_JOINT_DIRECT_LINES_SQL``). ``False`` otherwise.
+    joint_di_restatement: bool = False
 
 
 def edgar_archive_url(accession_number: str | None) -> str | None:
@@ -1168,6 +1175,40 @@ _INSIDER_JOINT_FILING_LINES_SQL: Final = """
                       AND m.holder_identity_key <> n.holder_identity_key)
 """
 
+# #3349 — the ``(accession, holder, shares)`` of every live XML ``direct`` line on a JOINT
+# accession (≥2 reporting owners). A ``_current`` ``indirect`` row matching one of them, same
+# accession and exactly the same shares, is a RESTATEMENT, not a second holding. Every Table I
+# line of a joint filing goes to ``filers[0]`` (the ``_INSIDER_JOINT_FILING_LINES_SQL`` note
+# above), and joint filers report the record holder's block on a ``D`` line and the co-filers'
+# deemed ownership of that block on an ``I`` line (STAA 0000919574-26-001617, footnote F1:
+# "directly owned by Broadwood Partners … may be deemed to be indirectly beneficially owned by
+# Broadwood Capital … and Neal C. Bradsher"). Summing them as #905 lots counts the block twice.
+# The evidence standard is the one :func:`_reconcile_same_accession_groups` already uses —
+# co-filing proves the group, an exact equal value inside it carries "one block"
+# (prevention-log, #2794) — applied to the single-identity pair that pass leaves to the
+# additive SUM by design.
+#
+# Read from live OBSERVATIONS, not ``_current`` (Codex ckpt-2): ``_current`` keeps one row per
+# nature, so a later direct-only filing replaces the ``D`` partner while the old ``I`` row
+# stays, and a ``_current`` lookup would turn the restatement additive again. The ``:NDT:`` /
+# ``:NDH:`` test is needed here because observations, unlike ``_current``, keep the dataset row
+# beside the XML one, and a dataset ``direct`` is a relationship flag, not a ``D`` line
+# (#2386). A single-owner filing is excluded: its lines are that owner's, and equal D/I
+# amounts there are mostly distinct holdings (a spouse's 150,000 beside the filer's own on
+# ASST; FWRD's two directors' equal grants). The measured population and its per-filing
+# footnote reading are on #3349.
+_INSIDER_JOINT_DIRECT_LINES_SQL: Final = """
+    SELECT DISTINCT d.source_accession AS accession, d.holder_identity_key, d.shares
+      FROM ownership_insiders_observations d
+     WHERE d.instrument_id = %(iid)s
+       AND d.known_to IS NULL
+       AND d.ownership_nature = 'direct'
+       AND d.source_document_id !~ ':(NDT|NDH):'
+       AND d.shares > 0
+       AND (SELECT count(DISTINCT x.filer_cik) FROM insider_filers x
+             WHERE x.accession_number = d.source_accession) > 1
+"""
+
 
 def _collect_canonical_holders_from_current(conn: psycopg.Connection[Any], instrument_id: int) -> list[_Candidate]:
     """Build the canonical-holder candidate set from the per-source
@@ -1206,9 +1247,17 @@ def _collect_canonical_holders_from_current(conn: psycopg.Connection[Any], instr
         # source_accession)`` — the manifest parse is the authoritative
         # full-Table-II view of that filing; the dataset only fills accessions the
         # manifest never parsed.
+        # #3349 — its own statement, not a join: the observations scan spans every quarterly
+        # partition, and joined into the read below it lifted the plan past
+        # ``jit_above_cost`` and JIT emission dominated the read (measured on #3349). Same lesson
+        # as #1346's ``jit = off`` in the refresh helpers, solved here by keeping each plan small.
+        cur.execute(_INSIDER_JOINT_DIRECT_LINES_SQL, {"iid": instrument_id})
+        joint_direct_lines = {
+            (str(r["accession"]), str(r["holder_identity_key"]), Decimal(r["shares"])) for r in cur.fetchall()
+        }
         cur.execute(
             f"""
-            SELECT oc.holder_cik, oc.holder_name, oc.ownership_nature,
+            SELECT oc.holder_cik, oc.holder_name, oc.holder_identity_key, oc.ownership_nature,
                    oc.source, oc.source_accession, oc.shares, oc.period_end,
                    COALESCE(f.is_ten_percent_owner, FALSE) AS is_ten_percent_owner,
                    -- #2386: same marker the de-collision predicate below uses, kept as a
@@ -1258,6 +1307,15 @@ def _collect_canonical_holders_from_current(conn: psycopg.Connection[Any], instr
                     is_ten_percent_owner=bool(row["is_ten_percent_owner"]),
                     nature_from_table_i=bool(row["nature_from_table_i"]),
                     joint_filing_lines=int(row["joint_filing_lines"]),
+                    joint_di_restatement=(
+                        row["ownership_nature"] == "indirect"
+                        and (
+                            str(row.get("source_accession") or ""),
+                            str(row["holder_identity_key"]),
+                            Decimal(row["shares"]),
+                        )
+                        in joint_direct_lines
+                    ),
                 )
             )
 
@@ -2160,6 +2218,8 @@ def _dedup_by_priority(candidates: Iterable[_Candidate]) -> list[Holder]:
                 # The WINNER's, unlike the two flags above: it describes the row whose
                 # ``shares`` is shown, and a loser's figure is not counted (#3227 item 4).
                 joint_filing_lines=winner.joint_filing_lines,
+                # The WINNER's too: it is a property of the counted row's shares.
+                joint_di_restatement=winner.joint_di_restatement,
                 dropped_sources=tuple(
                     DroppedSource(
                         source=loser.source,
@@ -2309,6 +2369,13 @@ _ADDITIVE_SOURCES: Final[frozenset[SourceTag]] = frozenset({"form4", "form3"})
 _ADDITIVE_NATURES: Final[frozenset[str]] = frozenset({"direct", "indirect"})
 
 
+def _is_additive_lot(h: Holder) -> bool:
+    """True when ``h`` is a distinct Section-16 lot that SUMs (#905): an additive nature,
+    and not a joint filing's ``indirect`` restatement of the same owner's ``direct`` block
+    (#3349), which :func:`_source_rows_and_total` never counts."""
+    return (h.ownership_nature or "direct") in _ADDITIVE_NATURES and not h.joint_di_restatement
+
+
 def _argmax_source(sources: Iterable[SourceTag], src_total: dict[SourceTag, Decimal]) -> SourceTag:
     """Source carrying the owner's largest total; tie-break to the
     higher-priority (lower ``_PRIORITY_RANK``) source so form4 beats 13d
@@ -2345,8 +2412,19 @@ def _source_rows_and_total(source: SourceTag, rows: list[Holder]) -> tuple[list[
         rep = max(rows, key=lambda h: h.shares)
         return [rep], rep.shares
 
-    additive = [h for h in rows if (h.ownership_nature or "direct") in _ADDITIVE_NATURES]
-    overlap = [h for h in rows if (h.ownership_nature or "direct") not in _ADDITIVE_NATURES]
+    # #3349 — a joint filing's ``indirect`` restatement of this owner's ``direct`` block is
+    # provenance only, never counted: not SUMmed (it is the same block), and not MAXed either,
+    # because once a later filing moves the ``direct`` balance the restatement is a stale copy
+    # of the old one. Kept only when it is the owner's sole row, as before.
+    restated = [h for h in rows if h.joint_di_restatement]
+    if restated and len(restated) < len(rows):
+        keep, total = _source_rows_and_total(source, [h for h in rows if not h.joint_di_restatement])
+        primary_idx = max(range(len(keep)), key=lambda i: keep[i].shares)
+        keep[primary_idx] = _fold_overlap_into(keep[primary_idx], restated)
+        return keep, total
+
+    additive = [h for h in rows if _is_additive_lot(h)]
+    overlap = [h for h in rows if not _is_additive_lot(h)]
     additive_sum = sum((h.shares for h in additive), Decimal(0))
     overlap_max = max((h.shares for h in overlap), default=Decimal(0))
 
@@ -2443,10 +2521,10 @@ def _merge_section16_forms(by_source: dict[SourceTag, list[Holder]]) -> None:
     latest_additive: dict[str, Holder] = {}
     overlap: list[Holder] = []
     for h in pooled:
-        nature = h.ownership_nature or "direct"
-        if nature not in _ADDITIVE_NATURES:
+        if not _is_additive_lot(h):
             overlap.append(h)
             continue
+        nature = h.ownership_nature or "direct"
         cur = latest_additive.get(nature)
         if cur is None or _section16_row_supersedes(h, cur):
             latest_additive[nature] = h

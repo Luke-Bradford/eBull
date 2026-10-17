@@ -12993,3 +12993,20 @@ neighbouring container and match it.**
   itself writes.
 - Enforced in: `scripts/backfill_3437_regsho_suffix_rows.py` (imports `REGSHO_EXPECTED_HEADER`; docstring
   "``known_from`` policy").
+
+### A rule about one owner's lines does not survive a parser that attributes a joint filing's lines to one owner (#3349)
+
+- Failure: the rollup SUMs an owner's Form 3/4 `direct` and `indirect` rows as distinct holdings (#905), and
+  `_reconcile_same_accession_groups` leaves a single identity's D+I to that SUM by design. But the XML parser gives
+  every Table I line of a joint filing to `filers[0]`, and joint filers commonly report one block twice: a `D` line for
+  the record holder and an `I` line for the co-filers' deemed ownership of the same shares. 8 instruments rendered an
+  owner at twice the block (IMDX: Broadwood Partners 25,369,768 against its 12,684,884 `D` line).
+- Prevention: when a rule is justified by "these lines belong to one owner", check how the parser assigns lines to
+  owners on a multi-owner document (`filers[0]`, `default_*`). Equal amounts are not the discriminator on their own:
+  on single-owner filings 23 of 25 equal D/I pairs were distinct holdings (a spouse's lot, two directors' equal
+  grants). Read the footnotes of the population before choosing the key. And decide a relationship between two rows
+  from the append-only layer, not from a snapshot that keeps one row per nature: in `_current` a later direct-only
+  filing replaces the `D` partner while the stale `I` row stays (Codex ckpt-2).
+- Enforced in: `app/services/ownership_rollup.py::_INSIDER_JOINT_DIRECT_LINES_SQL` and `_source_rows_and_total` (which
+  drops the restatement before any MAX; `_merge_section16_forms` only routes it to its overlap bucket and relies on that);
+  `tests/test_3349_joint_di_restatement.py`; `tests/test_3349_joint_di_restatement_sql.py` (one case per clause).
