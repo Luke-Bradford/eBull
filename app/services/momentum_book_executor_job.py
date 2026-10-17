@@ -6,6 +6,8 @@ Each fire on a NYSE session from ``ENTRY_TIME_UTC``, once the ``momentum-30`` pa
    ``momentum_book_job.catch_up_entries`` re-emits, for today, the book names that never entered.
 2. **Exits first.** Every held trade the formation ordered out is closed through the position manager
    (``manage_owned_position(close_reason="strategy_exit")``), which owns the broker close and its reconciliation.
+   Just before each close is sent, its close-arm what-if cost and arrival quote are recorded (#3611,
+   ``execution_tca.exit_evidence``); evidence only, the close goes either way.
 3. **Entries** wait until every exit of the formation has closed (a closing trade still reserves its capital), then
    each undecided entry signal goes through ``momentum_book_executor.execute_momentum_signal``.
 """
@@ -25,7 +27,7 @@ from psycopg.pq import TransactionStatus
 
 from app.providers.broker import BrokerProvider
 from app.services import momentum_book as mb
-from app.services.execution_tca import ArrivalQuote
+from app.services.execution_tca import ArrivalQuote, exit_evidence
 from app.services.momentum_book_executor import LatestBar, execute_momentum_signal
 from app.services.momentum_book_job import catch_up_entries, form_book
 from app.services.strategy_paper_executor import _session_is_open
@@ -165,6 +167,7 @@ def run_momentum_book(
                 broker_position_id=int(position_id),
                 close_reason="strategy_exit",
                 now=clock(),
+                exit_evidence=exit_evidence(conn, broker=broker, arrival_quote=arrival_quote, clock=clock),
             )
         except Exception:
             logger.exception("momentum book: closing trade %s raised; continuing", trade_id)

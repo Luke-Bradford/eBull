@@ -4,7 +4,17 @@ from typing import Any
 
 import pytest
 
-from app.services.execution_tca import ARRIVAL_MAX_AGE_SECONDS, ArrivalFacts, ArrivalOutcome, entry_costs, entry_tca
+from app.providers.broker import BrokerCostComponent, BrokerWhatIfCostResponse
+from app.services.execution_tca import (
+    ARRIVAL_MAX_AGE_SECONDS,
+    ArrivalFacts,
+    ArrivalOutcome,
+    classify_exit,
+    close_cost,
+    entry_costs,
+    entry_tca,
+    exit_tca,
+)
 
 AT = datetime(2026, 11, 2, 15, 10, 30, tzinfo=UTC)
 
@@ -108,3 +118,171 @@ def test_an_entry_without_an_arrival_row_still_reports_its_shortfall() -> None:
     e = entry_tca(_row(outcome=None, received_at=None, quoted_at=None, bid=None, ask=None))
     assert e.costs is not None and e.costs.shortfall == Decimal("0.0005")
     assert e.costs.arrival_unmeasured == "arrival_missing"
+
+
+# --- #3611 slice 2: exits ---------------------------------------------------------------------------------------
+
+
+def _cost(amount: str | None, value: str | None, currency: str = "USD") -> BrokerCostComponent:
+    return BrokerCostComponent(
+        "marketSpread",
+        None if amount is None else Decimal(amount),
+        None if value is None else Decimal(value),
+        currency,
+        {},
+    )
+
+
+def _response(*costs: BrokerCostComponent, instrument_id: int = 7) -> BrokerWhatIfCostResponse:
+    return BrokerWhatIfCostResponse(instrument_id, "X", costs, AT, {})
+
+
+def test_close_cost_sums_every_component_in_one_field_and_currency() -> None:
+    assert close_cost(_response(_cost(None, "1.5"), _cost(None, "0.25")), instrument_id=7) == Decimal("1.75")
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        _response(_cost(None, "1.5"), instrument_id=8),  # another instrument's quote
+        _response(),  # no rows is not "no cost"
+        _response(_cost("1", "1")),  # both fields: undocumented which wins
+        _response(_cost(None, None)),  # neither field
+        _response(_cost("1", None), _cost(None, "1")),  # mixed fields
+        _response(_cost(None, "1"), _cost(None, "1", "EUR")),  # mixed currencies
+        _response(_cost(None, "1", "EUR")),  # one currency, but not the ticket's
+        _response(_cost(None, "-0.1")),
+        _response(_cost(None, "NaN")),
+    ],
+)
+def test_close_cost_refuses_what_it_cannot_decode(response: BrokerWhatIfCostResponse) -> None:
+    assert close_cost(response, instrument_id=7) is None
+
+
+@pytest.mark.parametrize(
+    ("engine", "fill", "stop", "take", "kind"),
+    [
+        (True, "90", "95", "120", "engine"),  # the engine's close, wherever it filled
+        (False, "95", "95", "120", "stop_loss"),  # at the stop
+        (False, "93", "95", "120", "stop_loss"),  # through it
+        (False, "120", "95", "120", "take_profit"),
+        (False, "100", "95", "120", "unexplained"),  # inside both levels: manual
+        (False, "90", "0", None, "unexplained"),  # a zero level is no level
+        (False, "90", None, None, "unexplained"),
+    ],
+)
+def test_an_exit_is_attributed_by_order_then_by_level(
+    engine: bool, fill: str, stop: str | None, take: str | None, kind: str
+) -> None:
+    def d(x: str | None) -> Decimal | None:
+        return None if x is None else Decimal(x)
+
+    assert classify_exit(engine_order=engine, fill=Decimal(fill), stop=d(stop), take=d(take)) == kind
+
+
+def _exit_row(**overrides: Any) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "strategy_trade_id": 1,
+        "broker_position_id": 2,
+        "instrument_id": 7,
+        "symbol": "X",
+        "n_closes": 1,
+        "fill": Decimal("93"),
+        "closed_at": AT,
+        "stop_level": Decimal("95"),
+        "take_level": Decimal("120"),
+        "order_id": None,
+        "created_at": None,
+        "outcome": None,
+        "received_at": None,
+        "quoted_at": None,
+        "bid": None,
+        "ask": None,
+        "what_if_outcome": None,
+        "what_if_cost": None,
+        "ticket_amount": None,
+        "session_open": Decimal("94"),
+        "session_low": Decimal("92"),
+        "session_high": Decimal("96"),
+    }
+    return row | overrides
+
+
+def test_a_stop_hit_is_costed_against_its_level_and_flags_a_gap_through_it() -> None:
+    e = exit_tca(_exit_row())
+    assert (e.kind, e.level, e.gapped, e.gap_unmeasured, e.unmeasured) == ("stop_loss", Decimal("95"), True, None, None)
+    assert e.level_cost == 1 - Decimal("93") / Decimal("95")
+    assert e.execution is None and e.what_if_cost is None
+
+
+def test_a_take_profit_without_a_gap_and_a_missing_candle() -> None:
+    candle = {"session_open": Decimal("110"), "session_low": Decimal("109"), "session_high": Decimal("121")}
+    assert exit_tca(_exit_row(fill=Decimal("120.5"), **candle)).gapped is False
+    e = exit_tca(_exit_row(fill=Decimal("120.5"), session_open=None))
+    assert (e.kind, e.gapped, e.gap_unmeasured) == ("take_profit", None, "session_candle_missing")
+    assert e.level_cost == 1 - Decimal("120.5") / Decimal("120")  # negative: filled better than the target
+
+
+def test_an_engine_close_is_measured_against_the_arrival_mid_and_the_close_what_if() -> None:
+    e = exit_tca(
+        _exit_row(
+            order_id=5,
+            created_at=AT,
+            fill=Decimal("99.95"),
+            outcome="quoted",
+            received_at=AT,
+            quoted_at=AT - timedelta(seconds=2),
+            bid=Decimal("99.9"),
+            ask=Decimal("100.1"),
+            what_if_outcome="quoted",
+            what_if_cost=Decimal("0.6"),
+            ticket_amount=Decimal("1000"),
+        )
+    )
+    assert (e.kind, e.unmeasured, e.arrival_unmeasured) == ("engine", None, None)
+    assert e.execution == Decimal("0.0005")  # sold 5 cents under a 100 mid
+    assert e.effective_spread == Decimal("0.001")
+    assert e.quoted_spread == Decimal("0.002")
+    assert e.what_if_cost == Decimal("0.0006")
+    assert e.level is None and e.gapped is None
+
+
+@pytest.mark.parametrize(
+    ("overrides", "unmeasured", "arrival_unmeasured"),
+    [
+        ({"what_if_outcome": "failed"}, "what_if_failed", "arrival_missing"),
+        ({"what_if_outcome": "undecodable"}, "what_if_undecodable", "arrival_missing"),
+        ({}, "what_if_missing", "arrival_missing"),
+    ],
+)
+def test_an_engine_close_names_what_it_could_not_measure(
+    overrides: dict[str, Any], unmeasured: str, arrival_unmeasured: str
+) -> None:
+    e = exit_tca(_exit_row(order_id=5, created_at=AT, **overrides))
+    assert (e.kind, e.unmeasured, e.arrival_unmeasured) == ("engine", unmeasured, arrival_unmeasured)
+
+
+def test_several_close_events_or_a_bad_fill_are_not_measured() -> None:
+    assert exit_tca(_exit_row(n_closes=2)).unmeasured == "multiple_closes"
+    assert exit_tca(_exit_row(fill=Decimal("0"))).unmeasured == "fill_price_unusable"
+
+
+def test_a_candle_whose_range_cannot_hold_the_fill_is_not_compared_with_the_level() -> None:
+    # A later 4:1 split rebases price_daily: the session that opened at 105 now reads 26.25, which would look like a
+    # gap through a nominal stop of 100. The fill of 99 lies outside the rebased range, so no gap is claimed.
+    e = exit_tca(
+        _exit_row(
+            fill=Decimal("99"),
+            stop_level=Decimal("100"),
+            session_open=Decimal("26.25"),
+            session_low=Decimal("24.5"),
+            session_high=Decimal("26.5"),
+        )
+    )
+    assert (e.kind, e.gapped, e.gap_unmeasured) == ("stop_loss", None, "session_candle_off_basis")
+    assert e.level_cost == Decimal("0.01")
+
+
+def test_an_engine_close_without_a_live_mark_is_unpriced() -> None:
+    e = exit_tca(_exit_row(order_id=5, created_at=AT, what_if_outcome="unpriced"))
+    assert (e.kind, e.unmeasured, e.what_if_cost) == ("engine", "what_if_unpriced", None)

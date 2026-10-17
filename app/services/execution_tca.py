@@ -22,6 +22,28 @@ arrival quote exists to remove. There is no source rule for that bound; it is fi
 seconds after submission, while decision quotes minutes old put fill-vs-decision gaps well beyond the what-if cost
 (reproduce: ``scripts/tca_readout.py --since 2026-10-15``, columns ``fill_after_s``, ``decision_age_s``,
 ``shortfall_bps``, ``what_if_bps``), so a mid older than a minute already measures drift as much as cost.
+
+**Exits (slice 2).** Every close of a strategy-owned long position since a date, whoever closed it:
+
+* ``engine`` — the strategy submitted the close (an exit order linked to the trade that the broker did not reject).
+  Before submission ``exit_evidence`` records the arrival quote, then the close-arm what-if cost bound to that
+  position (``strategy_order_close_what_ifs``; the open arm does not bound the close, #2712). The what-if ticket is
+  the position's units at the arrival bid, a sell's live executable price: the broker's portfolio carries no current
+  mark (``_parse_direct_position`` sets ``current_price`` to the open rate), and the close arm's ``units`` field is
+  undocumented and unmeasured. With no usable arrival bid the what-if is not requested (``unpriced``). For a sell,
+  with arrival mid M and fill F: ``execution = 1 - F / M`` (sold below the mid), ``effective_spread = 2 * |F - M| /
+  M``, and the what-if cost rate is ``cost / ticket``. There is no separate decision price: the close is decided and
+  sent in one pass.
+* ``stop_loss`` / ``take_profit`` — no engine exit, and the close rate is at or beyond the stop (``F <= stop``) or the
+  target (``F >= target``) the closed-position record carries. eToro's trading history has no close-reason field
+  (``list-trading-history``, checked 2026-10-17), so the attribution is by price, fixed by construction.
+  ``level_cost = 1 - F / level`` (positive when the fill was worse than the level), and ``gapped`` says the session
+  opened beyond the level (``price_daily.open`` on the close's New York date), so the fill could not have been the
+  level. ``price_daily`` is retroactively split-adjusted while the fill and levels stay as traded, so the candle is
+  used only when the fill lies inside its own session's low-high range; a candle on another basis (or an
+  extended-hours fill outside the regular session) leaves ``gapped`` unset, with the reason.
+* ``unexplained`` — neither: a manual close, or a close inside both levels with no engine order.
+
 Descriptive only; nothing here enters a decision.
 """
 
@@ -36,9 +58,11 @@ from typing import Any, Final, Literal
 
 import psycopg
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
+from app.providers.broker import BrokerPosition, BrokerProvider, BrokerWhatIfCostResponse, BrokerWhatIfOrder
 from app.providers.market_data import Quote
-from app.services.strategy_paper_executor import _age_ok
+from app.services.strategy_paper_executor import _age_ok, _component_amount
 
 logger = logging.getLogger(__name__)
 
@@ -73,10 +97,12 @@ def record_arrival_quote(
     instrument_id: int,
     arrival_quote: ArrivalQuote,
     clock: Callable[[], datetime],
-) -> None:
-    """Fetch and store the instrument's quote for an order about to be submitted. Best-effort and self-contained:
-    nothing it raises reaches the caller, and a failed write rolls back only its own savepoint (or transaction, on an
-    idle connection), so the submission that follows runs either way."""
+) -> ArrivalFacts | None:
+    """Fetch and store the instrument's quote for an order about to be submitted, and return what was fetched (None
+    when nothing was). Best-effort and self-contained: nothing it raises reaches the caller, and a failed write rolls
+    back only its own savepoint (or transaction, on an idle connection), so the submission that follows runs either
+    way."""
+    facts: ArrivalFacts | None = None
     try:
         requested_at = clock()
         quote: Quote | None = None
@@ -98,6 +124,13 @@ def record_arrival_quote(
             )
         # A clock that steps back between the two reads must not violate CHECK (received_at >= requested_at).
         received_at = max(requested_at, clock())
+        facts = ArrivalFacts(
+            outcome,
+            received_at,
+            None if quote is None else quote.timestamp,
+            None if quote is None else quote.bid,
+            None if quote is None else quote.ask,
+        )
         with conn.transaction():
             conn.execute(
                 """
@@ -117,6 +150,7 @@ def record_arrival_quote(
             )
     except Exception:
         logger.warning("arrival quote for order %s not recorded", order_id, exc_info=True)
+    return facts
 
 
 @dataclass(frozen=True)
@@ -227,7 +261,8 @@ _ENTRIES_SQL: Final = """
             -- min() of a single row is that row; with more than one, the fill is not measured.
             SELECT count(*) AS n_opens, min(te.price) AS fill, min(te.executed_at) AS filled_at
               FROM trade_events te
-             WHERE te.environment = o.broker_environment AND te.event_kind = 'open'
+             -- A NULL environment predates #3614 (see _EXITS_SQL).
+             WHERE te.environment = COALESCE(o.broker_environment, 'demo') AND te.event_kind = 'open'
                AND te.position_id IN (SELECT ow.broker_position_id FROM strategy_position_ownership ow
                                        WHERE ow.strategy_trade_id = t.strategy_trade_id)
       ) op
@@ -291,15 +326,369 @@ def load_entry_tca(conn: Conn, *, since: date) -> list[EntryTca]:
     return [entry_tca(r) for r in rows]
 
 
+#: ``strategy_order_close_what_ifs.outcome`` (sql/501).
+CloseWhatIfOutcome = Literal["quoted", "undecodable", "failed", "unpriced"]
+
+#: Called by ``manage_owned_position`` with an exit order's id and the broker position it closes, after the order is
+#: recorded and before the close is submitted.
+ExitEvidence = Callable[[int, BrokerPosition], None]
+
+_TICKET_QUANTUM: Final = Decimal("0.01")
+
+#: ``BrokerWhatIfOrder.order_currency``'s default, the only one eToro's what-if accepts: the ticket is in it, so a
+#: cost is comparable with the ticket only in it.
+_TICKET_CURRENCY: Final = "USD"
+
+
+def close_cost(response: BrokerWhatIfCostResponse, *, instrument_id: int) -> Decimal | None:
+    """The response's total cost in the ticket's currency, or None when it does not decode: every component must
+    carry one field (``amount`` or ``value``, ``_component_amount``), the same field as the others, the ticket's
+    currency and a finite non-negative figure. Summed, not filtered: an unfamiliar component is still a cost."""
+    if response.instrument_id != instrument_id or not response.costs:
+        return None
+    total = Decimal("0")
+    bases: set[str] = set()
+    for component in response.costs:
+        resolved = _component_amount(component)
+        if resolved is None or component.currency.strip().upper() != _TICKET_CURRENCY:
+            return None
+        figure, basis = resolved
+        if not figure.is_finite() or figure < 0:
+            return None
+        bases.add(basis)
+        total += figure
+    return total if len(bases) == 1 else None
+
+
+def record_close_what_if(
+    conn: Conn,
+    *,
+    order_id: int,
+    position: BrokerPosition,
+    mark: Decimal | None,
+    broker: BrokerProvider,
+    clock: Callable[[], datetime],
+) -> None:
+    """Quote and store the close-arm cost of the exact position an exit order is about to close, for a ticket of its
+    units at ``mark`` (the arrival bid). Without a positive mark nothing is requested and the row says ``unpriced``.
+    Best-effort and self-contained, as ``record_arrival_quote``: nothing it raises reaches the caller."""
+    try:
+        requested_at = clock()
+        ticket: Decimal | None = None
+        if mark is not None and mark.is_finite() and mark > 0 and position.units > 0:
+            ticket = (position.units * mark).quantize(_TICKET_QUANTUM)
+        outcome: CloseWhatIfOutcome = "unpriced"
+        cost: Decimal | None = None
+        response: BrokerWhatIfCostResponse | None = None
+        if ticket is not None and ticket > 0 and position.position_id is not None:
+            try:
+                response = broker.get_what_if_costs(
+                    BrokerWhatIfOrder(
+                        instrument_id=position.instrument_id,
+                        transaction="sell",
+                        settlement_type="real",
+                        amount=ticket,
+                        leverage=1,
+                        action="close",
+                        position_ids=(position.position_id,),
+                    )
+                )
+                cost = close_cost(response, instrument_id=position.instrument_id)
+                outcome = "undecodable" if cost is None else "quoted"
+            except Exception:
+                outcome, cost, response = "failed", None, None
+                logger.warning("close what-if for order %s unavailable", order_id, exc_info=True)
+        else:
+            ticket = None
+        received_at = max(requested_at, clock())
+        with conn.transaction():
+            conn.execute(
+                """
+                INSERT INTO strategy_order_close_what_ifs
+                    (order_id, requested_at, received_at, ticket_amount, outcome, cost, currency, quoted_at,
+                     raw_payload)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    order_id,
+                    requested_at,
+                    received_at,
+                    ticket,
+                    outcome,
+                    cost,
+                    None if cost is None else _TICKET_CURRENCY,
+                    None if response is None else response.last_updated,
+                    None if response is None else Jsonb(response.raw_payload),
+                ),
+            )
+    except Exception:
+        logger.warning("close what-if for order %s not recorded", order_id, exc_info=True)
+
+
+def exit_evidence(
+    conn: Conn,
+    *,
+    broker: BrokerProvider,
+    arrival_quote: ArrivalQuote | None,
+    clock: Callable[[], datetime],
+) -> ExitEvidence:
+    """The ``manage_owned_position`` hook that records an exit's arrival quote, then its close-arm cost priced at
+    that quote's bid (the module docstring's ticket rule)."""
+
+    def record(order_id: int, position: BrokerPosition) -> None:
+        arrival = (
+            None
+            if arrival_quote is None
+            else record_arrival_quote(
+                conn, order_id=order_id, instrument_id=position.instrument_id, arrival_quote=arrival_quote, clock=clock
+            )
+        )
+        usable = _usable_quote(arrival)
+        mark = None if isinstance(usable, str) else usable[0]
+        record_close_what_if(conn, order_id=order_id, position=position, mark=mark, broker=broker, clock=clock)
+
+    return record
+
+
+ExitKind = Literal["engine", "stop_loss", "take_profit", "unexplained"]
+
+ExitUnmeasured = Literal[
+    "multiple_closes",
+    "fill_price_unusable",
+    "what_if_missing",
+    "what_if_failed",
+    "what_if_undecodable",
+    "what_if_unpriced",
+]
+
+#: Why ``gapped`` is unset on a stop or target close.
+GapUnmeasured = Literal["session_candle_missing", "session_candle_off_basis"]
+
+
+def classify_exit(*, engine_order: bool, fill: Decimal, stop: Decimal | None, take: Decimal | None) -> ExitKind:
+    """The module docstring's attribution of one long close. A level of zero or below is no level."""
+    if engine_order:
+        return "engine"
+    if stop is not None and stop.is_finite() and stop > 0 and fill <= stop:
+        return "stop_loss"
+    if take is not None and take.is_finite() and take > 0 and fill >= take:
+        return "take_profit"
+    return "unexplained"
+
+
+@dataclass(frozen=True)
+class ExitTca:
+    strategy_trade_id: int
+    broker_position_id: int
+    instrument_id: int
+    symbol: str | None
+    closed_at: datetime
+    fill: Decimal | None
+    kind: ExitKind | None
+    #: The engine's exit order; None for a broker-side close.
+    order_id: int | None
+    submitted_at: datetime | None
+    #: ``engine``: the module docstring's sell figures against the arrival quote, and the close-arm what-if rate.
+    execution: Decimal | None
+    effective_spread: Decimal | None
+    quoted_spread: Decimal | None
+    arrival_age_seconds: Decimal | None
+    arrival_unmeasured: Unmeasured | None
+    what_if_cost: Decimal | None
+    #: ``stop_loss`` / ``take_profit``: the level hit, the fill's cost against it, and whether the session opened
+    #: beyond it (None, with ``gap_unmeasured``, when the session's candle is missing or on another price basis).
+    level: Decimal | None
+    level_cost: Decimal | None
+    gapped: bool | None
+    gap_unmeasured: GapUnmeasured | None
+    #: Why a figure the kind calls for is missing; None when nothing is.
+    unmeasured: ExitUnmeasured | None
+
+
+_EXITS_SQL: Final = """
+    SELECT ow.strategy_trade_id, ow.broker_position_id, t.instrument_id, i.symbol,
+           cl.n_closes, cl.fill, cl.closed_at, cl.stop_level, cl.take_level,
+           ex.order_id, ex.created_at,
+           a.outcome, a.received_at, a.quoted_at, a.bid, a.ask,
+           w.outcome AS what_if_outcome, w.cost AS what_if_cost, w.ticket_amount,
+           pd.open AS session_open, pd.low AS session_low, pd.high AS session_high
+      FROM strategy_position_ownership ow
+      JOIN strategy_trades t ON t.strategy_trade_id = ow.strategy_trade_id
+      -- Long positions only: the attribution and the signs are a sell's.
+      CROSS JOIN LATERAL (
+            SELECT o.broker_environment
+              FROM strategy_trade_orders sto JOIN orders o ON o.order_id = sto.order_id
+             WHERE sto.strategy_trade_id = t.strategy_trade_id AND sto.purpose = 'entry' AND o.action = 'BUY'
+             ORDER BY o.order_id
+             LIMIT 1
+      ) en
+      CROSS JOIN LATERAL (
+            -- min() of a single row is that row; with more than one, the close is not measured.
+            SELECT count(*) AS n_closes, min(te.price) AS fill, min(te.executed_at) AS closed_at,
+                   min((te.raw_payload->>'stopLossRate')::numeric) AS stop_level,
+                   min((te.raw_payload->>'takeProfitRate')::numeric) AS take_level
+              FROM trade_events te
+             -- A NULL environment predates #3614's recording of it, when strategy orders went to demo only (every
+             -- trade event of such a position is 'demo' on the dev DB, 2026-10-17).
+             WHERE te.environment = COALESCE(en.broker_environment, 'demo') AND te.event_kind = 'close'
+               AND te.position_id = ow.broker_position_id
+      ) cl
+      LEFT JOIN LATERAL (
+            -- The latest close the strategy sent that the broker did not refuse.
+            SELECT o.order_id, o.created_at
+              FROM strategy_trade_orders sto JOIN orders o ON o.order_id = sto.order_id
+             WHERE sto.strategy_trade_id = t.strategy_trade_id AND sto.purpose = 'exit' AND o.status <> 'rejected'
+             ORDER BY o.created_at DESC, o.order_id DESC
+             LIMIT 1
+      ) ex ON true
+      LEFT JOIN strategy_order_arrival_quotes a ON a.order_id = ex.order_id
+      LEFT JOIN strategy_order_close_what_ifs w ON w.order_id = ex.order_id
+      LEFT JOIN instruments i ON i.instrument_id = t.instrument_id
+      LEFT JOIN price_daily pd
+             ON pd.instrument_id = t.instrument_id
+            AND pd.price_date = (cl.closed_at AT TIME ZONE %(session_tz)s)::date
+     WHERE cl.n_closes > 0 AND cl.closed_at >= %(since)s
+     ORDER BY cl.closed_at, ow.broker_position_id
+"""
+
+_SESSION_TZ: Final = "America/New_York"
+
+
+def _what_if_rate(row: dict[str, Any]) -> Decimal | ExitUnmeasured:
+    outcome = row["what_if_outcome"]
+    if outcome is None:
+        return "what_if_missing"
+    if outcome == "failed":
+        return "what_if_failed"
+    if outcome == "unpriced":
+        return "what_if_unpriced"
+    cost, ticket = row["what_if_cost"], row["ticket_amount"]
+    if outcome == "undecodable" or cost is None or not cost.is_finite() or not ticket:
+        return "what_if_undecodable"
+    return Decimal(cost) / Decimal(ticket)
+
+
+def _gapped(
+    kind: Literal["stop_loss", "take_profit"],
+    *,
+    level: Decimal,
+    fill: Decimal,
+    open_: Decimal | None,
+    low: Decimal | None,
+    high: Decimal | None,
+) -> tuple[bool, None] | tuple[None, GapUnmeasured]:
+    """Whether the close's session opened beyond the level, judged only on a candle whose range holds the fill."""
+    if open_ is None or low is None or high is None:
+        return None, "session_candle_missing"
+    if not all(x.is_finite() and x > 0 for x in (open_, low, high)) or not low <= fill <= high:
+        return None, "session_candle_off_basis"
+    return (open_ <= level if kind == "stop_loss" else open_ >= level), None
+
+
+def exit_tca(row: dict[str, Any]) -> ExitTca:
+    """One ``_EXITS_SQL`` row, measured."""
+    fill: Decimal | None = row["fill"]
+    kind: ExitKind | None = None
+    unmeasured: ExitUnmeasured | None = None
+    execution = effective_spread = quoted_spread = age = what_if = level = level_cost = None
+    arrival_unmeasured: Unmeasured | None = None
+    gapped: bool | None = None
+    gap_unmeasured: GapUnmeasured | None = None
+    if row["n_closes"] > 1:
+        fill, unmeasured = None, "multiple_closes"
+    elif fill is None or not fill.is_finite() or fill <= 0:
+        unmeasured = "fill_price_unusable"
+    else:
+        stop, take = row["stop_level"], row["take_level"]
+        kind = classify_exit(engine_order=row["order_id"] is not None, fill=fill, stop=stop, take=take)
+        if kind == "engine":
+            arrival = (
+                None
+                if row["outcome"] is None
+                else ArrivalFacts(row["outcome"], row["received_at"], row["quoted_at"], row["bid"], row["ask"])
+            )
+            if arrival is not None and arrival.quoted_at is not None:
+                age = Decimal(str((arrival.received_at - arrival.quoted_at).total_seconds()))
+            usable = _usable_quote(arrival)
+            if isinstance(usable, str):
+                arrival_unmeasured = usable
+            else:
+                bid, ask = usable
+                mid = (bid + ask) / 2
+                execution = 1 - fill / mid  # a sell: positive when it sold below the mid
+                effective_spread = 2 * abs(fill - mid) / mid
+                quoted_spread = (ask - bid) / mid
+            rate = _what_if_rate(row)
+            if isinstance(rate, str):
+                unmeasured = rate
+            else:
+                what_if = rate
+        elif kind in ("stop_loss", "take_profit"):
+            level = stop if kind == "stop_loss" else take
+            if level is None:
+                raise ValueError("classify_exit attributed a close to a missing level")
+            level_cost = 1 - fill / level
+            gapped, gap_unmeasured = _gapped(
+                kind,
+                level=level,
+                fill=fill,
+                open_=row["session_open"],
+                low=row["session_low"],
+                high=row["session_high"],
+            )
+    return ExitTca(
+        strategy_trade_id=int(row["strategy_trade_id"]),
+        broker_position_id=int(row["broker_position_id"]),
+        instrument_id=int(row["instrument_id"]),
+        symbol=row["symbol"],
+        closed_at=row["closed_at"],
+        fill=fill,
+        kind=kind,
+        order_id=None if row["order_id"] is None else int(row["order_id"]),
+        submitted_at=row["created_at"],
+        execution=execution,
+        effective_spread=effective_spread,
+        quoted_spread=quoted_spread,
+        arrival_age_seconds=age,
+        arrival_unmeasured=arrival_unmeasured,
+        what_if_cost=what_if,
+        level=level,
+        level_cost=level_cost,
+        gapped=gapped,
+        gap_unmeasured=gap_unmeasured,
+        unmeasured=unmeasured,
+    )
+
+
+def load_exit_tca(conn: Conn, *, since: date) -> list[ExitTca]:
+    """Every close of a strategy-owned long position on or after ``since`` (UTC midnight), measured."""
+    with conn.cursor(row_factory=dict_row) as cur:
+        rows = cur.execute(
+            _EXITS_SQL, {"since": datetime.combine(since, time(), tzinfo=UTC), "session_tz": _SESSION_TZ}
+        ).fetchall()
+    return [exit_tca(r) for r in rows]
+
+
 __all__ = [
     "ARRIVAL_MAX_AGE_SECONDS",
     "ArrivalFacts",
     "ArrivalOutcome",
     "ArrivalQuote",
+    "CloseWhatIfOutcome",
     "EntryCosts",
     "EntryTca",
+    "ExitEvidence",
+    "ExitKind",
+    "ExitTca",
+    "GapUnmeasured",
+    "classify_exit",
+    "close_cost",
     "entry_costs",
     "entry_tca",
+    "exit_evidence",
+    "exit_tca",
     "load_entry_tca",
+    "load_exit_tca",
     "record_arrival_quote",
+    "record_close_what_if",
 ]
