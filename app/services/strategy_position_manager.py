@@ -66,7 +66,8 @@ _ADVISORY_HASH_SEED = 0
 #: import it: renaming this means a migration rebuilding that index.
 EDIT_NEVER_SUBMITTED: Final = "edit_never_submitted"
 
-#: ``execution_tca.ExitEvidence``, restated so this module does not import the readout's dependencies.
+#: Records evidence for an exit order (its id) about to close a broker position, before the close is submitted (#3611;
+#: built by ``execution_tca.exit_evidence``). Defined here, the caller's side, so this module imports no readout code.
 ExitEvidence = Callable[[int, BrokerPosition], None]
 
 
@@ -1962,6 +1963,7 @@ def manage_owned_position(
 
 
 __all__ = [
+    "ExitEvidence",
     "PositionManagerResult",
     "RatchetBar",
     "StrategyPositionManagerError",

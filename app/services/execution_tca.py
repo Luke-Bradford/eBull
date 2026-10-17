@@ -63,6 +63,7 @@ from psycopg.types.json import Jsonb
 from app.providers.broker import BrokerPosition, BrokerProvider, BrokerWhatIfCostResponse, BrokerWhatIfOrder
 from app.providers.market_data import Quote
 from app.services.strategy_paper_executor import _age_ok, _component_amount
+from app.services.strategy_position_manager import ExitEvidence
 
 logger = logging.getLogger(__name__)
 
@@ -329,10 +330,6 @@ def load_entry_tca(conn: Conn, *, since: date) -> list[EntryTca]:
 #: ``strategy_order_close_what_ifs.outcome`` (sql/501).
 CloseWhatIfOutcome = Literal["quoted", "undecodable", "failed", "unpriced"]
 
-#: Called by ``manage_owned_position`` with an exit order's id and the broker position it closes, after the order is
-#: recorded and before the close is submitted.
-ExitEvidence = Callable[[int, BrokerPosition], None]
-
 _TICKET_QUANTUM: Final = Decimal("0.01")
 
 #: ``BrokerWhatIfOrder.order_currency``'s default, the only one eToro's what-if accepts: the ticket is in it, so a
@@ -417,6 +414,8 @@ def record_close_what_if(
                     outcome,
                     cost,
                     None if cost is None else _TICKET_CURRENCY,
+                    # Never None on a response: ``BrokerWhatIfCostResponse.last_updated`` is a ``datetime``, and the
+                    # eToro parser raises on a missing or naive ``lastUpdated``, which lands in the 'failed' arm above.
                     None if response is None else response.last_updated,
                     None if response is None else Jsonb(response.raw_payload),
                 ),
