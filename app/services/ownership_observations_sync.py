@@ -366,14 +366,16 @@ def sync_insiders(
     # ON CONFLICT upsert keep whichever line came last in an unordered scan, and this weekly job
     # then overwrote the live writer's value with it. ⚠ ``limit`` cuts rows, so a capped run can
     # split an accession's lines; the uncapped scheduled run never does.
-    from app.services.insider_form3_ingest import form3_observation_shares
+    from app.services.insider_form3_ingest import form3_observation_lines, form3_observation_shares
 
     lines = [_StoredForm3Line.from_row(row) for row in rows]
     summary.rows_scanned += len(lines)
     for _, acc_lines in groupby(lines, key=lambda line: (line.row["instrument_id"], line.row["accession_number"])):
         group = list(acc_lines)
         shares_by_key = form3_observation_shares(group, owner_count=int(group[0].row["owner_count"]))
-        last_by_key = {(line.filer_cik, line.direct_indirect): line.row for line in group}
+        # Same filter as the helper, so the metadata row is the line whose shares it would keep. The
+        # SELECT already drops derivative and shareless rows; this keeps the pairing true by construction.
+        last_by_key = {(line.filer_cik, line.direct_indirect): line.row for line in form3_observation_lines(group)}
         for key, shares in shares_by_key.items():
             row = last_by_key[key]
             cik = key[0]

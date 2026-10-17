@@ -516,36 +516,54 @@ def form3_observation_shares(
         the first owner (``ParsedHolding.filer_cik``), so a sum would credit one co-filer with
         the other co-filers' blocks.
     """
-    lines = sorted(
-        (h for h in holdings if not h.is_derivative and h.shares is not None and h.row_num is not None),
-        key=lambda h: h.row_num or 0,
-    )
+    lines = form3_observation_lines(holdings)
     groups: dict[tuple[str | None, str | None], list[Form3HoldingLine]] = {}
     for h in lines:
         groups.setdefault((h.filer_cik, h.direct_indirect), []).append(h)
 
     out: dict[tuple[str | None, str | None], Decimal] = {}
     for key, group in groups.items():
+        line_sum = _line_sum_if_distinct(key, group, lines, owner_count=owner_count)
         last = group[-1].shares
-        assert last is not None  # filtered above
-        out[key] = last
-        if key[1] not in ("D", "I") or owner_count != 1 or len(group) < 2:
-            continue
-        if any(h.shares is None or h.shares < 0 for h in group):
-            continue
-        titles = {h.security_title for h in group}
-        if len(titles) != 1:
-            continue
-        title = next(iter(titles))
-        if title is None or not title.strip():
-            continue
-        if len({h.nature_of_ownership or "" for h in group}) != len(group):
-            continue
-        same_title = [h.shares for h in lines if h.filer_cik == key[0] and h.security_title == title]
-        if len(set(same_title)) != len(same_title):
-            continue
-        out[key] = sum((h.shares for h in group if h.shares is not None), Decimal(0))
+        assert last is not None  # form3_observation_lines keeps share-bearing lines only
+        out[key] = line_sum if line_sum is not None else last
     return out
+
+
+def form3_observation_lines[L: Form3HoldingLine](holdings: Iterable[L]) -> list[L]:
+    """The lines a Form 3 observation is built from — non-derivative, share-bearing, ordered by
+    ``row_num``. Exposed so a caller pairing a group with its last line's metadata
+    (``sync_insiders``) filters exactly as :func:`form3_observation_shares` does."""
+    return sorted(
+        (h for h in holdings if not h.is_derivative and h.shares is not None and h.row_num is not None),
+        key=lambda h: h.row_num or 0,
+    )
+
+
+def _line_sum_if_distinct(
+    key: tuple[str | None, str | None],
+    group: list[Form3HoldingLine],
+    lines: list[Form3HoldingLine],
+    *,
+    owner_count: int,
+) -> Decimal | None:
+    """The group's SUM when every condition in :func:`form3_observation_shares` holds, else None."""
+    if key[1] not in ("D", "I") or owner_count != 1 or len(group) < 2:
+        return None
+    if any(h.shares is None or h.shares < 0 for h in group):
+        return None
+    titles = {h.security_title for h in group}
+    if len(titles) != 1:
+        return None
+    title = next(iter(titles))
+    if title is None or not title.strip():
+        return None
+    if len({h.nature_of_ownership or "" for h in group}) != len(group):
+        return None
+    same_title = [h.shares for h in lines if h.filer_cik == key[0] and h.security_title == title]
+    if len(set(same_title)) != len(same_title):
+        return None
+    return sum((h.shares for h in group if h.shares is not None), Decimal(0))
 
 
 def _filer_name_for(parsed: ParsedForm3, filer_cik: str | None) -> str:
