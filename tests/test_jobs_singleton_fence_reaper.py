@@ -27,15 +27,18 @@ import os
 import secrets
 import threading
 import time
+from collections.abc import Callable
 
 import psycopg
 import pytest
 
 from app.jobs.__main__ import (
     SINGLETON_FENCE_APPLICATION_NAME,
+    SingletonFence,
     _acquire_singleton_fence,
     _fence_heartbeat_loop,
     _reap_stale_singleton_fence_holder,
+    _try_reacquire_singleton_fence,
 )
 from app.jobs.locks import JOBS_PROCESS_LOCK_KEY
 from tests.fixtures.ebull_test_db import test_database_url
@@ -150,8 +153,13 @@ def test_live_heartbeating_fence_is_not_reaped() -> None:
     stop_event = threading.Event()
     heartbeat = threading.Thread(
         target=_fence_heartbeat_loop,
-        args=(holder, holder_lock, stop_event),
-        kwargs={"period_seconds": 0.1},
+        args=(SingletonFence(holder), holder_lock, stop_event),
+        kwargs={
+            "database_url": test_database_url(),
+            "process_stop": threading.Event(),
+            "lock_key": _TEST_LOCK_KEY,
+            "period_seconds": 0.1,
+        },
         name="test-fence-heartbeat",
         daemon=True,
     )
@@ -206,8 +214,13 @@ def test_dead_fence_after_heartbeat_stops_is_reaped() -> None:
     stop_event = threading.Event()
     heartbeat = threading.Thread(
         target=_fence_heartbeat_loop,
-        args=(holder, holder_lock, stop_event),
-        kwargs={"period_seconds": 0.1},
+        args=(SingletonFence(holder), holder_lock, stop_event),
+        kwargs={
+            "database_url": test_database_url(),
+            "process_stop": threading.Event(),
+            "lock_key": _TEST_LOCK_KEY,
+            "period_seconds": 0.1,
+        },
         name="test-fence-heartbeat-dies",
         daemon=True,
     )
@@ -346,3 +359,132 @@ def test_reaper_excludes_other_databases() -> None:
             sibling.close()
         except Exception:
             pass
+
+
+def _holder_pid() -> int | None:
+    """PID of the backend holding the test lock in the test DB, if any."""
+    with psycopg.connect(test_database_url(), autocommit=True) as probe:
+        row = probe.execute(
+            """
+            SELECT l.pid
+              FROM pg_locks l
+              JOIN pg_database d ON d.oid = l.database
+             WHERE l.locktype = 'advisory' AND l.objsubid = 1 AND l.granted
+               AND d.datname = current_database()
+               AND l.classid = %(classid)s::oid AND l.objid = %(objid)s::oid
+            """,
+            {"classid": (_TEST_LOCK_KEY >> 32) & 0xFFFF_FFFF, "objid": _TEST_LOCK_KEY & 0xFFFF_FFFF},
+        ).fetchone()
+    return None if row is None else int(row[0])
+
+
+def _terminate(pid: int) -> None:
+    with psycopg.connect(test_database_url(), autocommit=True) as probe:
+        probe.execute("SELECT pg_terminate_backend(%s)", (pid,))
+
+
+def _wait_until(predicate: Callable[[], bool], *, seconds: float = 5.0) -> bool:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_heartbeat_reacquires_lock_after_fence_backend_is_terminated() -> None:
+    """#3757: the fence backend is terminated server-side, so the session lock
+    goes with it. The heartbeat must take the lock back on a new connection,
+    not log and return leaving the process unfenced."""
+    holder = _open_holder(application_name=SINGLETON_FENCE_APPLICATION_NAME)
+    fence = SingletonFence(holder)
+    old_pid = fence.backend_pid
+    fence_lock = threading.Lock()
+    stop_event = threading.Event()
+    process_stop = threading.Event()
+    heartbeat = threading.Thread(
+        target=_fence_heartbeat_loop,
+        args=(fence, fence_lock, stop_event),
+        kwargs={
+            "database_url": test_database_url(),
+            "process_stop": process_stop,
+            "lock_key": _TEST_LOCK_KEY,
+            "period_seconds": 0.1,
+        },
+        daemon=True,
+    )
+    heartbeat.start()
+    try:
+        _terminate(old_pid)
+        assert _wait_until(lambda: (pid := _holder_pid()) is not None and pid != old_pid)
+        assert _holder_pid() == fence.backend_pid
+        assert fence.conn is not holder
+        assert fence.conn.info.parameter_status("application_name") == SINGLETON_FENCE_APPLICATION_NAME
+        assert not process_stop.is_set()
+        assert heartbeat.is_alive()
+    finally:
+        stop_event.set()
+        heartbeat.join(timeout=2.0)
+        with fence_lock:
+            fence.conn.close()
+        holder.close()
+
+
+def test_heartbeat_stands_down_when_another_backend_takes_the_lock() -> None:
+    """#3757: once the fence is lost, a second jobs process may boot and take
+    the lock. This process must then stop rather than run unfenced beside it."""
+    holder = _open_holder(application_name=SINGLETON_FENCE_APPLICATION_NAME)
+    fence = SingletonFence(holder)
+    fence_lock = threading.Lock()
+    stop_event = threading.Event()
+    process_stop = threading.Event()
+    # Terminate and let the rival take the lock before the heartbeat ever runs.
+    _terminate(fence.backend_pid)
+    assert _wait_until(lambda: _holder_pid() is None)
+    rival = _open_holder(application_name=SINGLETON_FENCE_APPLICATION_NAME)
+    heartbeat = threading.Thread(
+        target=_fence_heartbeat_loop,
+        args=(fence, fence_lock, stop_event),
+        kwargs={
+            "database_url": test_database_url(),
+            "process_stop": process_stop,
+            "lock_key": _TEST_LOCK_KEY,
+            "period_seconds": 0.1,
+        },
+        daemon=True,
+    )
+    heartbeat.start()
+    try:
+        assert process_stop.wait(timeout=5.0)
+        heartbeat.join(timeout=2.0)
+        assert not heartbeat.is_alive()
+        rival_pid = rival.execute("SELECT pg_backend_pid()").fetchone()
+        assert rival_pid is not None
+        assert _holder_pid() == int(rival_pid[0])
+    finally:
+        stop_event.set()
+        heartbeat.join(timeout=2.0)
+        rival.close()
+        holder.close()
+
+
+def test_reacquire_terminates_our_own_surviving_backend() -> None:
+    """The client side of the fence died but its backend lives on holding the
+    lock. That holder is ours (same pid and backend_start), so it is
+    terminated and the lock re-taken, not mistaken for a rival process."""
+    holder = _open_holder(application_name=SINGLETON_FENCE_APPLICATION_NAME)
+    fence = SingletonFence(holder)
+    old_pid = fence.backend_pid
+    # The process has lost its handle on the backend; the backend still holds.
+    fence.conn = psycopg.connect(test_database_url(), autocommit=True)
+    fence_lock = threading.Lock()
+    try:
+        outcome = _try_reacquire_singleton_fence(
+            fence, fence_lock, threading.Event(), test_database_url(), lock_key=_TEST_LOCK_KEY
+        )
+        assert outcome is True
+        assert fence.backend_pid != old_pid
+        assert _holder_pid() == fence.backend_pid
+    finally:
+        fence.conn.close()
+        holder.close()
