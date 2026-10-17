@@ -11,6 +11,11 @@ Usage::
 Columns are basis points (positive = cost: paid above on a buy, received below on a sell) and seconds.
 ``decision_age_s`` is how old the decision price was when the order was created; ``fill_after_s`` is fill time minus
 order creation. ``gapped`` says the session opened beyond the stop or target, so the level could not be the fill.
+
+The last table puts each week's fills beside the static cost model's band for the position's entry fill
+(``app/services/cost_model.py``): ``exec`` is the per-side cost against the arrival mid and ``model_h`` the band's
+half-spread, charged per side; ``what_if`` is the broker's quoted cost rate and ``p75`` the band's full spread.
+``over`` counts fills above the model figure in the column to its left.
 """
 
 from __future__ import annotations
@@ -25,7 +30,15 @@ from statistics import median
 import psycopg
 
 from app.config import settings
-from app.services.execution_tca import ARRIVAL_MAX_AGE_SECONDS, EntryTca, ExitTca, load_entry_tca, load_exit_tca
+from app.services.execution_tca import (
+    ARRIVAL_MAX_AGE_SECONDS,
+    BandRow,
+    EntryTca,
+    ExitTca,
+    band_rows,
+    load_entry_tca,
+    load_exit_tca,
+)
 
 _COLUMNS = (
     "order",
@@ -148,15 +161,64 @@ def render_exits(exits: Sequence[ExitTca]) -> str:
     return "\n".join(lines)
 
 
+_BAND_COLUMNS = (
+    "week",
+    "side",
+    "band",
+    "fills",
+    "exec_n",
+    "exec_med_bps",
+    "model_h_bps",
+    "over",
+    "what_if_n",
+    "what_if_med_bps",
+    "p75_bps",
+    "over",
+)
+
+
+def _med(values: Sequence[Decimal]) -> str:
+    return f"{median(values) * 10000:.1f}" if values else ""
+
+
+def _band_row(r: BandRow) -> tuple[str, ...]:
+    h = None if r.band is None else r.band.half_spread
+    p75 = None if r.band is None else r.band.p75_spread_pct / 100
+    return (
+        r.week.isoformat(),
+        r.side,
+        "unbanded" if r.band is None else r.band.label,
+        str(r.fills),
+        str(len(r.executions)),
+        _med(r.executions),
+        _bps(h),
+        "" if h is None or not r.executions else str(sum(1 for x in r.executions if x > h)),
+        str(len(r.what_ifs)),
+        _med(r.what_ifs),
+        _bps(p75),
+        "" if p75 is None or not r.what_ifs else str(sum(1 for x in r.what_ifs if x > p75)),
+    )
+
+
+def render_bands(rows: Sequence[BandRow]) -> str:
+    table = [_BAND_COLUMNS, *(_band_row(r) for r in rows)]
+    widths = [max(len(r[i]) for r in table) for i in range(len(_BAND_COLUMNS))]
+    return "\n".join("  ".join(cell.rjust(w) for cell, w in zip(r, widths, strict=True)) for r in table)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="#3611 transaction-cost readout of strategy entries and exits")
     parser.add_argument("--since", type=date.fromisoformat, required=True, help="first order date (UTC)")
     args = parser.parse_args(argv)
     with psycopg.connect(settings.database_url) as conn:
         conn.read_only = True
-        print(render(load_entry_tca(conn, since=args.since)))
+        entries = load_entry_tca(conn, since=args.since)
+        exits = load_exit_tca(conn, since=args.since)
+        print(render(entries))
         print()
-        print(render_exits(load_exit_tca(conn, since=args.since)))
+        print(render_exits(exits))
+        print()
+        print(render_bands(band_rows(entries, exits)))
     return 0
 
 

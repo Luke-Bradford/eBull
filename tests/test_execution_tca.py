@@ -9,6 +9,7 @@ from app.services.execution_tca import (
     ARRIVAL_MAX_AGE_SECONDS,
     ArrivalFacts,
     ArrivalOutcome,
+    band_rows,
     classify_exit,
     close_cost,
     entry_costs,
@@ -204,6 +205,7 @@ def _exit_row(**overrides: Any) -> dict[str, Any]:
         "session_open": Decimal("94"),
         "session_low": Decimal("92"),
         "session_high": Decimal("96"),
+        "entry_fill": Decimal("101"),
     }
     return row | overrides
 
@@ -286,3 +288,40 @@ def test_a_candle_whose_range_cannot_hold_the_fill_is_not_compared_with_the_leve
 def test_an_engine_close_without_a_live_mark_is_unpriced() -> None:
     e = exit_tca(_exit_row(order_id=5, created_at=AT, what_if_outcome="unpriced"))
     assert (e.kind, e.unmeasured, e.what_if_cost) == ("engine", "what_if_unpriced", None)
+
+
+def test_fills_are_grouped_by_week_side_and_the_entry_fills_band() -> None:
+    # AT is Monday 2026-11-02; the second entry fills the next Monday, a different week.
+    entries = [
+        entry_tca(_row()),  # fill 100.05: >=$100, execution 5 bps, what-if 10 bps
+        entry_tca(_row(fill=Decimal("50"), filled_at=AT + timedelta(days=1))),  # $20-100, same week
+        entry_tca(_row(filled_at=AT + timedelta(days=7))),
+        entry_tca(_row(n_opens=0, fill=None, filled_at=None)),  # no fill: not counted
+    ]
+    engine = exit_tca(
+        _exit_row(
+            order_id=5,
+            created_at=AT,
+            fill=Decimal("99.95"),
+            entry_fill=Decimal("19"),  # banded by the ENTRY fill, as cost_model fixes it for the position's life
+            outcome="quoted",
+            received_at=AT,
+            quoted_at=AT - timedelta(seconds=2),
+            bid=Decimal("99.9"),
+            ask=Decimal("100.1"),
+        )
+    )
+    unbanded = exit_tca(_exit_row(order_id=6, created_at=AT, fill=Decimal("99.95"), entry_fill=None))
+    stop = exit_tca(_exit_row())  # a stop close has no spread-comparable figure
+    rows = band_rows(entries, [engine, unbanded, stop])
+    keys = [(r.week.isoformat(), r.side, None if r.band is None else r.band.label, r.fills) for r in rows]
+    assert keys == [
+        ("2026-11-02", "entry", "$20-100", 1),
+        ("2026-11-02", "entry", ">=$100", 1),
+        ("2026-11-02", "exit", "$5-20", 1),
+        ("2026-11-02", "exit", None, 1),
+        ("2026-11-09", "entry", ">=$100", 1),
+    ]
+    assert rows[1].executions == (Decimal("0.0005"),)
+    assert rows[1].what_ifs == (Decimal("0.001"),)
+    assert rows[2].executions == (Decimal("0.0005"),) and rows[2].what_ifs == ()
