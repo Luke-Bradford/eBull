@@ -77,22 +77,27 @@ def record_arrival_quote(
     """Fetch and store the instrument's quote for an order about to be submitted. Best-effort and self-contained:
     nothing it raises reaches the caller, and a failed write rolls back only its own savepoint (or transaction, on an
     idle connection), so the submission that follows runs either way."""
-    requested_at = clock()
-    quote: Quote | None = None
-    outcome: ArrivalOutcome = "failed"
     try:
-        quote = arrival_quote(instrument_id)
-        # Classified before the insert, so a bad quote is recorded as such rather than dropped by the CHECK.
-        if quote is None:
-            outcome = "not_quoted"
-        elif quote.bid > 0 and quote.ask > 0:
-            outcome = "quoted"
-        else:
-            outcome = "unusable"
-    except Exception:
-        logger.warning("arrival quote for order %s (instrument %s) unavailable", order_id, instrument_id, exc_info=True)
-    received_at = clock()
-    try:
+        requested_at = clock()
+        quote: Quote | None = None
+        outcome: ArrivalOutcome = "failed"
+        try:
+            fetched = arrival_quote(instrument_id)
+            # Classified before the insert, so a bad quote is recorded as such rather than dropped by the CHECK.
+            # ``quote`` is set only once classification succeeds: a comparison that raises (a NaN Decimal) leaves a
+            # 'failed' row with no quote fields, which is what the CHECK requires.
+            if fetched is None:
+                outcome = "not_quoted"
+            else:
+                outcome = "quoted" if fetched.bid > 0 and fetched.ask > 0 else "unusable"
+                quote = fetched
+        except Exception:
+            outcome, quote = "failed", None
+            logger.warning(
+                "arrival quote for order %s (instrument %s) unavailable", order_id, instrument_id, exc_info=True
+            )
+        # A clock that steps back between the two reads must not violate CHECK (received_at >= requested_at).
+        received_at = max(requested_at, clock())
         with conn.transaction():
             conn.execute(
                 """
@@ -151,6 +156,8 @@ def _usable_quote(arrival: ArrivalFacts | None) -> tuple[Decimal, Decimal] | Unm
     # The executor's freshness rule: a future stamp beyond its skew allowance is as unusable as an old one.
     if not _age_ok(quoted_at, now=arrival.received_at, max_seconds=ARRIVAL_MAX_AGE_SECONDS):
         return "arrival_future_dated" if quoted_at > arrival.received_at else "arrival_stale"
+    if not (bid.is_finite() and ask.is_finite()):
+        return "arrival_unusable"  # an Infinity passes the CHECK's positivity test and would poison the mid
     if ask < bid:
         return "arrival_crossed"
     return bid, ask

@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from unittest.mock import MagicMock
@@ -166,3 +166,39 @@ def test_a_rejected_arrival_write_rolls_back_only_its_savepoint(ebull_test_conn:
         status = conn.execute("SELECT status FROM orders WHERE order_id = %s", (order_id,)).fetchone()
     assert status == ("tca-probe",)
     assert _arrival_row(conn, order_id) == row
+
+
+def _raise() -> datetime:
+    raise RuntimeError("clock unavailable")
+
+
+@pytest.mark.parametrize(
+    ("bid", "ticks", "expected"),
+    [
+        # A NaN bid raises on comparison: recorded 'failed' with no quote fields, not lost to the CHECK.
+        ("NaN", (NOW, NOW), ("failed", None, None, None, NOW, NOW)),
+        # A clock stepping back between the two reads is clamped, not lost to CHECK (received_at >= requested_at).
+        ("100.1", (NOW, NOW - timedelta(seconds=1)), ("quoted", NOW, Decimal("100.1"), Decimal("100.3"), NOW, NOW)),
+    ],
+)
+def test_a_hostile_quote_or_clock_still_leaves_a_valid_row(
+    ebull_test_conn: Conn, bid: str, ticks: tuple[datetime, datetime], expected: tuple[Any, ...]
+) -> None:
+    conn = ebull_test_conn
+    order_id, instrument_id, _ = _submit(conn, None)
+    clock = iter(ticks)
+    quote = Quote(instrument_id, NOW, Decimal(bid), Decimal("100.3"), None)
+    record_arrival_quote(
+        conn, order_id=order_id, instrument_id=instrument_id, arrival_quote=lambda _i: quote, clock=lambda: next(clock)
+    )
+    assert _arrival_row(conn, order_id) == expected
+
+
+def test_a_clock_that_raises_does_not_escape(ebull_test_conn: Conn) -> None:
+    conn = ebull_test_conn
+    order_id, instrument_id, _ = _submit(conn, None)
+    record_arrival_quote(
+        conn, order_id=order_id, instrument_id=instrument_id, arrival_quote=lambda _i: None, clock=_raise
+    )
+    assert _arrival_row(conn, order_id) is None
+    assert conn.execute("SELECT 1").fetchone() == (1,)
