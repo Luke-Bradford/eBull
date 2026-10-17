@@ -38,12 +38,17 @@ from app.services.finra_regsho_ingest import split_regsho_body_row, validate_reg
 from app.services.finra_short_interest_ingest import is_cqs_suffix_symbol, normalise_symbol
 
 _Figures = tuple[Decimal, Decimal, Decimal]
+_HEADER = "Date|Symbol|ShortVolume|ShortExemptVolume|TotalVolume|Market"
 
 
 def _parse_document(payload: str) -> list[tuple[str, str, _Figures]]:
     """(symbol, market, figures) for every valid body line."""
+    lines = [ln.rstrip("\r") for ln in payload.split("\n")]
+    if lines[0] != _HEADER:
+        # Same refusal as the ingest: an unrecognised file is not repaired from.
+        raise ValueError(f"unexpected RegSHO header: {lines[0]!r}")
     rows: list[tuple[str, str, _Figures]] = []
-    for line in [ln.rstrip("\r") for ln in payload.split("\n")][1:]:
+    for line in lines[1:]:
         parts = split_regsho_body_row(line)
         if parts is None:
             continue

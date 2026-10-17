@@ -308,7 +308,7 @@ def ingest_settlement_file(
                 )
 
             # #3437: same rule as the RegSHO ingest. Stored SI files carry none
-            # (`scripts/repair_3437_regsho_suffix_rows.py` prints the scan); this
+            # (`scripts/backfill_3437_regsho_suffix_rows.py` prints the scan); this
             # holds the rule by construction.
             if is_cqs_suffix_symbol(symbol):
                 skipped_no_instrument_match += 1
