@@ -249,7 +249,7 @@ above applies.
 The FF-12 cap could not target the 2026 theme (#3839), so #3842 grouped names by what they did instead.
 `momentum_theme_cap.py` states its method and decision rule in its docstring:
 - **Returns:** daily, over the 126 sessions ending at the formation month's last bar.
-- **Grouping:** Pearson correlation on each pair's common sessions, Mantegna's distance √(2(1−ρ)), average linkage,
+- **Grouping:** correlation over each pair's common sessions, with each name demeaned over its whole window, Mantegna's distance √(2(1−ρ)), average linkage,
   cut at K = 12 groups to match the FF-12 count.
 - **Cap:** adapted from the skill's 2× rule. A group's benchmark weight is its name share of the universe, and the
   cap is floored at 1 name. Two things differ from the sector cap besides the grouping: it used market-cap share,

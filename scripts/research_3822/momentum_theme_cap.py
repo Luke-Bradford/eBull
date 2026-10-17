@@ -10,7 +10,8 @@ Method, fixed before the first run except where marked:
   elsewhere here, e.g. Bollinger's 126-session extreme and the #3609 liquidity window; no rule fixes it for clustering). Intrader: (close x split
   factor + dividend) / prior close, the monthly construction of momentum_oos.load_intrader; PWB: `adj_close` ratios.
   A return is recorded only across consecutive calendar sessions (corrected after Codex checkpoint 1).
-- Correlation: Pearson on each pair's common sessions; missing sessions are never treated as zero returns (corrected
+- Correlation: over each pair's common sessions, with deviations from each name's own full-window mean (not the
+  pair's common-session mean, so it approximates Pearson on the overlap); missing sessions are never treated as zero returns (corrected
   after checkpoint 1; the first run zero-filled them). A name with fewer than 100 returns in the window, or none that
   vary, is its own group.
 - Distance and grouping: Mantegna's d = sqrt(2(1 - rho)) (Mantegna 1999, Eur. Phys. J. B 11:193). Mantegna's own
@@ -114,7 +115,7 @@ def groups_for(uni_sids, end_day_idx: int, days, rets, k: int, stats: list) -> d
     ok = (obs.sum(axis=1) >= MIN_OBS) & ((xc**2).sum(axis=1) > 0)
     idx = np.flatnonzero(ok)
     x, m_ = xc[idx], obs[idx].astype(float)
-    # Pearson on each pair's common sessions (deviations from each name's own window mean): sum x_i x_j over sessions
+    # Correlation over each pair's common sessions, deviations from each name's own window mean (approximate Pearson): sum x_i x_j over sessions
     # both observe, over sqrt(sum x_i^2 on j's sessions x sum x_j^2 on i's sessions). Missing sessions are never zeros.
     a = (x**2) @ m_.T
     den = np.sqrt(a * a.T)
