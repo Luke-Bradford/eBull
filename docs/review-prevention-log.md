@@ -13007,5 +13007,6 @@ neighbouring container and match it.**
   grants). Read the footnotes of the population before choosing the key. And decide a relationship between two rows
   from the append-only layer, not from a snapshot that keeps one row per nature: in `_current` a later direct-only
   filing replaces the `D` partner while the stale `I` row stays (Codex ckpt-2).
-- Enforced in: `app/services/ownership_rollup.py::_INSIDER_JOINT_DIRECT_LINES_SQL` and `_source_rows_and_total`;
+- Enforced in: `app/services/ownership_rollup.py::_INSIDER_JOINT_DIRECT_LINES_SQL` and `_source_rows_and_total` (which
+  drops the restatement before any MAX; `_merge_section16_forms` only routes it to its overlap bucket and relies on that);
   `tests/test_3349_joint_di_restatement.py`; `tests/test_3349_joint_di_restatement_sql.py` (one case per clause).
