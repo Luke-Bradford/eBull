@@ -87,7 +87,12 @@ def run_boot_freshness_sweep(
                 logger.info("boot freshness sweep dispatched (scope=behind)")
                 return
             except SyncAlreadyRunning as exc:
-                holder = active_scope(exc.active_sync_run_id)
+                try:
+                    holder = active_scope(exc.active_sync_run_id)
+                except Exception:
+                    # A failed lookup is an unknown holder: keep waiting, never drop the sweep on it.
+                    logger.warning("boot freshness sweep: holder lookup failed", exc_info=True)
+                    holder = None
                 if holder in _COVERING_SCOPES:
                     logger.info("boot freshness sweep covered by running %s sync %s", holder, exc.active_sync_run_id)
                     return

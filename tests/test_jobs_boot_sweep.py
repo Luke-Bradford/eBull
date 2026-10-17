@@ -157,3 +157,18 @@ def test_boot_sweep_thread_target_swallows_unexpected_escape() -> None:
     ):
         _run_boot_freshness_sweep_thread()  # must not raise
     log.exception.assert_called_once()
+
+
+def test_a_failed_holder_lookup_keeps_waiting_rather_than_dropping_the_sweep() -> None:
+    import os
+
+    os.environ.pop("EBULL_SKIP_BOOT_SWEEP", None)
+    clock = _Clock()
+
+    def lookup(_id: int | None) -> str | None:
+        raise RuntimeError("connection refused")
+
+    with patch("app.jobs.boot_sweep.run_sync") as run:
+        run.side_effect = [_busy(), SyncResult(sync_run_id=2, outcomes={})]
+        run_boot_freshness_sweep(sleep=clock.sleep, monotonic=clock.monotonic, active_scope=lookup)
+    assert run.call_count == 2
