@@ -6,6 +6,12 @@ EDGAR"; that it is Eastern local time WITH DST is an empirical reading (Atom ``<
 entries, spec ``docs/proposals/etl/2026-10-17-3714-sec-acceptance-authority.md``). A wall time with no single UTC
 instant (spring-forward gap, fall-back fold) is ``invalid_value``, never guessed.
 
+The block is ``<SEC-HEADER>`` or, on 1993–96 filings, ``<IMS-HEADER>`` (``0000003453-95-000005``). The PDS specification
+documents only the first; the second is accepted by construction, because it is the same envelope with the same
+``<ACCESSION-NUMBER>`` line and is the archive's own header for that accession. The IMS headers observed carry no
+acceptance tag, so they classify ``absent`` (``FILING-DATE`` is a date, never a time); a tag inside one would be read
+like any other.
+
 Every fetch is classified, never collapsed to "absent":
 
 * final, the header itself answered: ``found`` (one valid tag in one header block for exactly that accession),
@@ -14,8 +20,10 @@ Every fetch is classified, never collapsed to "absent":
 * retryable, only our observation failed: ``transport_error``, ``http_error`` (any non-200, 429 and 503 included),
   ``bad_response`` (a 200 that is not exactly one header block for that accession, or carries a duplicated tag).
 
-``POLICY_VERSION`` bumps whenever the classification or the conversion changes; a bump makes every older final check
-eligible for a re-fetch (``app.services.sec_acceptance_refill``).
+``POLICY_VERSION`` bumps whenever a change could alter a FINAL outcome or the conversion; a bump makes every older final
+check eligible for a re-fetch (``app.services.sec_acceptance_refill``). A change that only turns a retryable outcome
+final needs no bump, because a retryable row is re-fetched on its own backoff anyway. Accepting ``<IMS-HEADER>`` was
+that kind (every v1 final check began ``<SEC-HEADER>``, which classifies exactly as before), so it stayed at 1.
 """
 
 from __future__ import annotations
@@ -40,8 +48,8 @@ NEW_YORK: Final = ZoneInfo("America/New_York")
 _TAG_LINE: Final = re.compile(r"^<ACCEPTANCE-DATETIME>(.*)$", re.M)
 _ACCESSION_LINE: Final = re.compile(r"^<ACCESSION-NUMBER>(.*)$", re.M)
 _DIGITS14: Final = re.compile(r"[0-9]{14}")
-_OPEN: Final = "<SEC-HEADER>"
-_CLOSE: Final = "</SEC-HEADER>"
+# (open, close) per header envelope; a response must carry exactly one close tag across all of them.
+_BLOCKS: Final = (("<SEC-HEADER>", "</SEC-HEADER>"), ("<IMS-HEADER>", "</IMS-HEADER>"))
 
 
 @dataclass(frozen=True)
@@ -83,9 +91,10 @@ def classify_header(accession: str, url: str, status: int, text: str) -> HeaderC
     """Classify one HTTP response for ``accession``'s header. Pure; the fetch is ``fetch_header_acceptance``."""
     if status != 200:
         return HeaderCheck("http_error", url, http_status=status)
-    if not text.startswith(_OPEN) or text.count(_CLOSE) != 1:
+    close = next((c for o, c in _BLOCKS if text.startswith(o)), None)
+    if close is None or sum(text.count(c) for _, c in _BLOCKS) != 1 or close not in text:
         return HeaderCheck("bad_response", url, http_status=status, diagnostic="not exactly one header block")
-    block = text[: text.index(_CLOSE)]
+    block = text[: text.index(close)]
     accessions = [m.strip() for m in _ACCESSION_LINE.findall(block)]
     if accessions != [accession]:
         return HeaderCheck("bad_response", url, http_status=status, diagnostic=f"accession lines {accessions[:3]}")
