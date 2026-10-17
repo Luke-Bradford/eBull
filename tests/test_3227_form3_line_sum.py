@@ -71,9 +71,10 @@ def test_equal_amounts_of_another_class_do_not_block() -> None:
     assert form3_observation_shares(lines, owner_count=1)[("0001", "I")] == Decimal(10)
 
 
-def test_repeated_nature_refuses() -> None:
+def test_repeated_nature_sums() -> None:
+    # Two unequal D lines of one class are two direct holdings (ASTE 0001140361-18-001899).
     lines = _lines((10, "D", None, "Common"), (20, "D", None, "Common"))
-    assert form3_observation_shares(lines, owner_count=1) == {("0001", "D"): Decimal(20)}
+    assert form3_observation_shares(lines, owner_count=1) == {("0001", "D"): Decimal(30)}
 
 
 def test_blank_title_or_negative_shares_refuse() -> None:
@@ -109,7 +110,6 @@ def test_stored_line_strips_the_cik_like_the_old_writer() -> None:
         "security_title": "Common",
         "shares": "12.5",
         "direct_indirect": "I",
-        "nature_of_ownership": None,
     }
     line = _StoredForm3Line.from_row(row)
     assert (line.filer_cik, line.shares) == ("0001", Decimal("12.5"))

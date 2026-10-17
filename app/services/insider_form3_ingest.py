@@ -479,8 +479,6 @@ class Form3HoldingLine(Protocol):
     def shares(self) -> Decimal | None: ...
     @property
     def direct_indirect(self) -> str | None: ...
-    @property
-    def nature_of_ownership(self) -> str | None: ...
 
 
 def form3_observation_shares(
@@ -506,8 +504,6 @@ def form3_observation_shares(
       * >1 line in the group, every one with non-negative shares;
       * every line has a non-blank title, and the group has ONE title — classes never sum
         (CNH's common + special voting shares). Exact match, so a re-spelled title refuses;
-      * the group's natures are pairwise distinct — each line a separate form of ownership.
-        Repeated ``D`` lines with no nature are not something the rule explains, so they refuse;
       * no two of the filer's lines of that title carry the same amount, across D AND I. Instr.
         5(b)(iv) lets an indirect line restate an entity's whole holding, so one block can
         appear twice (YPF ``0000903423-08-000197``); equal amounts cannot be told apart from a
@@ -515,6 +511,11 @@ def form3_observation_shares(
       * one reporting owner on the filing. On a joint filing the parser attributes every line to
         the first owner (``ParsedHolding.filer_cik``), so a sum would credit one co-filer with
         the other co-filers' blocks.
+
+    The nature of ownership is NOT a condition (#3227, 2026-10-17): the rule separates forms but
+    does not limit a form to one line, so two unequal ``D`` lines, or two "By Trust" lines, are
+    two holdings of the class. The full reasoning, and why the DERA twin of this rule cannot read
+    nature at all, is at ``INSIDER_HOLDING_LINE_SUM_LATERAL``.
     """
     lines = form3_observation_lines(holdings)
     groups: dict[tuple[str | None, str | None], list[Form3HoldingLine]] = {}
@@ -557,8 +558,6 @@ def _line_sum_if_distinct(
         return None
     title = next(iter(titles))
     if title is None or not title.strip():
-        return None
-    if len({h.nature_of_ownership or "" for h in group}) != len(group):
         return None
     same_title = [h.shares for h in lines if h.filer_cik == key[0] and h.security_title == title]
     if len(set(same_title)) != len(same_title):

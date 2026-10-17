@@ -13056,3 +13056,19 @@ neighbouring container and match it.**
   shares `form3_observation_shares` with the live writer.
 - Enforced in: `app/services/ownership_observations.py::_INSIDER_DUAL_PIPELINE_DECOLLISION` (second clause);
   `tests/test_ownership_refresh_writer_merge.py::test_cross_accession_*`; `scripts/ab_3227_form3_line_sum.py`.
+
+### A bulk-dataset column can be shifted relative to the rows it sits on (#3227)
+
+- Symptom: DERA's `NONDERIV_HOLDING.NATURE_OF_OWNERSHIP` disagreed with our own XML parse on 18.5% of lines, and the
+  skill recorded that as "discordance" to be resolved later. Meanwhile the #3227 3a line-sum gate read it, through a
+  pairwise-distinct `(title, D/I, nature)` test. The column is positionally compacted: when a line has no
+  `<natureOfOwnership>` element, the next line's nature moves up onto it, and the last line goes blank (MSBI
+  `0001466026-26-000008`: EDGAR has `D` none, `I` Red Bird, …; DERA has `D` Red Bird, …, `I` blank). On the
+  one-class groups whose gate answer depended on where the blanks sat, EDGAR says the test was wrong on 35 of 49.
+- Prevention: when two sources disagree on a field, test the disagreement for STRUCTURE before calling it noise —
+  align the lines in document order and check shift, compaction and permutation. A structured disagreement means
+  one source's column is not attached to its row, and nothing may key on it until the mechanism is known. Then ask
+  whether the gate needs the field at all; here the source rule did not.
+- Enforced in: `scripts/audit_3227_dera_nature_compaction.py` (census + `--edgar`);
+  `app/services/ownership_observations.py::INSIDER_HOLDING_LINE_SUM_LATERAL` (nature no longer a condition);
+  `tests/test_3227_holding_line_sum.py` (`compacted_nature_does_not_decide`).
