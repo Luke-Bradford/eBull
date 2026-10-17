@@ -12910,3 +12910,17 @@ neighbouring container and match it.**
   `tests/test_pit_market_cap_build_db.py::test_trades_reader_keeps_only_the_instruments_own_issuer`. The ingest fix is
   #3854. Skill text for `.claude/skills/data-sources/sec-edgar.md` is posted on #2403, because `.claude/**` is
   write-refused from the loop worktree.
+
+### A historical read joins the policy revision's event, not the live policy row (#3611)
+
+- Failure (PR for #3611, Codex checkpoint 2): the TCA reader joined `strategy_execution_policies` on
+  `(deployment_id, revision = preflight.policy_revision)` to recover the cost-stress multiplier an entry was priced
+  with. That table's primary key is `deployment_id` alone and holds only the current revision, so every entry
+  evaluated before a policy change would lose its multiplier, and its what-if cost would read as unknown.
+- Prevention: anything that reads a policy term AS IT WAS when a past row was written joins
+  `strategy_execution_policy_events` on `(deployment_id, revision)`, which is unique and append-only. The live table
+  is for gates deciding now.
+- Enforced in: `app/services/execution_tca.py::_ENTRIES_SQL`;
+  `tests/test_execution_tca_db.py::test_the_arrival_quote_is_recorded_before_the_order_is_sent_and_measures_the_fill`.
+  Skill text for `.claude/skills/data-engineer` is posted on #2403, because `.claude/**` is write-refused from the
+  loop worktree.
