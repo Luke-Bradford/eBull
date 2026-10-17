@@ -52,7 +52,11 @@ from typing import Any, Literal
 import psycopg
 import psycopg.rows
 
-from app.services.ownership_observations import INSIDER_HOLDING_LINE_SUM_LATERAL, INSIDER_WINNER_ORDER_TAIL
+from app.services.ownership_observations import (
+    INSIDER_HOLDING_LINE_SUM_LATERAL,
+    INSIDER_SUPERSEDED_BY_AMENDMENT_FILTER,
+    INSIDER_WINNER_ORDER_TAIL,
+)
 
 HistoryCategory = Literal["insiders", "blockholders", "institutions", "treasury", "def14a"]
 
@@ -216,6 +220,7 @@ def _insiders_history(
                   AND known_to IS NULL
                   AND shares IS NOT NULL
                   {where_extra}
+                  {INSIDER_SUPERSEDED_BY_AMENDMENT_FILTER}
                 ORDER BY
                     period_end,
                     ownership_nature,
@@ -224,6 +229,23 @@ def _insiders_history(
                     {INSIDER_WINNER_ORDER_TAIL}
               ) w
             {INSIDER_HOLDING_LINE_SUM_LATERAL}
+            -- #3227 — the bucket-grain twin of ``_INSIDER_SUPERSEDED_KEY_DROP``: a bucket whose newest
+            -- row was a superseded original must not fall back to an older filing of the same date
+            -- and nature (Codex ckpt-2). ``where_extra`` binds to this unaliased inner table.
+            WHERE NOT EXISTS (
+                SELECT 1
+                  FROM ownership_insiders_observations
+                 WHERE instrument_id = %(iid)s
+                   AND known_to IS NULL
+                   AND shares IS NOT NULL
+                   {where_extra}
+                   AND period_end = w.period_end
+                   AND ownership_nature = w.ownership_nature
+                   AND source IN ('form3', 'form4')
+                   AND (CASE source WHEN 'form4' THEN 1 ELSE 2 END)
+                       <= (CASE w.source WHEN 'form4' THEN 1 WHEN 'form3' THEN 2 WHEN 'def14a' THEN 4 ELSE 10 END)
+                   AND filed_at > w.filed_at
+            )
             ORDER BY w.period_end, w.ownership_nature
             """,
             params,
