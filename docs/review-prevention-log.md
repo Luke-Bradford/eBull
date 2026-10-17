@@ -13105,3 +13105,19 @@ neighbouring container and match it.**
   retryable outcome that recurs on one filing era is a parser gap, not a transport failure.
 - Enforced in: `app/providers/implementations/sec_header.py::classify_header` (`_BLOCKS`);
   `tests/test_sec_header.py::test_ims_header_block` (the real header, verbatim).
+
+### Form 4 column 5 is laid out two ways; never sum a filer's ownership forms unconditionally (#3227)
+
+- Symptom: both Form 4 XML observation writers keep the latest line per `(filer, D/I)`. Where column 5 is each
+  ownership form's own balance, that drops every other vehicle (WOOF `0000950170-25-048788`: 7,874 "By son" kept,
+  1,586,088 across three trusts). The obvious fix is "sum the forms' last balances", and the census falsified it before
+  any code: Abdiel `0000950170-23-052960` and Pentwater `0000902664-26-002383` write a RUNNING TOTAL across their funds,
+  where a per-form sum counts one block once per fund.
+- Prevention: Form 4 General Instruction 4(a)(i) requires the class total after the transactions, but nothing says how
+  it is spread over the per-form lines. Before aggregating column 5, test the filing's own arithmetic. A line's opening
+  balance is `post − signed shares`. A per-form filing chains only within a form; a running total opens at another
+  form's balance, in the same filing or an earlier one. Any contradiction refuses to today's value. Test the
+  discriminator in both directions. Codex constructed reverse-order, NULL-predicate and history-scope counterexamples
+  that the first draft passed.
+- Enforced in: `docs/specs/ownership/2026-10-17-3227-form4-vehicle-balance.md`;
+  `scripts/census_3227_form4_vehicle_balance.py`; the build PR will add the helper and its tests.
