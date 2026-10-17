@@ -228,3 +228,100 @@ def test_history_bucket_does_not_fall_back_to_an_older_filing_of_the_same_date(c
     ]
     oo.refresh_insiders_current(conn, instrument_id=_IID)
     assert _current(conn) == {"direct": (_AMENDMENT, Decimal(679))}
+
+
+def test_a_newer_unamended_filing_on_the_key_still_wins(conn: psycopg.Connection[Any]) -> None:
+    """Review W2: the key drop fires only on a row the filter excluded — a live, newer filing on the
+    key is the winner itself, so nothing drops."""
+    _seed(conn, _BASE)
+    october = datetime(2026, 10, 2, tzinfo=UTC)
+    _observation(
+        conn, accession="0001453409-26-000009", nature="indirect", shares="800", period=date(2026, 10, 1), filed=october
+    )
+    conn.commit()
+    oo.refresh_insiders_current(conn, instrument_id=_IID)
+    assert _current(conn) == {
+        "indirect": ("0001453409-26-000009", Decimal(800)),
+        "direct": (_AMENDMENT, Decimal(679)),
+    }
+
+
+def test_history_filters_bind_inside_the_bucket_drop(conn: psycopg.Connection[Any]) -> None:
+    """Review W1: every ``where_extra`` term (holder, from, to) runs inside the bucket drop too."""
+    _seed(conn, replace(_BASE, older_period=_PERIOD))
+    points = _insiders_history(
+        conn, instrument_id=_IID, holder_cik=_OWNER, from_date=date(2026, 9, 1), to_date=date(2026, 9, 30)
+    )
+    assert [(p.ownership_nature, p.source_accession) for p in points] == [("direct", _AMENDMENT)]
+    assert _insiders_history(conn, instrument_id=_IID, holder_cik="0000000001") == []
+
+
+_F3_ORIGINAL = "0000950157-24-001710"
+_F3_AMENDMENT = "0000950157-24-001715"
+
+
+def _seed_form3(conn: psycopg.Connection[Any], amendment_shares: int) -> None:
+    """AMTM shape: the 3/A restates the original's one Common Stock line, ``I`` → ``D``."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO instruments (instrument_id, symbol, company_name, is_tradable)"
+            " VALUES (%s, 'T3227F', 'T', TRUE)",
+            (_IID,),
+        )
+        for accession, doc_type, filed, shares, original_date in (
+            (_F3_ORIGINAL, "3", datetime(2024, 12, 27, tzinfo=UTC), 43_893_904, None),
+            (_F3_AMENDMENT, "3/A", datetime(2024, 12, 30, tzinfo=UTC), amendment_shares, date(2024, 12, 27)),
+        ):
+            cur.execute(
+                "INSERT INTO insider_filings (accession_number, instrument_id, document_type, period_of_report,"
+                " date_of_original_submission) VALUES (%s, %s, %s, '2024-12-17', %s)",
+                (accession, _IID, doc_type, original_date),
+            )
+            cur.execute(
+                "INSERT INTO insider_filers (accession_number, filer_cik, filer_name) VALUES (%s, %s, 'ASP')",
+                (accession, _OWNER),
+            )
+            cur.execute(
+                "INSERT INTO sec_filing_manifest (accession_number, cik, form, source, subject_type, subject_id,"
+                " instrument_id, filed_at, ingest_status) VALUES (%s, '0002011286', %s, 'sec_form3', 'issuer', %s,"
+                " %s, %s, 'parsed')",
+                (accession, doc_type, str(_IID), _IID, filed),
+            )
+            cur.execute(
+                "INSERT INTO insider_initial_holdings (instrument_id, accession_number, row_num, filer_cik, filer_name,"
+                " as_of_date, security_title, shares, is_derivative, direct_indirect)"
+                " VALUES (%s, %s, 0, %s, 'ASP', '2024-12-17', 'Common Stock', %s, FALSE, %s)",
+                (_IID, accession, _OWNER, shares, "I" if doc_type == "3" else "D"),
+            )
+            oo.record_insider_observation(
+                conn,
+                instrument_id=_IID,
+                holder_cik=_OWNER,
+                holder_name="ASP Manager Corp.",
+                ownership_nature="indirect" if doc_type == "3" else "direct",
+                source="form3",
+                source_document_id=accession,
+                source_accession=accession,
+                source_field=None,
+                source_url=None,
+                filed_at=filed,
+                period_start=None,
+                period_end=date(2024, 12, 17),
+                ingest_run_id=uuid4(),
+                shares=Decimal(shares),
+            )
+    conn.commit()
+
+
+@pytest.mark.parametrize(
+    ("amendment_shares", "expected_natures"),
+    [
+        pytest.param(43_893_904, {"direct"}, id="restated_line_supersedes"),
+        pytest.param(40_000_000, {"direct", "indirect"}, id="a_different_holding_refuses"),
+    ],
+)
+def test_form3_branch(conn: psycopg.Connection[Any], amendment_shares: int, expected_natures: set[str]) -> None:
+    """Review W3: the Form 3 branch matches ``insider_initial_holdings`` on row, table, title and shares."""
+    _seed_form3(conn, amendment_shares)
+    oo.refresh_insiders_current_batch(conn, instrument_ids=[_IID])
+    assert set(_current(conn)) == expected_natures

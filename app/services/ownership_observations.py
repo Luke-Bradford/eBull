@@ -476,16 +476,14 @@ INSIDER_WINNER_ORDER_TAIL: Final[LiteralString] = """
 # link is ambiguous and refuses (Codex ckpt-2) — searched by issuer as well as instrument, since
 # share-class siblings can carry different bookkeeping ``instrument_id`` values. The link itself
 # stays on ``instrument_id`` (indexed); a sibling pair it misses refuses, which is today's
-# behaviour — 1 of 7,961 issuer-matched amendment links on 2026-10-17 (census query on the
-# #3227 slice close-out comment). And the
+# behaviour (rare; the count is on PR #3876). And the
 # outer row's holder must have a live observation from the amendment on this instrument, so the
 # exclusion can only hand a holder from the original to its restatement, never leave it empty.
 #
 # The date is compared in a window, not for equality: no SEC filing date is stored, and
 # ``sec_filing_manifest.filed_at`` is a date on most Form 3/4 rows but an acceptance time on some
-# (42,590 of 1,316,617 carry a time of day, 2026-10-17; re-derive with ``SELECT count(*), count(*)
-# FILTER (WHERE (filed_at AT TIME ZONE 'UTC')::time <> '00:00') FROM sec_filing_manifest WHERE form
-# IN ('3','4','3/A','4/A')``). An acceptance after 17:30 ET is dated
+# (count them with ``SELECT count(*) FILTER (WHERE (filed_at AT TIME ZONE 'UTC')::time <> '00:00')
+# FROM sec_filing_manifest WHERE form IN ('3','4','3/A','4/A')``). An acceptance after 17:30 ET is dated
 # the next business day, so the link accepts ``dateOfOriginalSubmission`` from the original's ET
 # date to 3 days later (a Friday-evening acceptance dated Monday), and the ambiguity search
 # mirrors that window so it sees every candidate the link could take (Codex ckpt-2).
