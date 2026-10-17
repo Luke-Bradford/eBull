@@ -334,6 +334,10 @@ def sync_insiders(
     if since is not None:
         where += " AND iih.as_of_date >= %(since)s"
 
+    # ``owner_count`` uses set semantics, like the live writer's ``len({f.filer_cik for f in
+    # parsed.filers})``: a DISTINCT subselect counts a NULL as one value, where ``count(DISTINCT
+    # col)`` would skip it. ``insider_filers.filer_cik`` is NOT NULL today (sql/057); this keeps the
+    # two writers equal without relying on that.
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             f"""
@@ -341,8 +345,8 @@ def sync_insiders(
                    iih.filer_cik, iih.filer_name, iih.is_derivative,
                    iih.security_title, iih.nature_of_ownership,
                    iih.shares, iih.as_of_date, iih.direct_indirect,
-                   (SELECT count(DISTINCT x.filer_cik) FROM insider_filers x
-                     WHERE x.accession_number = iih.accession_number) AS owner_count,
+                   (SELECT count(*) FROM (SELECT DISTINCT x.filer_cik FROM insider_filers x
+                     WHERE x.accession_number = iih.accession_number) d) AS owner_count,
                    f.primary_document_url,
                    COALESCE(m.filed_at, fe.filing_date::timestamp AT TIME ZONE 'UTC') AS sec_filed_at
             FROM insider_initial_holdings iih
@@ -364,9 +368,15 @@ def sync_insiders(
     # #3227 — one observation per (filer, D/I) per accession, its shares from the SAME rule the
     # live XML writer applies (``form3_observation_shares``). Iterating the lines one by one let the
     # ON CONFLICT upsert keep whichever line came last in an unordered scan, and this weekly job
-    # then overwrote the live writer's value with it. ⚠ ``limit`` cuts rows, so a capped run can
-    # split an accession's lines; the uncapped scheduled run never does.
+    # then overwrote the live writer's value with it.
     from app.services.insider_form3_ingest import form3_observation_lines, form3_observation_shares
+
+    # ``limit`` caps ROWS, so a capped scan can end part-way through an accession, and a partial
+    # group would write a partial sum. Drop the trailing accession whenever the cap was reached; it
+    # is the only one that can be cut, and an uncapped run (the scheduled one) never trims.
+    if limit is not None and rows and len(rows) >= limit:
+        tail = (rows[-1]["instrument_id"], rows[-1]["accession_number"])
+        rows = [r for r in rows if (r["instrument_id"], r["accession_number"]) != tail]
 
     lines = [_StoredForm3Line.from_row(row) for row in rows]
     summary.rows_scanned += len(lines)

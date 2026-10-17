@@ -54,8 +54,8 @@ WITH multi AS (
 )
 SELECT h.instrument_id, h.accession_number, h.row_num, h.filer_cik, h.is_derivative,
        h.security_title, h.nature_of_ownership, h.shares, h.direct_indirect,
-       (SELECT count(DISTINCT x.filer_cik) FROM insider_filers x
-         WHERE x.accession_number = h.accession_number) AS owner_count
+       (SELECT count(*) FROM (SELECT DISTINCT x.filer_cik FROM insider_filers x
+         WHERE x.accession_number = h.accession_number) d) AS owner_count
   FROM insider_initial_holdings h
   JOIN multi USING (accession_number)
   JOIN insider_filings f ON f.accession_number = h.accession_number AND NOT f.is_tombstone
