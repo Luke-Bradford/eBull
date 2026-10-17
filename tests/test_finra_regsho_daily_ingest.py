@@ -458,7 +458,8 @@ def test_backfill_repairs_only_rows_a_suffix_line_wrote(ebull_test_conn: psycopg
     _seed_instrument(conn, instrument_id=1915, symbol="TPC")
     _seed_instrument(conn, instrument_id=1916, symbol="BCPC")
     conn.execute(
-        "INSERT INTO instruments (instrument_id, symbol, company_name, exchange) VALUES (1917, 'AXIA.PC', 'x', 't3437')"
+        "INSERT INTO instruments (instrument_id, symbol, company_name, exchange, is_tradable) "
+        "VALUES (1917, 'AXIA.PC', 'x', 't3437', TRUE)"
     )
     body = [
         "20260515|TpC|777|7|888|Q",  # suffix-only market -> extra row on 1915
