@@ -13037,3 +13037,22 @@ neighbouring container and match it.**
 - Enforced in: `scripts/measure_3714_acceptance.py` (`manifest`, `captures`, `cik`, `atom`);
   `docs/proposals/etl/2026-10-17-3714-sec-acceptance-authority.md`; `docs/data-sources/sec-bulk-archives.md`
   (gotcha corrected). The sole-writer trigger lands with the implementation.
+
+### A de-collision keyed on the accession misses one snapshot filed under two accessions (#3227)
+
+- Symptom: VFS's founder filed one Form 3 twice (`0001185185-26-001269`, `0001193125-26-114080`, same three lines,
+  same `period_end`). The XML winner came from one accession and the DERA `:NDH:` winner from the other, so the
+  same-accession dual-pipeline de-collision kept both, and the rollup summed a line twice. It stayed invisible while
+  the XML writer kept one line. When the writer started summing the holder's lines, the holder exceeded shares
+  outstanding and VFS's rollup went blank.
+- Prevention: a de-collision rule that says "the same filing, written twice" must key on what makes two rows the
+  same holding, not on the accession that carried them. And it may drop a row only when the surviving row provably
+  counts every line the dropped row stands for. Here that means every `:NDH:` line of the winner's accession has an
+  identical (title, D/I, shares) line in the plain winner's accession, and the plain winner holds that D/I group's
+  total. Codex checkpoint 2 caught three weaker forms: a match on the winner's line alone, one shared winner for D
+  and I lines, and line existence without value parity.
+- Two-writer half: ALREADY_COVERED by the 13F component-SUM entry ("SUM at EVERY locus that writes the position").
+  `ownership_observations_sync.sync_insiders`, the weekly backfill, rewrites the same Form 3 observations, so it
+  shares `form3_observation_shares` with the live writer.
+- Enforced in: `app/services/ownership_observations.py::_INSIDER_DUAL_PIPELINE_DECOLLISION` (second clause);
+  `tests/test_ownership_refresh_writer_merge.py::test_cross_accession_*`; `scripts/ab_3227_form3_line_sum.py`.
