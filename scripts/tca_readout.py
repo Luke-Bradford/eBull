@@ -15,7 +15,7 @@ order creation. ``gapped`` says the session opened beyond the stop or target, so
 The last table puts each week's fills beside the static cost model's band for the position's entry fill
 (``app/services/cost_model.py``): ``exec`` is the per-side cost against the arrival mid and ``model_h`` the band's
 half-spread, charged per side; ``what_if`` is the broker's quoted cost rate and ``p75`` the band's full spread.
-``over`` counts fills above the model figure in the column to its left.
+``exec_over`` and ``what_if_over`` count fills above ``model_h`` and ``p75`` respectively.
 """
 
 from __future__ import annotations
@@ -169,11 +169,11 @@ _BAND_COLUMNS = (
     "exec_n",
     "exec_med_bps",
     "model_h_bps",
-    "over",
+    "exec_over",
     "what_if_n",
     "what_if_med_bps",
     "p75_bps",
-    "over",
+    "what_if_over",
 )
 
 

@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 
 from app.providers.broker import BrokerCostComponent, BrokerWhatIfCostResponse
+from app.services.cost_model import BANDS, PriceBand
 from app.services.execution_tca import (
     ARRIVAL_MAX_AGE_SECONDS,
     ArrivalFacts,
@@ -336,3 +337,14 @@ def test_a_band_rows_model_figures_are_the_cost_models_fractions() -> None:
 def test_a_naive_fill_time_is_refused_rather_than_read_as_local_time() -> None:
     with pytest.raises(ValueError, match="timezone-aware"):
         band_rows([entry_tca(_row(filled_at=AT.replace(tzinfo=None)))], [])
+
+
+@pytest.mark.parametrize("band", BANDS, ids=[b.label for b in BANDS])
+def test_every_bands_model_spread_is_its_p75_as_a_fraction(band: PriceBand) -> None:
+    (row,) = band_rows(
+        [entry_tca(_row(fill=band.lower or band.upper / 2))],
+        [],  # a price inside the band
+    )
+    assert row.band == band
+    assert row.model_spread == band.p75_spread_pct / 100
+    assert row.model_half_spread == band.p75_spread_pct / 200
