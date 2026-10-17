@@ -13093,3 +13093,15 @@ neighbouring container and match it.**
   `instrument_id`; it misses 1 of 7,961 issuer-matched amendment links (share-class siblings) and refuses there.
 - Enforced in: `app/services/ownership_observations.py::INSIDER_SUPERSEDED_BY_AMENDMENT_FILTER` and
   `_INSIDER_SUPERSEDED_KEY_DROP`; `tests/test_3227_amendment_restatement.py`; `scripts/ab_3227_amendment_restatement.py`.
+
+### An EDGAR header parser must accept the 1993–96 `<IMS-HEADER>` envelope (#3714)
+
+- Symptom: the acceptance refill classified 98 archived headers from 1994–95 filings (`0000003453-95-000005`, a
+  DEF 14A) as `bad_response`. The parser required `<SEC-HEADER>…</SEC-HEADER>`, but these headers are
+  `<IMS-HEADER>…</IMS-HEADER>`, with the same `<ACCESSION-NUMBER>` line. A retryable outcome never becomes final, so
+  these rows would have retried with backoff indefinitely and held the T2/T3 census gates open.
+- Prevention: before writing an envelope check against an EDGAR document, look at the oldest filings it will read
+  as well as recent ones. The archive spans formats that the current PDS specification does not describe. A
+  retryable outcome that recurs on one filing era is a parser gap, not a transport failure.
+- Enforced in: `app/providers/implementations/sec_header.py::classify_header` (`_BLOCKS`);
+  `tests/test_sec_header.py::test_ims_header_block` (the real header, verbatim).

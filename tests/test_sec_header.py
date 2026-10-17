@@ -94,6 +94,67 @@ def test_classification(text: str, outcome: str) -> None:
     assert (check.acceptance_utc is not None) == (outcome == "found")
 
 
+# Verbatim from https://www.sec.gov/Archives/edgar/data/3453/000000345395000005/0000003453-95-000005.hdr.sgml
+# (fetched 2026-10-17), the 1993-96 envelope.
+_IMS_ACC = "0000003453-95-000005"
+_IMS = """<IMS-HEADER>0000003453-95-000005.hdr.sgml : 19950609
+<ACCESSION-NUMBER>0000003453-95-000005
+<TYPE>DEF 14A
+<PUBLIC-DOCUMENT-COUNT>1
+<PERIOD>19941231
+<FILING-DATE>19950306
+<SROS>NONE
+<FILER>
+<COMPANY-DATA>
+<CONFORMED-NAME>ALEXANDER & BALDWIN INC
+<CIK>0000003453
+<ASSIGNED-SIC>4400
+<IRS-NUMBER>990032630
+<STATE-OF-INCORPORATION>HI
+<FISCAL-YEAR-END>1231
+</COMPANY-DATA>
+<FILING-VALUES>
+<FORM-TYPE>DEF 14A
+<ACT>34
+<FILE-NUMBER>000-00565
+<FILM-NUMBER>95518737
+</FILING-VALUES>
+<BUSINESS-ADDRESS>
+<STREET1>822 BISHOP STREET
+<CITY>HONOLULU
+<STATE>HI
+<ZIP>96813
+<PHONE>8085256611
+</BUSINESS-ADDRESS>
+<MAIL-ADDRESS>
+<STREET1>PO BOX 3440
+<CITY>HONOLULU
+<STATE>HI
+<ZIP>96801
+</MAIL-ADDRESS>
+</FILER>
+</IMS-HEADER>
+"""
+
+
+@pytest.mark.parametrize(
+    ("text", "outcome"),
+    [
+        (_IMS, "absent"),  # the real header: final, no longer retried forever as bad_response
+        (_IMS.replace("<SROS>NONE", "<ACCEPTANCE-DATETIME>19950306101500"), "found"),
+        (_IMS.replace("</IMS-HEADER>", "</SEC-HEADER>"), "bad_response"),  # mismatched envelope
+        (_IMS.replace("</IMS-HEADER>\n", ""), "bad_response"),  # truncated
+        (_IMS + _header("<FILING-DATE>19990129"), "bad_response"),  # two blocks of different kinds
+        (_IMS.replace("0000003453-95-000005\n<TYPE>", "0000003453-95-000006\n<TYPE>"), "bad_response"),
+    ],
+)
+def test_ims_header_block(text: str, outcome: str) -> None:
+    check = classify_header(_IMS_ACC, header_url("0000003453", _IMS_ACC), 200, text)
+    assert check.outcome == outcome
+    if outcome == "found":
+        assert check.acceptance_utc == datetime(1995, 3, 6, 15, 15, 0, tzinfo=UTC)  # EST = UTC-5
+
+
 def test_invalid_value_keeps_the_raw_text() -> None:
     check = classify_header(ACC, URL, 200, _header("<ACCEPTANCE-DATETIME>20260308023000"))
     assert (check.outcome, check.raw_value) == ("invalid_value", "20260308023000")
