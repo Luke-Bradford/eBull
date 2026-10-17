@@ -22,7 +22,7 @@ MUST run ``raw_filings.store_raw(...)`` + ``conn.commit()`` BEFORE
 calling this function.
 
 Header/footer/body-date contract (spec §7.2):
-- Header line must match ``_EXPECTED_HEADER`` exactly — else file-level
+- Header line must match ``REGSHO_EXPECTED_HEADER`` exactly — else file-level
   ``HeaderCorruptionError``.
 - Footer line is a single int (body row count); mismatch is structural
   defect, raises ``HeaderCorruptionError`` AFTER body iteration.
@@ -54,6 +54,7 @@ import psycopg
 # resolver shape (closure with ``ambiguous_keys`` attribute).
 from app.services.finra_short_interest_ingest import (
     HeaderCorruptionError,
+    is_cqs_suffix_symbol,
     normalise_symbol,
 )
 
@@ -64,7 +65,7 @@ PARSER_VERSION = "finra-regsho-daily-v1"
 # Six-column pipe-delim header verified in spike §3.2. Header mismatch
 # = file-level fatal (FINRA changed the column shape OR the file was
 # truncated in transit).
-_EXPECTED_HEADER: tuple[str, ...] = (
+REGSHO_EXPECTED_HEADER: tuple[str, ...] = (
     "Date",
     "Symbol",
     "ShortVolume",
@@ -181,10 +182,10 @@ def ingest_regsho_daily_file(
 
     # Header.
     header_cols = tuple(lines[0].split("|"))
-    if header_cols != _EXPECTED_HEADER:
+    if header_cols != REGSHO_EXPECTED_HEADER:
         raise HeaderCorruptionError(
             f"RegSHO header mismatch at trade_date={trade_date} prefix={prefix}: "
-            f"expected {_EXPECTED_HEADER}, got {header_cols}"
+            f"expected {REGSHO_EXPECTED_HEADER}, got {header_cols}"
         )
 
     # Footer.
@@ -255,6 +256,13 @@ def ingest_regsho_daily_file(
             short_exempt = row.short_exempt_volume
             total_vol = row.total_volume
             market_stripped = row.market
+
+            # #3437: a CQS suffix symbol (``TpC``) is a preferred / right /
+            # when-issued line, never the common, and upper-casing it lands on an
+            # unrelated ticker. Our universe holds no such securities.
+            if is_cqs_suffix_symbol(symbol):
+                skipped_no_instrument_match += 1
+                continue
 
             # Ambiguity check BEFORE resolver call (resolver returns
             # None for both unknown + ambiguous; disambiguate for the

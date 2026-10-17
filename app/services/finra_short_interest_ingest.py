@@ -49,7 +49,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, Final
 from uuid import UUID
 
 import psycopg
@@ -114,6 +114,29 @@ def normalise_symbol(symbol: str) -> str:
     ``'ABRPRD'`` (FINRA shape, idempotent).
     """
     return _NORMALISE_RE.sub("", symbol.upper())
+
+
+# #3437: upper-case root (dots / slashes allowed, ``SKYD/WS``) followed by a
+# lowercase CQS type indicator: ``p`` + optional class letter, ``r``, ``w``,
+# and their when-issued forms ``pw`` / ``pAw`` / ``rw``.
+_CQS_SUFFIX_RE: Final = re.compile(r"[A-Z0-9./]+(?:p[A-Z]?w?|rw?|w)")
+
+
+def is_cqs_suffix_symbol(symbol: str) -> bool:
+    """True when a FINRA symbol carries a SIAC/CQS lowercase type suffix (#3437).
+
+    Source rule: CQS symbology writes the security-type indicator in lowercase
+    after the root — ``p`` preferred, ``r`` rights, ``w`` when issued (``TpC``
+    = preferred series C of root ``T``; Cboe US equities symbology reference,
+    "Symbology for CQS Symbols"). Such a symbol is never the common stock, and
+    ``normalise_symbol`` would upper-case it onto an unrelated ticker (``TpC`` →
+    ``TPC``), so callers must not resolve it.
+
+    Anchored to that shape rather than "has a lowercase letter", so a feed that
+    lower-cased whole symbols (``aapl``) would still resolve instead of being
+    silently dropped.
+    """
+    return _CQS_SUFFIX_RE.fullmatch(symbol) is not None
 
 
 def build_preloaded_symbol_resolver(
@@ -283,6 +306,13 @@ def ingest_settlement_file(
                     f"FINRA body settlementDate mismatch at settlement_date={settlement_date}: "
                     f"symbolCode={symbol!r} carries settlementDate={settlement_raw!r}"
                 )
+
+            # #3437: same rule as the RegSHO ingest. Stored SI files carry none
+            # (`scripts/backfill_3437_regsho_suffix_rows.py` prints the scan); this
+            # holds the rule by construction.
+            if is_cqs_suffix_symbol(symbol):
+                skipped_no_instrument_match += 1
+                continue
 
             # Ambiguity check BEFORE resolver call (resolver returns None
             # for both ambiguous + no-match; disambiguate for the counter).

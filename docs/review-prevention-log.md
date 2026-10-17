@@ -12970,3 +12970,26 @@ neighbouring container and match it.**
   the process.
 - Enforced in: `app/jobs/__main__.py::_fence_heartbeat_loop` and `_try_reacquire_singleton_fence`;
   `tests/test_jobs_singleton_fence_reaper.py` (re-acquire, stand-down, own-backend cases).
+
+### A symbol normaliser that folds case erases the field that carries the security type (#3437)
+
+- Failure: `normalise_symbol` upper-cased FINRA symbols before resolving them. In SIAC/CQS symbology the lowercase
+  letter is the type indicator (`TpC` = preferred C of `T`), so preferred lines landed on unrelated tickers (`TPC`
+  Tutor Perini, `AUB.PA` Aubay) and 771 RegSHO rows were stored against the wrong instrument.
+- Prevention: before normalising an identifier, find the source's symbology rule and check what information the
+  normalisation destroys. Classify on the raw form first, and anchor the classifier to the documented shape, so a feed
+  that changes casing wholesale fails visibly instead of being filtered away.
+- Enforced in: `app/services/finra_short_interest_ingest.py::is_cqs_suffix_symbol` (used by both FINRA ingests);
+  `tests/test_finra_cqs_suffix_symbol.py`; `scripts/backfill_3437_regsho_suffix_rows.py`.
+
+### A backfill that re-derives from raw reuses the ingest's contract and states its `known_from` policy (#3437)
+
+- Failure (PR #3866, review bot round 2): the repair script copied the RegSHO header as its own string literal, and
+  updated observation rows without saying what `known_from` meant for a correction. Either can drift from the ingest
+  silently: a second header literal goes stale, and a repair stamp that differs from the ingest's makes corrected rows
+  read differently from freshly ingested ones.
+- Prevention: a backfill that re-parses stored raw imports the ingest's validators and constants rather than restating
+  them, and its docstring states the `known_from` (or bitemporal) policy for every UPDATE, matching what the ingest
+  itself writes.
+- Enforced in: `scripts/backfill_3437_regsho_suffix_rows.py` (imports `REGSHO_EXPECTED_HEADER`; docstring
+  "``known_from`` policy").

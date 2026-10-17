@@ -19,6 +19,7 @@ Service-layer integration against ``ebull_test_conn``. Pins:
 from __future__ import annotations
 
 from datetime import date
+from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
 
@@ -407,3 +408,94 @@ def test_ingest_does_not_commit_or_rollback(
 
     assert commit_calls == 0
     assert rollback_calls == 0
+
+
+# ----------------------------------------------------------------------
+# #3437 — a CQS suffix symbol never resolves onto the common's ticker
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("suffix_first", [True, False])
+def test_cqs_suffix_symbol_is_not_resolved_onto_the_common(
+    ebull_test_conn: psycopg.Connection[tuple], suffix_first: bool
+) -> None:
+    """``TpC`` (AT&T preferred C) upper-cases to ``TPC``. With the same facility
+    union the primary key would keep whichever line came last, so both orders
+    are checked: only the ``TPC`` line's figures may be stored."""
+    _seed_instrument(ebull_test_conn, instrument_id=1915, symbol="TPC")
+    resolver = build_preloaded_symbol_resolver(ebull_test_conn)
+    common = "20260515|TPC|1000|10|5000|B,Q,N"
+    preferred = "20260515|TpC|777|7|888|B,Q,N"
+    body = [preferred, common] if suffix_first else [common, preferred]
+    raw = "\n".join(["Date|Symbol|ShortVolume|ShortExemptVolume|TotalVolume|Market", *body, "2"]).encode()
+
+    with ebull_test_conn.transaction():
+        stats = ingest_regsho_daily_file(ebull_test_conn, _TRADE_DATE, "CNMS", raw, resolver, uuid4())
+
+    assert stats.rows_parsed == 2
+    assert stats.rows_resolved == 1
+    assert stats.skipped_no_instrument_match == 1
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT short_volume, total_volume FROM finra_regsho_daily_observations "
+            "WHERE instrument_id = 1915 AND trade_date = %s",
+            (_TRADE_DATE,),
+        )
+        assert cur.fetchall() == [(Decimal("1000"), Decimal("5000"))]
+
+
+def test_backfill_repairs_only_rows_a_suffix_line_wrote(ebull_test_conn: psycopg.Connection[tuple]) -> None:
+    """#3437 backfill: rows carrying a suffix line's exact figures are deleted
+    (suffix-only market) or restored to the common's figures (same market);
+    the common's own row and a US dotted-preferred instrument are left alone."""
+    from scripts.backfill_3437_regsho_suffix_rows import repair
+
+    conn = ebull_test_conn
+    conn.execute(
+        "INSERT INTO exchanges (exchange_id, description, country, asset_class) "
+        "VALUES ('t3437', 'test US venue', 'US', 'us_equity') ON CONFLICT (exchange_id) DO NOTHING"
+    )
+    _seed_instrument(conn, instrument_id=1915, symbol="TPC")
+    _seed_instrument(conn, instrument_id=1916, symbol="BCPC")
+    conn.execute(
+        "INSERT INTO instruments (instrument_id, symbol, company_name, exchange, is_tradable) "
+        "VALUES (1917, 'AXIA.PC', 'x', 't3437', TRUE)"
+    )
+    body = [
+        "20260515|TpC|777|7|888|Q",  # suffix-only market -> extra row on 1915
+        "20260515|TPC|1000|10|5000|B,Q,N",  # the common's row, correct
+        "20260515|BCpC|50|0|60|B,Q,N",  # same market as BCPC; stored figures are the preferred's
+        "20260515|BCPC|900|9|4000|B,Q,N",
+        "20260515|AXIApC|11|0|22|N",  # US dotted preferred: identity unresolved
+    ]
+    payload = "\n".join(["Date|Symbol|ShortVolume|ShortExemptVolume|TotalVolume|Market", *body, str(len(body))])
+    conn.execute(
+        "INSERT INTO filing_raw_documents (accession_number, document_kind, payload) "
+        "VALUES ('FINRA_REGSHO_CNMS_20260515', 'finra_regsho_daily_txt', %s)",
+        (payload,),
+    )
+    for iid, market, figures in [
+        (1915, "Q", ("777", "7", "888")),
+        (1915, "B,Q,N", ("1000", "10", "5000")),
+        (1916, "B,Q,N", ("50", "0", "60")),
+        (1917, "N", ("11", "0", "22")),
+    ]:
+        conn.execute(
+            "INSERT INTO finra_regsho_daily_observations (instrument_id, trade_date, market, source_document_id, "
+            "short_volume, short_exempt_volume, total_volume, source, source_url, filed_at, period_end, "
+            "ingest_run_id) VALUES (%s, %s, %s, 'CNMS_20260515', %s, %s, %s, 'finra_regsho', 'u', now(), %s, %s)",
+            (iid, _TRADE_DATE, market, *figures, _TRADE_DATE, uuid4()),
+        )
+
+    stats = repair(conn)
+
+    assert (stats.deleted, stats.restored, stats.left_unresolved) == (1, 1, {1917: 1})
+    rows = conn.execute(
+        "SELECT instrument_id, market, short_volume, total_volume FROM finra_regsho_daily_observations "
+        "WHERE source_document_id = 'CNMS_20260515' ORDER BY instrument_id, market"
+    ).fetchall()
+    assert rows == [
+        (1915, "B,Q,N", Decimal("1000"), Decimal("5000")),
+        (1916, "B,Q,N", Decimal("900"), Decimal("4000")),
+        (1917, "N", Decimal("11"), Decimal("22")),
+    ]
