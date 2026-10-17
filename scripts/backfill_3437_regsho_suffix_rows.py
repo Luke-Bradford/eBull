@@ -14,6 +14,13 @@ kind ``finra_regsho_daily_txt``) with the ingest's own row parsers. A stored row
 is touched only when it carries a suffix line's exact market and figures in the
 same document, for an instrument that has ever held the upper-cased symbol.
 
+``known_from`` policy: a restored row gets ``known_from = NOW()``, the same
+stamp the ingest's own upsert writes whenever it rewrites a row's figures
+(``finra_regsho_ingest.py``, ``ON CONFLICT ... known_from = NOW()``). The table
+keeps no history, so the corrected figures are known from when they were
+written. Deleted rows are derived data, re-derivable from the retained raw
+files.
+
 Also scans the stored short-interest files for suffix symbols, the population
 check behind the SI ingest's guard.
 
@@ -34,18 +41,24 @@ from typing import Any
 import psycopg
 
 from app.config import settings
-from app.services.finra_regsho_ingest import split_regsho_body_row, validate_regsho_body_fields
+from app.services.finra_regsho_ingest import (
+    REGSHO_EXPECTED_HEADER,
+    split_regsho_body_row,
+    validate_regsho_body_fields,
+)
 from app.services.finra_short_interest_ingest import is_cqs_suffix_symbol, normalise_symbol
 
 _Figures = tuple[Decimal, Decimal, Decimal]
-_HEADER = "Date|Symbol|ShortVolume|ShortExemptVolume|TotalVolume|Market"
 
 
 def _parse_document(payload: str) -> list[tuple[str, str, _Figures]]:
     """(symbol, market, figures) for every valid body line."""
     lines = [ln.rstrip("\r") for ln in payload.split("\n")]
-    if lines[0] != _HEADER:
-        # Same refusal as the ingest: an unrecognised file is not repaired from.
+    if tuple(lines[0].split("|")) != REGSHO_EXPECTED_HEADER:
+        # The ingest's own header contract: it refused to ingest any file that
+        # fails it, so every stored row came from a file that passes (the dry
+        # run's "of N" line counts them). A failure here means a corrupt store,
+        # and the run aborts before anything is committed.
         raise ValueError(f"unexpected RegSHO header: {lines[0]!r}")
     rows: list[tuple[str, str, _Figures]] = []
     for line in lines[1:]:
