@@ -1325,6 +1325,11 @@ class EtoroBrokerProvider(BrokerProvider):
                 raise ClosedPositionEventCountParseError("results: expected a JSON array")
             if not isinstance(pagination, dict) or not isinstance(pagination.get("hasNext"), bool):
                 raise ClosedPositionEventCountParseError("pagination.hasNext: expected a boolean")
+            if pagination.get("page") != page:
+                # A server ignoring ``page`` would re-serve page 1 and double-count.
+                raise ClosedPositionEventCountParseError(
+                    f"pagination.page: asked for {page}, got {pagination.get('page')!r}"
+                )
             for idx, row in enumerate(rows):
                 if not isinstance(row, dict):
                     raise ClosedPositionEventCountParseError(f"page {page} row {idx}: expected an object")

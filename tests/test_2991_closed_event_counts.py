@@ -101,6 +101,7 @@ def test_an_empty_history_is_not_an_error(broker: EtoroBrokerProvider) -> None:
         ({"closeYear": 2021}, "results: expected a JSON array"),
         ({"results": []}, "pagination.hasNext"),
         ({"results": [], "pagination": {"hasNext": "no"}}, "pagination.hasNext"),
+        ({"results": [], "pagination": {"page": 2, "pageSize": 500, "hasNext": False}}, "pagination.page"),
         (_page([[2021, "Stocks", 1]]), "row 0: expected an object"),
         (_page([{"assetType": "Stocks", "closedPositionEvents": 1}]), "row 0"),
         (_page([{"closeYear": "nineteen", "assetType": "Stocks", "closedPositionEvents": 1}]), "row 0"),
@@ -144,17 +145,25 @@ def test_pages_are_followed_until_has_next_is_false(broker: EtoroBrokerProvider)
         seen.append(request)
         return httpx.Response(200, json=pages[request.url.params["page"]])
 
+    # ``_http_read`` wraps ``_client``, so the transport swap reaches the method's
+    # reads; ``seen`` holding both requests is the proof.
     broker._client._transport = httpx.MockTransport(handler)
 
     counts = broker.get_closed_position_event_counts()
 
     assert [c.closed_position_events for c in counts] == [113, 7]
     assert [r.url.params["page"] for r in seen] == ["1", "2"]
+    # Each page is its own metered read on lane G.
+    assert etoro_lane_counters()[_READ_KEY].attempts == 2
 
 
 def test_a_server_that_never_stops_paging_raises(broker: EtoroBrokerProvider) -> None:
     """Never a silently short tuple: a capped read is not the whole history."""
-    _serve(broker, httpx.Response(200, json=_page([], has_next=True)))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_page([], page=int(request.url.params["page"]), has_next=True))
+
+    broker._client._transport = httpx.MockTransport(handler)
 
     with pytest.raises(ClosedPositionEventCountParseError, match="more than"):
         broker.get_closed_position_event_counts()
