@@ -132,6 +132,52 @@ listed under "Limits".
 - The stop rule's threshold is the worst of 97 overlapping backtest windows, a sample maximum and not a confidence
   bound.
 
+### With the dead names #3843 prices (added 2026-10-17)
+
+`momentum_oos_dead.py` adds the 325 Form 25 events that #3843 covers to the same replay. 165 come from PWB, with total
+return; 160 come from eToro `price_daily`, with price return.
+
+Reproduce (dev DB, 2026-10-17 01:10Z):
+`PYTHONPATH=. uv run python scripts/research_3822/momentum_oos_dead.py`
+
+How the dead names are treated:
+- **Termination** follows `series_termination.py` at the series' last bar. `(a)(3)` realises the last close; `(b)`
+  realises 45% of it. The terminal month's return is rebuilt from levels, so a collapse to zero is charged rather than
+  filtered out.
+- **One series per instrument.** 14 names have a survivor PWB series whose capture ends before the delisting
+  (`after_capture`). That series cannot show the termination, so the covering eToro series replaces it.
+- **Formation.** A name is not a formation candidate in the month its series ends. This is a research convention, not a
+  source rule, so a sensitivity row keeps the month eligible.
+- **"Holdable"** means the name's instrument passes today's candidate predicate, ignoring `is_tradable`: US equity,
+  stock type, canonical. That is a current-metadata proxy for whether eToro listed it at the time. 294 of the 325
+  names pass.
+- The survivor-only row already contains 133 of the covering PWB series, because they are still linked to a tradable
+  instrument. It has no termination treatment.
+
+| 2024-10..2026-08, 0.1% per side | book cumulative | per year | max DD | random-30 median (50 seeds) | book beats |
+|---|---|---|---|---|---|
+| Survivor-only (above) | +77.8% | +35.0% | 21.7% | +28.0% | 50/50 |
+| Plus holdable dead names | +76.1% | +34.4% | 21.8% | +31.5% | 50/50 |
+| Same, terminal month eligible | +76.3% | +34.4% | 21.8% | +29.0% | 50/50 |
+| Plus all 325 covered | +76.1% | +34.4% | 21.8% | +31.5% | 50/50 |
+
+- **Dead names held.** The book held dead names in 5 name-months, all `(a)(3)`: CYBR twice, CDTX and TERN in their
+  final months, and EA, whose last bar is 2026-08-04. It held none of the 24 covered `(b)` failures.
+- **CDTX and TERN** were the survivor-only row's two 0% cash months. They drop out once a name whose series has ended
+  stops being a formation candidate.
+- **The 31 names that fail the holdable predicate** leave the summary figures unchanged; the two arms print the same
+  results.
+- **Stop rule:** in every row the book leads SPY by at least 39.7 points, against a 24.8-point threshold. **The rule
+  does not fire for these replays.**
+- **What stays unmeasured.** The 299 uncovered events are still absent: 119 `(a)(3)`, 103 `(b)`, 1 `(a)(4)` and 76
+  with no symbol. The rule would fire only if the book's true cumulative return were below +11.6%. No figure here
+  bounds what the uncovered names would have contributed: their histories could change scores, the liquidity cut and
+  holdings. The mix of price-return eToro series and total-return PWB series is also not separated from the treatment
+  effect.
+- **Unpriced terminations.** GRTSQ's and KAVL's terminal months have no positive prior-month level, so their
+  termination is unpriced. In the rows that exclude the terminal month, neither the book nor any of the 50 random
+  draws held a dead name in a month with no return.
+
 ## Tournament: three challengers, none adopted (added 2026-10-16)
 
 #2437 item 2 asked for three price-only quick tests against the book. A challenger goes to demo only if it beats SPY
