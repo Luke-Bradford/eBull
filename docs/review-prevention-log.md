@@ -12958,3 +12958,15 @@ neighbouring container and match it.**
   is for leaving the function, not for leaving the loop. Test the helper raising.
 - Enforced in: `app/jobs/boot_sweep.py::run_boot_freshness_sweep`;
   `tests/test_jobs_boot_sweep.py::test_a_failed_holder_lookup_keeps_waiting_rather_than_dropping_the_sweep`.
+
+### A failed heartbeat on a session-lock connection means the lock is gone (#3757)
+
+- Failure (observed 2026-10-10, twice): the jobs singleton-fence heartbeat logged and returned on any error, and its
+  docstring said "the lock is still held". A terminated backend or a server restart takes its session-scoped advisory
+  lock with it, so the process ran unfenced until restarted, and `dev_reload` does not respawn on child death.
+- Prevention: when a connection exists to hold a session-scoped lock, treat any error on it as loss of the lock.
+  Re-take the lock on a new connection, and stand down when a different backend (not your own surviving one,
+  identified by pid and `backend_start`) holds it. Do not exit and rely on a supervisor without checking what restarts
+  the process.
+- Enforced in: `app/jobs/__main__.py::_fence_heartbeat_loop` and `_try_reacquire_singleton_fence`;
+  `tests/test_jobs_singleton_fence_reaper.py` (re-acquire, stand-down, own-backend cases).

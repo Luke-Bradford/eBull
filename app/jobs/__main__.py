@@ -149,48 +149,196 @@ SINGLETON_STALE_HOLDER_GRACE_SECONDS: Final[int] = 300
 SINGLETON_FENCE_HEARTBEAT_PERIOD_SECONDS: Final[float] = 30.0
 
 
+# #3757: bound on the re-acquire connect, so a hung network cannot hold the
+# heartbeat thread past the shutdown join.
+SINGLETON_FENCE_REACQUIRE_CONNECT_TIMEOUT_SECONDS: Final[int] = 10
+
+# #3757: retry cadence while the fence is lost. Shorter than the heartbeat
+# period because the process is unfenced until the lock is back; a boot of a
+# second jobs process inside that window would take the lock.
+SINGLETON_FENCE_REACQUIRE_RETRY_SECONDS: Final[float] = 5.0
+
+
+class SingletonFence:
+    """The live fence connection plus the identity of its backend.
+
+    The connection is replaced when the heartbeat re-acquires the lock
+    (#3757), so holders read ``conn`` under the fence lock rather than
+    keeping their own reference. ``backend_pid`` and ``backend_start``
+    together identify the backend: a pid alone can be reused after a
+    server restart.
+    """
+
+    def __init__(self, conn: psycopg.Connection[Any]) -> None:
+        row = conn.execute("SELECT pid, backend_start FROM pg_stat_activity WHERE pid = pg_backend_pid()").fetchone()
+        if row is None:
+            raise RuntimeError("fence backend missing from pg_stat_activity")
+        self.conn = conn
+        self.backend_pid: int = int(row[0])
+        self.backend_start: datetime = row[1]
+
+
+def _try_reacquire_singleton_fence(
+    fence: SingletonFence,
+    fence_lock: threading.Lock,
+    stop_event: threading.Event,
+    database_url: str,
+    *,
+    lock_key: int,
+) -> bool | None:
+    """Re-take the singleton lock on a new connection after the fence was lost.
+
+    Returns ``True`` once the lock is held again and ``fence`` points at the
+    new connection, ``False`` when a different backend holds it (another jobs
+    process: this one must stand down), and ``None`` when the outcome is not
+    known yet (database unreachable, or our own old backend still exiting), so
+    the caller retries after
+    ``SINGLETON_FENCE_REACQUIRE_RETRY_SECONDS``.
+
+    A holder that is our OLD fence backend (same pid and ``backend_start``) is
+    a socket that died client-side while its backend lived on. It is
+    terminated, as ``_acquire_singleton_fence`` does for a stale holder, rather
+    than mistaken for a rival process.
+    """
+    with fence_lock:
+        with contextlib.suppress(Exception):
+            fence.conn.close()
+    try:
+        new = psycopg.connect(
+            database_url,
+            autocommit=True,
+            application_name=SINGLETON_FENCE_APPLICATION_NAME,
+            connect_timeout=SINGLETON_FENCE_REACQUIRE_CONNECT_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        logger.warning("jobs entrypoint: fence re-acquire cannot connect yet; retrying", exc_info=True)
+        return None
+    installed = False
+    classid = (lock_key >> 32) & 0xFFFF_FFFF
+    objid = lock_key & 0xFFFF_FFFF
+    try:
+        terminated = False
+        # Bounded: the old backend may release between the try and the holder
+        # lookup, or still be exiting after pg_terminate_backend (which only
+        # signals). Either way, retry here rather than run unfenced a period.
+        for _ in range(20):
+            if _try_advisory_lock(new, lock_key):
+                break
+            holder = new.execute(
+                """
+                SELECT a.pid, a.backend_start
+                  FROM pg_locks l
+                  JOIN pg_stat_activity a ON a.pid = l.pid
+                  JOIN pg_database d      ON d.oid = l.database
+                 WHERE l.locktype = 'advisory'
+                   AND l.objsubid = 1
+                   AND l.granted
+                   AND d.datname = current_database()
+                   AND l.classid = %(classid)s::oid
+                   AND l.objid   = %(objid)s::oid
+                """,
+                {"classid": classid, "objid": objid},
+            ).fetchone()
+            if holder is not None:
+                if (int(holder[0]), holder[1]) != (fence.backend_pid, fence.backend_start):
+                    logger.error(
+                        "jobs entrypoint: singleton lock (key=%d) is held by another backend (pid=%d); "
+                        "this jobs process lost its fence and is standing down",
+                        lock_key,
+                        int(holder[0]),
+                    )
+                    return False
+                if not terminated:
+                    new.execute("SELECT pg_terminate_backend(%(pid)s)", {"pid": fence.backend_pid})
+                    terminated = True
+            time.sleep(0.1)
+        else:
+            return None
+        replacement = SingletonFence(new)
+        with fence_lock:
+            if stop_event.is_set():
+                # Shutdown began while we were re-acquiring; it has already
+                # closed (or is about to close) the old connection.
+                return None
+            fence.conn = replacement.conn
+            fence.backend_pid = replacement.backend_pid
+            fence.backend_start = replacement.backend_start
+            installed = True
+        logger.warning("jobs entrypoint: singleton fence re-acquired (backend pid=%d)", fence.backend_pid)
+        return True
+    except Exception:
+        logger.warning("jobs entrypoint: fence re-acquire failed; retrying", exc_info=True)
+        return None
+    finally:
+        if not installed:
+            with contextlib.suppress(Exception):
+                new.close()
+
+
+def _try_advisory_lock(conn: psycopg.Connection[Any], lock_key: int) -> bool:
+    row = conn.execute("SELECT pg_try_advisory_lock(%s)", (lock_key,)).fetchone()
+    return bool(row and row[0])
+
+
 def _fence_heartbeat_loop(
-    fence: psycopg.Connection[Any],
+    fence: SingletonFence,
     fence_lock: threading.Lock,
     stop_event: threading.Event,
     *,
+    database_url: str,
+    process_stop: threading.Event,
+    lock_key: int = JOBS_PROCESS_LOCK_KEY,
     period_seconds: float = SINGLETON_FENCE_HEARTBEAT_PERIOD_SECONDS,
 ) -> None:
     """Periodically touch the singleton-fence connection to advance
-    ``pg_stat_activity.state_change``.
+    ``pg_stat_activity.state_change``, and re-take the lock if it is lost.
 
-    Without this thread, the fence backend goes idle immediately after
+    Without the touch, the fence backend goes idle immediately after
     boot's ``fence.commit()`` and STAYS idle. Five minutes later it
     looks indistinguishable from a stale post-kill -9 holder, so a
     parallel jobs-process boot would happily reap the live fence and
     acquire the lock — two jobs processes running concurrently.
 
-    The heartbeat itself is a trivial ``SELECT 1`` issued under the
-    fence lock so it does not race with the boot-time acquire or the
-    shutdown close. A failure here logs + breaks the loop without
-    raising — the next reaper probe will see the still-stale fence
-    and decide based on its own criteria. The main process keeps
-    running with a working lock until ordinary shutdown closes the
-    fence.
+    The touch is a trivial ``SELECT 1`` issued under the fence lock so it
+    does not race with the shutdown close.
+
+    #3757: a failed touch means the fence backend is gone (terminated, or
+    the server restarted), and the session-level lock went with it. The
+    process would otherwise run unfenced until restarted, and exiting does
+    not help on the dev stack, where ``dev_reload`` respawns its child on an
+    ``app/**`` change and not on child death. So the loop tries to re-take the
+    lock on a new connection every ``SINGLETON_FENCE_REACQUIRE_RETRY_SECONDS``
+    until it succeeds. If another
+    backend holds it, a second jobs process is running, and this one sets
+    ``process_stop`` to shut down.
     """
-    while not stop_event.wait(timeout=period_seconds):
-        try:
-            with fence_lock:
-                if fence.closed:
-                    return
-                # Fence opens with autocommit=True so this trivial
-                # SELECT transitions active → idle WITHOUT a
-                # transaction-bracketed phase. The reaper's
-                # ``state='idle'`` filter then catches a truly dead
-                # fence; a healthy fence's state_change keeps advancing.
-                fence.execute("SELECT 1").fetchone()
-        except Exception:
-            logger.exception(
-                "jobs entrypoint: fence heartbeat failed; the live-fence "
-                "liveness signal is now stale. The lock is still held "
-                "but a concurrent jobs boot >grace_seconds from now "
-                "could reap this fence."
-            )
+    lost = False
+    while not stop_event.wait(
+        timeout=min(period_seconds, SINGLETON_FENCE_REACQUIRE_RETRY_SECONDS) if lost else period_seconds
+    ):
+        if not lost:
+            try:
+                with fence_lock:
+                    if fence.conn.closed:
+                        raise psycopg.OperationalError("fence connection closed")
+                    # Fence opens with autocommit=True so this trivial
+                    # SELECT transitions active → idle WITHOUT a
+                    # transaction-bracketed phase. The reaper's
+                    # ``state='idle'`` filter then catches a truly dead
+                    # fence; a healthy fence's state_change keeps advancing.
+                    fence.conn.execute("SELECT 1").fetchone()
+                continue
+            except Exception:
+                logger.exception(
+                    "jobs entrypoint: fence heartbeat failed; the singleton lock is "
+                    "treated as lost and will be re-acquired on a new connection"
+                )
+                lost = True
+        outcome = _try_reacquire_singleton_fence(fence, fence_lock, stop_event, database_url, lock_key=lock_key)
+        if outcome is True:
+            lost = False
+        elif outcome is False:
+            process_stop.set()
             return
 
 
@@ -927,6 +1075,7 @@ def serve(stop_event: threading.Event | None = None) -> int:
     fence_lock = threading.Lock()
     fence_heartbeat_stop = threading.Event()
     fence_heartbeat_thread: threading.Thread | None = None
+    fence: SingletonFence | None = None
 
     # PR1a #1064 — fail-fast at jobs entrypoint if SCHEDULED_JOBS and
     # _BOOTSTRAP_STAGE_SPECS disagree on a job_name's source. Mirrors
@@ -1068,9 +1217,11 @@ def serve(stop_event: threading.Event | None = None) -> int:
         # try-body raises (queue boot-drain, runtime.start(), etc.),
         # the finally clause sets fence_heartbeat_stop + joins the
         # thread under fence_lock before closing the fence.
+        fence = SingletonFence(fence_conn)
         fence_heartbeat_thread = threading.Thread(
             target=_fence_heartbeat_loop,
-            args=(fence_conn, fence_lock, fence_heartbeat_stop),
+            args=(fence, fence_lock, fence_heartbeat_stop),
+            kwargs={"database_url": settings.database_url, "process_stop": stop_event},
             name="jobs-fence-heartbeat",
             daemon=True,
         )
@@ -1396,7 +1547,9 @@ def serve(stop_event: threading.Event | None = None) -> int:
             logger.exception("jobs entrypoint: pool.close raised")
         try:
             with fence_lock:
-                fence_conn.close()  # LAST — releases the singleton lock.
+                # LAST — releases the singleton lock. The heartbeat may have
+                # swapped in a re-acquired connection (#3757).
+                (fence.conn if fence is not None else fence_conn).close()
             logger.info("jobs entrypoint: singleton fence released")
         except Exception:
             logger.exception("jobs entrypoint: fence_conn.close raised")
