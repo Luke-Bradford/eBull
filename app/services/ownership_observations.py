@@ -476,7 +476,7 @@ INSIDER_WINNER_ORDER_TAIL: Final[LiteralString] = """
 # link is ambiguous and refuses (Codex ckpt-2) — searched by issuer as well as instrument, since
 # share-class siblings can carry different bookkeeping ``instrument_id`` values. The link itself
 # stays on ``instrument_id`` (indexed); a sibling pair it misses refuses, which is today's
-# behaviour (rare; the count is on PR #3876). And the
+# behaviour (rare — counted in the prevention-log entry). And the
 # outer row's holder must have a live observation from the amendment on this instrument, so the
 # exclusion can only hand a holder from the original to its restatement, never leave it empty.
 #

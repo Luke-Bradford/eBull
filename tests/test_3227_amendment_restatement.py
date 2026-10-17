@@ -51,12 +51,19 @@ def conn(ebull_test_conn):
 
 
 def _observation(
-    conn: psycopg.Connection[Any], *, accession: str, nature: str, shares: str, period: date, filed: datetime
+    conn: psycopg.Connection[Any],
+    *,
+    accession: str,
+    nature: str,
+    shares: str,
+    period: date,
+    filed: datetime,
+    holder: str = _OWNER,
 ) -> None:
     oo.record_insider_observation(
         conn,
         instrument_id=_IID,
-        holder_cik=_OWNER,
+        holder_cik=holder,
         holder_name="Abate Christopher J",
         ownership_nature=nature,  # type: ignore[arg-type]
         source="form4",
@@ -325,3 +332,26 @@ def test_form3_branch(conn: psycopg.Connection[Any], amendment_shares: int, expe
     _seed_form3(conn, amendment_shares)
     oo.refresh_insiders_current_batch(conn, instrument_ids=[_IID])
     assert set(_current(conn)) == expected_natures
+
+
+def test_history_bucket_drop_across_holders_keeps_a_live_newer_row(conn: psycopg.Connection[Any]) -> None:
+    """Review round 2: with no holder filter a bucket spans holders. Another holder's live, newer row in
+    the superseded original's bucket is that bucket's winner, and the drop must not remove it."""
+    _seed(conn, _BASE)
+    other = "0000000777"
+    _observation(
+        conn,
+        accession="0000000777-26-000001",
+        nature="indirect",
+        shares="5",
+        period=_PERIOD,
+        filed=datetime(2026, 9, 20, tzinfo=UTC),
+        holder=other,
+    )
+    conn.commit()
+    points = _insiders_history(conn, instrument_id=_IID)
+    assert [(p.period_end, p.ownership_nature, p.source_accession) for p in points] == [
+        (date(2026, 4, 14), "indirect", _APRIL),
+        (_PERIOD, "direct", _AMENDMENT),
+        (_PERIOD, "indirect", "0000000777-26-000001"),
+    ]

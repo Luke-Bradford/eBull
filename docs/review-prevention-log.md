@@ -13088,5 +13088,8 @@ neighbouring container and match it.**
 - Planner half: a correlated `NOT EXISTS` used as a shared fragment can be pulled up into an anti-join over the whole
   relation. Here it evaluated supersession for every Form 3/4 on file on each refresh (MSFT 0.29s → 1.55s). `OFFSET 0`
   keeps it a per-row subplan. Time a shared fragment on both the single and the batch path; the two plans differ.
+- Scope, measured 2026-10-17: `filed_at` carries a time of day on 42,590 of 1,316,617 Form 3/4 manifest rows, so the
+  amendment link compares `dateOfOriginalSubmission` in an ET-date window. The link stays on the indexed
+  `instrument_id`; it misses 1 of 7,961 issuer-matched amendment links (share-class siblings) and refuses there.
 - Enforced in: `app/services/ownership_observations.py::INSIDER_SUPERSEDED_BY_AMENDMENT_FILTER` and
   `_INSIDER_SUPERSEDED_KEY_DROP`; `tests/test_3227_amendment_restatement.py`; `scripts/ab_3227_amendment_restatement.py`.
