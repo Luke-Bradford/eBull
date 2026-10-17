@@ -181,6 +181,17 @@ def test_no_class_and_not_a_declared_pool_is_unresolved_not_price_return() -> No
     assert {r.source for r in rows} == {INTRADER_VENDOR}
 
 
+def test_dbc_distributes_so_it_is_not_a_pool_and_its_2022_months_are_flagged() -> None:
+    """#3676: DBC paid $0.14467 on 2022-12-23 that Intrader does not stamp. Even with an eToro
+    instrument it must not extend as a pool, and its Intrader months from 2022 carry the flag."""
+    verdict, _identity, rows = assemble_symbol(
+        _pool(symbol="DBC", etoro_instrument_ids=[9999]), include_price_return=True
+    )
+    assert verdict is EtfVerdict.UNRESOLVED_REFERENCE
+    assert {r.source for r in rows} == {INTRADER_VENDOR}
+    assert all(r.dividend_capture_degraded == (r.month >= date(2022, 1, 1)) for r in rows)
+
+
 # --- assemble_symbol: declared pools on eToro -----------------------------------------------------
 
 

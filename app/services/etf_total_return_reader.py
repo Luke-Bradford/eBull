@@ -11,8 +11,8 @@ to 2021 and 7 in 2022), so a fund with an N-PORT class switches at the stock spl
 then the basis is the fund's NAV, not its market close: the two differ by the change in premium/discount
 every month, not only at the join. UITs and commodity pools file no N-PORT:
 SPY and QQQ read a registered fund tracking the same index (declared proxies), and the declared commodity
-pools (no distributions to lose) keep Intrader through 2024-08 and then read eToro ``price_daily`` closes,
-price return only, and only when the caller opts in. Every other
+pools (which pay no distributions, so price return is total return) keep Intrader through 2024-08 and then read
+eToro ``price_daily`` closes, price return only, and only when the caller opts in. Every other
 rule here (the proxies, the pool list, the identity gate, the ambiguity refusals) is fixed by construction
 and frozen by this module's source hash.
 
@@ -78,7 +78,13 @@ PROXIES: Final[Mapping[str, str]] = {"SPY": "IVV", "QQQ": "QQQM"}
 #: Commodity pools: trusts or partnerships registered under the 1933 Act, not 1940-Act funds, so no N-PORT.
 #: Only these may extend on eToro closes; a symbol merely absent from the SEC fund directory is unresolved,
 #: not a non-filer (an absent directory row can be a transient refresh miss, sql/149).
-PRICE_RETURN_POOLS: Final[frozenset[str]] = frozenset({"GLD", "IAU", "SLV", "USO", "DBC"})
+#:
+#: Membership also means "pays no distributions": a pool's Intrader months from ``SWITCH_MONTH`` are not flagged
+#: ``dividend_capture_degraded`` and its eToro extension is price return. DBC is a commodity pool but is NOT
+#: listed: it distributes its collateral income — $0.14467 on 2022-12-23 and $1.08926 on 2023-12-22 (2023
+#: Form 10-K, accession 0000950170-24-019059) — and Intrader carries the 2023 stamp but not the 2022 one (#3676).
+#: Re-measure the listed four with the ``dividend <> 0`` stamp count on #3676 before adding a pool.
+PRICE_RETURN_POOLS: Final[frozenset[str]] = frozenset({"GLD", "IAU", "SLV", "USO"})
 
 #: Identity gate between the Intrader series and its extension source: at least ``IDENTITY_MIN_MONTHS`` paired
 #: months (the stock splice's floor) and a median |monthly return difference| below the source's threshold.

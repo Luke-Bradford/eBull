@@ -13010,3 +13010,14 @@ neighbouring container and match it.**
 - Enforced in: `app/services/ownership_rollup.py::_INSIDER_JOINT_DIRECT_LINES_SQL` and `_source_rows_and_total` (which
   drops the restatement before any MAX; `_merge_section16_forms` only routes it to its overlap bucket and relies on that);
   `tests/test_3349_joint_di_restatement.py`; `tests/test_3349_joint_di_restatement_sql.py` (one case per clause).
+
+### A category list that implies a data property must have that property measured per member (#3676)
+
+- Failure: `PRICE_RETURN_POOLS` was declared as the commodity pools that file no N-PORT, and the reader also used
+  membership to mean "pays no distributions", which suppresses the `dividend_capture_degraded` flag and allows
+  price-return extension. DBC is a commodity pool, but it distributes (2023 Form 10-K: $0.14467 in 2022, $1.08926 in
+  2023), and Intrader misses the 2022 distribution. So DBC's 2022 return was understated, and nothing flagged it.
+- Prevention: when one list is used for two properties, check each member against the second one on the data. Here
+  that is the `dividend <> 0` stamp count per symbol, reproducible from the query on #3676. Write the property in the
+  list's comment.
+- Enforced in: `app/services/etf_total_return_reader.py::PRICE_RETURN_POOLS` (comment); `tests/test_etf_total_return_reader.py::test_dbc_distributes_so_it_is_not_a_pool_and_its_2022_months_are_flagged`.
