@@ -182,8 +182,7 @@ def _med(values: Sequence[Decimal]) -> str:
 
 
 def _band_row(r: BandRow) -> tuple[str, ...]:
-    h = None if r.band is None else r.band.half_spread
-    p75 = None if r.band is None else r.band.p75_spread_pct / 100
+    h, p75 = r.model_half_spread, r.model_spread
     return (
         r.week.isoformat(),
         r.side,

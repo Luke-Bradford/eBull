@@ -680,7 +680,7 @@ def load_exit_tca(conn: Conn, *, since: date) -> list[ExitTca]:
     return [exit_tca(r) for r in rows]
 
 
-Side = Literal["entry", "exit"]
+BandSide = Literal["entry", "exit"]
 
 
 @dataclass(frozen=True)
@@ -689,18 +689,31 @@ class BandRow:
 
     #: Monday of the fill's ISO week (UTC).
     week: date
-    side: Side
+    side: BandSide
     #: The band of the position's entry fill; None when that fill is unknown.
     band: PriceBand | None
     fills: int
-    #: Per-side cost against the arrival mid (``execution``), comparable with the band's ``half_spread``.
+    #: Per-side cost against the arrival mid (``execution``), a fraction, comparable with ``model_half_spread``.
     executions: tuple[Decimal, ...]
-    #: The broker's what-if cost rate, comparable with the band's full ``p75_spread_pct`` (#2598: the what-if spread
+    #: The broker's what-if cost rate, a fraction, comparable with ``model_spread`` (#2598: the what-if spread
     #: matched the quoted spread at a median 0.995x).
     what_ifs: tuple[Decimal, ...]
 
+    @property
+    def model_half_spread(self) -> Decimal | None:
+        """``cost_model``'s per-side charge for the band, as a fraction (``PriceBand.half_spread``)."""
+        return None if self.band is None else self.band.half_spread
+
+    @property
+    def model_spread(self) -> Decimal | None:
+        """The band's full p75 spread as a fraction: both sides' charge, from the same fraction property."""
+        return None if self.band is None else 2 * self.band.half_spread
+
 
 def _week(at: datetime) -> date:
+    if at.tzinfo is None:
+        # astimezone would read a naive stamp as local time. The loaders read TIMESTAMPTZ, so they never send one.
+        raise ValueError("a fill time must be timezone-aware")
     day = at.astimezone(UTC).date()
     return day - timedelta(days=day.weekday())
 
@@ -709,12 +722,12 @@ def band_rows(entries: Sequence[EntryTca], exits: Sequence[ExitTca]) -> list[Ban
     """Filled entries and engine exits grouped by fill week, side and the cost band of the position's entry fill.
     Stop and target closes are left out: they are costed against their level, not a mid, so they have no figure
     comparable with a spread."""
-    fills: Counter[tuple[date, Side, PriceBand | None]] = Counter()
-    executions: dict[tuple[date, Side, PriceBand | None], list[Decimal]] = defaultdict(list)
-    what_ifs: dict[tuple[date, Side, PriceBand | None], list[Decimal]] = defaultdict(list)
+    fills: Counter[tuple[date, BandSide, PriceBand | None]] = Counter()
+    executions: dict[tuple[date, BandSide, PriceBand | None], list[Decimal]] = defaultdict(list)
+    what_ifs: dict[tuple[date, BandSide, PriceBand | None], list[Decimal]] = defaultdict(list)
 
     def add(
-        at: datetime, side: Side, keyed_on: Decimal | None, execution: Decimal | None, what_if: Decimal | None
+        at: datetime, side: BandSide, keyed_on: Decimal | None, execution: Decimal | None, what_if: Decimal | None
     ) -> None:
         key = (_week(at), side, None if keyed_on is None else band_for(keyed_on))
         fills[key] += 1
@@ -730,7 +743,7 @@ def band_rows(entries: Sequence[EntryTca], exits: Sequence[ExitTca]) -> list[Ban
         if x.kind == "engine" and x.fill is not None:
             add(x.closed_at, "exit", x.entry_fill, x.execution, x.what_if_cost)
 
-    def rank(key: tuple[date, Side, PriceBand | None]) -> tuple[date, Side, int]:
+    def rank(key: tuple[date, BandSide, PriceBand | None]) -> tuple[date, BandSide, int]:
         week, side, band = key
         return week, side, len(BANDS) if band is None else BANDS.index(band)
 
@@ -746,15 +759,15 @@ __all__ = [
     "ArrivalOutcome",
     "ArrivalQuote",
     "BandRow",
-    "Side",
+    "BandSide",
     "CloseWhatIfOutcome",
     "EntryCosts",
     "EntryTca",
     "ExitEvidence",
     "ExitKind",
     "ExitTca",
-    "band_rows",
     "GapUnmeasured",
+    "band_rows",
     "classify_exit",
     "close_cost",
     "entry_costs",

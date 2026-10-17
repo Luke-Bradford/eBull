@@ -325,3 +325,14 @@ def test_fills_are_grouped_by_week_side_and_the_entry_fills_band() -> None:
     assert rows[1].executions == (Decimal("0.0005"),)
     assert rows[1].what_ifs == (Decimal("0.001"),)
     assert rows[2].executions == (Decimal("0.0005"),) and rows[2].what_ifs == ()
+
+
+def test_a_band_rows_model_figures_are_the_cost_models_fractions() -> None:
+    (row,) = band_rows([entry_tca(_row())], [])  # fill 100.05: the >=$100 band, frozen p75 0.322 percent
+    assert row.model_half_spread == Decimal("0.00161")  # per side: 0.161 percent
+    assert row.model_spread == Decimal("0.00322")  # both sides: 0.322 percent = 32.2 bps
+
+
+def test_a_naive_fill_time_is_refused_rather_than_read_as_local_time() -> None:
+    with pytest.raises(ValueError, match="timezone-aware"):
+        band_rows([entry_tca(_row(filled_at=AT.replace(tzinfo=None)))], [])
