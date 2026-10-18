@@ -122,16 +122,17 @@ def _gap_band(period: date, filed: date) -> str:
 
 
 def _fye_distance(period: date, fye: str) -> int | None:
-    """Days from ``period`` to the nearest occurrence of the ``MMDD`` fiscal year end, 0 only on a
-    literal month-day match.  ``None`` for a malformed ``MMDD`` (a month outside 1-12, or a day the
-    month never has).  A ``0229`` year end falls on 02-28 in a non-leap year, at distance >= 1."""
+    """Days from ``period`` to the nearest occurrence of the ``MMDD`` fiscal year end, 0 only when
+    ``period`` is that year end in its own year.  ``None`` for a malformed ``MMDD`` (a month outside
+    1-12, or a day the month never has).  A ``0229`` year end falls on 02-28 in a non-leap year, so
+    a 02-28 period of a non-leap year is an exact match."""
     m = _MMDD.fullmatch(fye.strip())
     if m is None:
         return None
     month, day = int(m.group(1)), int(m.group(2))
     if not 1 <= month <= 12 or not 1 <= day <= (29 if month == 2 else calendar.monthrange(2001, month)[1]):
         return None
-    if (period.month, period.day) == (month, day):
+    if (period.month, period.day) == (month, min(day, calendar.monthrange(period.year, month)[1])):
         return 0
     best = None
     for year in (y for y in (period.year - 1, period.year, period.year + 1) if 1 <= y <= 9999):
@@ -322,7 +323,10 @@ def _compare(g: Group, cur_row: tuple[Any, ...] | None) -> str:
     new_rank, cur_rank = _SOURCE_RANK["form4"], _SOURCE_RANK.get(source, 10)
     new_order = (g.period_end, g.filed_at)
     cur_order = (cur_pend or date.min, cur_filed or datetime.min.replace(tzinfo=g.filed_at.tzinfo))
-    # PostgreSQL orders ``period_end DESC, filed_at DESC`` NULLS FIRST.
+    # PostgreSQL orders ``period_end DESC, filed_at DESC`` NULLS FIRST. This branch returns for every
+    # same-rank case where a NULL decides: a NULL ``period_end``, or a NULL ``filed_at`` at an equal
+    # ``period_end``. ``filed_at`` is compared only when the ``period_end``s are equal, so the
+    # ``datetime.min`` fallback above is never what orders a NULL.
     if new_rank == cur_rank and (cur_pend is None or (cur_pend == g.period_end and cur_filed is None)):
         return "loses_to_current_null_date"
     if new_rank > cur_rank or (new_rank == cur_rank and new_order < cur_order):
