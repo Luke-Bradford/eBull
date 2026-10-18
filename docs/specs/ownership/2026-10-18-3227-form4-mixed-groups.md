@@ -306,6 +306,12 @@ No schema change and no parser change: the holding lines are already stored and 
 
   The Form 3 line sum, the vehicle sum and #3882's holding-only sum accept the same class. The
   sample above cannot measure its prevalence; the build's cross-source checks read NRDY.
+- **Cross-holder dedup in the rollup (found by the build's A/B).** The rollup's control-group
+  collapse (#1652) matches exact observation totals. Where one insider's line equalled another
+  insider's lot (SMMT: Duggan's `direct` and Zanganeh's "By Spouse" line, both 573,883,879), the
+  fold hides that line inside a larger sum and the shared block is counted twice. 13 instruments,
+  720,882,000 collapsed shares. The observation stays the filer's attested total; the dedup gap is
+  #3886.
 - **5c sources exclude Form 4 holding lines.** An earlier Form 4 holding of the same form cannot
   clear a 5c match, and one of another form cannot trigger it. Widening the sources would also
   change existing transaction-only verdicts, so it is left for a measured slice of its own.

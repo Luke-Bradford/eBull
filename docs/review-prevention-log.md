@@ -13172,3 +13172,19 @@ neighbouring container and match it.**
   observations separately and put them in the before/after comparison.
 - Enforced in: `docs/specs/ownership/2026-10-18-3227-form4-mixed-groups.md` (Change 3, Acceptance 2 and 5);
   `scripts/census_3227_form4_mixed_groups.py` (sibling count).
+
+### A fold that sums lines can break a downstream exact-value dedup; measure the dedup, not only totals (#3227, 2026-10-18)
+
+- Symptom: the #3227 mixed-groups A/B checked observations (0 down), `_current`, the insider rollup total and newly
+  oversubscribed instruments. The rollup total fell on 2 instruments and rose on 534, which reads as "more shares
+  found". But on SMMT the rise was a double count the fold re-created: Duggan's `direct` lot equalled Zanganeh's
+  "By Spouse" line exactly, and the rollup's control-group collapse (#1652) counted it once. Folding her trusts into
+  that line made her `indirect` 609,984,809, the equality vanished and the block rendered twice (insiders
+  645,918,028 → 1,255,908,837). 13 instruments released 720,882,000 collapsed shares (#3886).
+- Prevention: any change that turns a stored observation into a sum of filing lines must report, per instrument,
+  the shares each rollup correction removes before and after (`corrections_applied`, by kind). A correction that
+  removes less after the change means a dedup that matched a component now misses it. Inspect each one, and file the
+  matching gap in the dedup rather than suppressing the sum in the writer: observations record what each filer
+  attested, and cross-holder dedup belongs to the rollup.
+- Enforced in: `scripts/ab_3227_form4_mixed_groups.py` (`_insider_view` returns the control-group collapse total;
+  stage 1 prints every instrument whose collapse removes less).
