@@ -63,14 +63,23 @@ Every count in this section comes from:
 
 ```bash
 PYTHONPATH=. uv run python -m scripts.census_3227_form4_mixed_groups --examples 3 \
-  --show 0001858681-24-000036 --show 0000933430-25-000004 --show 0001127602-25-003551
+  --show 0001858681-24-000036 --show 0000933430-25-000004 --show 0001127602-25-003551 \
+  --show 0000051434-26-000058 --sample D:7:6 --sample I:11:6
 ```
 
-It was run at 2026-10-18 12:34Z, in one `REPEATABLE READ` snapshot, from the script as committed
+It was run at 2026-10-18 12:46Z, in one `REPEATABLE READ` snapshot, from the script as committed
 in this PR (base `62c834e6`, after the #3882 backfill). It reads the stored lines
 (`insider_form4_holdings`, `insider_transactions`, `insider_filers`), applies the Change
 section's rule, and compares the result with the stored current observation (`known_to IS NULL`)
 of the same accession, holder and nature.
+
+**Invariants the comparison relies on**, each checked by the script (and asserted 0):
+- 0 rows in `insider_transactions`, `insider_form4_holdings` or `insider_filers` have a CIK that
+  `btrim` would change. So grouping on the stored CIK equals grouping on the stripped one, in the
+  census and in the live writer, which groups on the raw CIK.
+- 0 `(instrument, accession, holder, nature)` keys have more than one current `form4`
+  observation. So "today's observation" of a key is unique.
+- 0 `_current` winner keys hold shares different from their stored observation.
 
 **Cohort.**
 - 23,929 mixed units `(instrument, accession, filer)` on live Form 4/4A filings, giving 24,155
@@ -78,6 +87,8 @@ of the same accession, holder and nature.
 - The mixed holding lines are 12,796 `D` and 43,613 `I`. That matches the holding-row spec's
   12,796 and 43,612, with one more `I` line since its run.
 - 7 keys have no stored observation today. None of them sums.
+- 0 keys fall outside the weekly writer's Form 4 retention gate (manifest-first filing date):
+  #3882's backfill stored only in-retention holdings.
 - Of the mixed `I` lines, 7,078 share a normalised nature with a transacting form of the same
   filing (LGCY `0001493152-25-007246`: four "See Footnote" lines, one transacting); 36,535 do not.
 
@@ -119,24 +130,31 @@ of the same accession, holder and nature.
   holding line is a footnoted RSU or PRSU grant (F3–F12), which the filer reports in Table I
   (residual below).
 
-**A sample read against the filings' own footnotes.** These were picked at random from `sums`,
-with seeds 7 and 11, using `/tmp`-only tooling and not committed. The D/I and nature are
-`insider_transactions` / `insider_form4_holdings`, and the footnotes are
-`insider_transaction_footnotes`. Each folded line is a separately footnoted block:
-- WH: DSUs 20,338 + RSUs 3,742 + common 30,939.
-- QRHC: F5 says the transaction balance "includes (a) 20,000 RSUs and (b) 92,585 shares". The
-  holding is 75,609 DSUs (F6).
-- TNL: common 181,107 + previously reported RSUs 74,481.
-- CHD: PSUs 1,460 + four direct holdings.
-- SBCF: the sold series 216,854 + joint 18,104 + Retirement Savings Plan 34,315.537 + IRA 9,356.
-- CRGY: RSUs 19,669 + IRA 714,357.
-- CDXS: Opaleye L.P. 9,605,000 + managed account 250,000.
-- MDB: charitable foundation 80,462 + children's trust 490,896.
-- CLBK (two filings): a deferral plan, 401(k), ESOP, SERP, stock awards.
-- SCL: a living trust + ESOP II.
+**A sample read against the filings' own footnotes** (`--sample D:7:6 --sample I:11:6`: six
+random `sums` keys of each D/I, drawn from the accession-ordered pool, printed with their lines
+and `insider_transaction_footnotes`):
+- `D`, iid 7969 `0001193125-26-271284`: a restricted grant of 750 (F1) + a holding of 8,765.
+- `D`, iid 10293: a stock-purchase-plan series ending at 184 (F1) + a holding of 4,347.
+- `D`, iid 8972: a 10b5-1 sale series ending at 76,377 + 9,561 unvested director RSUs (F2).
+- `D`, iid 10093: a series ending at 12,891 + holdings of 2,598.377 and 6,213 (no footnotes).
+- `D`, iid 9659 (SBCF): earned PSU shares 37,666 (F1) + a deferred-compensation plan, three
+  unvested restricted awards and ESPP shares (F2–F6).
+- `D`, CHWY `0001766502-26-000054`: a withheld-shares series ending at 885,722 + six RSU/PRSU
+  grants (F3–F8).
+- `I`, NRDY `0001628280-25-056431` and `-055213` (Cohn): a transacting trust + two other trusts +
+  Rarefied Air Capital LLC, which F3 says is owned by three of the trusts. Today 31,960,556 and
+  1,278,512; folded 47,973,606 and 47,066,329. Whether the trusts' lines include the LLC's
+  shares is exactly the 4(b)(iv) question; the filing reports them on separate lines with
+  unequal amounts, so the rule sums them (cross-source item below).
+- `I`, iid 1047985: a "Son" series ending at 35,900 + a holding of 70,441.
+- `I`, CLBK `0001729897-26-000028`: a deferral-plan series (phantom stock, F1) + 401(k), ESOP,
+  SERP, SIM, spouse and three stock-award lines.
+- `I`, iid 1050792: a trust series ending at 175,252 + four trust and IRA holdings (F3 disclaims
+  beneficial ownership; the Table I figure is still the filer's).
+- `I`, iid 1029: two retirement-plan series + a "By Spouse" holding.
 
-None of these reads as a total that includes another line. This is a sample, not proof (nested
-blocks, residual below).
+None of these reads as a line that restates another; NRDY is the closest case. This is a sample,
+not proof (overlap residuals below).
 
 ## Change
 
@@ -157,8 +175,11 @@ fix would be reverted by the weekly re-derivation (#3874).
   - **Each holding line is a one-line form of its own, whatever its nature.** It has no
     transaction to chain, and 4(b)(iii) puts each form of ownership on its own line.
   - A shared nature text does not identify one vehicle: 7,078 of the mixed `I` lines share a
-    transacting form's nature, such as LGCY's "See Footnote". A holding that restates a transacting
-    vehicle's balance is refused by condition 5b below, not merged.
+    transacting form's nature, such as LGCY's "See Footnote". This is a policy choice, not a
+    reading of 4(b)(iii), which says different forms go on separate lines, not that every line is
+    a different form. The guards refuse a holding that **equals** a transacting vehicle's opening
+    or any of its balances (5b, 5b′); a holding contained in a balance without equalling one is
+    summed (overlap residuals below).
 - **Conditions.** These are `form4_observation_shares`'s, applied to every non-derivative line
   of the unit, transactions **and** holdings, D and I. Every one must hold, and a NULL anywhere
   refuses:
@@ -181,19 +202,23 @@ fix would be reverted by the weekly re-derivation (#3874).
        a transacting vehicle.
      - (c) As today, but over the **summed key's** transaction series: every `I` series for an
        `I` key, and the `D` series for a `D` key. The sources are unchanged: Form 4/4A
-       transaction lines and Form 3/3A holding lines. A unit with no manifest time refuses when
-       5c is reached.
+       transaction lines and Form 3/3A holding lines. As today, 5c is reached only when some
+       summed series' first line opens at a non-zero balance; a zero opening adds nothing and
+       needs no history. When 5c is reached, a unit with no manifest time refuses.
   6. **No two non-zero final balances are equal** across all forms of the unit: the transaction
      series' finals and every holding line.
 - **Value.** The sum over the summed key's forms: each transaction series' final balance
   (`txn_date DESC, txn_row_num DESC`), plus each of the key's holding lines.
-- **Refused.** Today's value stands. That is the `I` vehicle sum where today's conditions give
-  one, else the latest line. It is never a partial sum.
+- **Refused.** The writer's own value for **that key** stands: for `I`, today's vehicle sum
+  where today's conditions give one, else the latest line; for `D`, the latest `D` line. A
+  refused `D` key never takes an `I` result. It is never a partial sum.
 - **Never below today.** Conditions 2–6 range over a superset of the lines that today's `I` sum
   checks, and use the same 5c sources. So whenever the fold sums, today's `I` value was either
   that key's own transaction-series sum or its latest line (condition 1 failed). Both are terms
-  of the fold. Every term is ≥ 0. For `D`, today's latest line is the `D` series' final. The
-  census counts 0 falls.
+  of the fold. Every term is ≥ 0. For `D`, today's latest line is the `D` series' final. Two
+  preconditions, both measured above: CIKs are stored stripped (the live writer groups its
+  latest line on the raw CIK, the helper on the stripped one), and `txn_date` is NOT NULL
+  (`sql/056`), so the weekly writer has no null-date path. The census counts 0 falls.
 - **Unchanged fields.** `period_end` stays the latest transaction line's `txn_date` for the key.
   `filed_at`, `source_document_id`, the holder name and the gates are each writer's as today.
   Only `shares` changes.
@@ -204,18 +229,23 @@ transaction-only units. A `D` series is one form there, so it has nothing to sum
 
 ### 2. The writers
 
-- **Helper.** `form4_observation_shares` gains a `holdings` argument and a `direct_indirect`
-  argument.
-  - With no holding line of that D/I, it is today's function: `I` as today, and `D` out of scope.
-  - With one, it applies the rule above. On a refusal, it returns today's `I` verdict and value.
-  - The census's `fold_verdict` is the reference, and the A/B compares the two one for one.
+- **Helper.** A new function beside `form4_observation_shares`, which stays unchanged, takes the
+  unit's transaction lines, its holding lines and the key's D/I. It returns the **fold verdict**
+  and the folded value (set only on `sums`).
+  - The writers call it only for a mixed key. On `sums` they use its value; on any other verdict
+    they compute that key's value exactly as today (for `I`, `form4_observation_shares` and its
+    fallback; for `D`, the latest line).
+  - The fold verdict is what the A/B compares with the census's `fold_verdict`, one for one, so
+    a refused fold over a summable `I` key compares as a refusal, not as today's `sums`.
 - **Live writer.** It passes `parsed.holdings`, every line attributed to `filers[0]` as #3882
   does, matched to the unit by stripped CIK. It computes the `D` key as well as the `I` key.
 - **Weekly writer.**
   - `_FORM4_HOLDINGS_SQL` adds `nature_of_ownership`.
   - Every unit's holding lines are passed to the helper. They are already fetched per accession
     chunk.
-  - Unit selection is unchanged: a mixed unit already has an eligible transaction line.
+  - Unit selection is unchanged. A summed key's lines are all usable, so its unit already has an
+    eligible transaction line; a mixed key whose transaction lines are ineligible (null balance,
+    invalid date) refuses at condition 2 and changes nothing.
 
 No schema change, no parser change, and no re-parse: the holding lines are already stored and
 backfilled (#3882).
@@ -234,24 +264,39 @@ backfilled (#3882).
   - Joint filings (297 `D` and 1,774 `I`) have the same data-model limit as the vehicle sum.
 - **Stock units in Table I.** 1,544 of the 25,949 holding lines folded into `sums` keys, on 870
   of the 11,438 keys, carry a footnote naming a unit: RSU, DSU, PSU, phantom or "stock unit".
-  This is a regex over `insider_transaction_footnotes`, used as a measurement only and not in
-  the rule (`/tmp` tooling, not committed).
+  This is a regex over `insider_transaction_footnotes` (`_UNIT_FOOTNOTE` in the census), used
+  as a measurement only and not in the rule.
   - Such units are arguably derivative securities. The filer reports them in Table I, and the
     observation records the attested Table I total, as #3882's holding-only sum and the Form 3
     line sum already do.
   - Transaction lines can carry units too (CRGY's RSU line, WH's DSU line). Today's value
     already holds them.
-- **Nested blocks.** A holding line that includes a transacting series' balance without equalling
-  any of its balances (a whole-person total) passes and double-counts. This is the residual the
-  Form 3 line sum and the vehicle sum already accept.
+- **Overlap the guards cannot see.** The guards refuse equal amounts only. Each of these passes
+  and over-counts:
+  - a holding that includes a transacting series' balance without equalling any of its balances
+    (a whole-person total);
+  - a holding contained in a series' balance: a series opening at 90 and ending at 100 beside a
+    same-nature holding of 40 that is part of the 100 gives 140;
+  - two holdings that partly overlap (40 and 60 sharing 20 give 100, not 80), or an entity line
+    beside the lines of its owners under 4(b)(iv) (NRDY's LLC, above).
+
+  The Form 3 line sum, the vehicle sum and #3882's holding-only sum accept the same class. The
+  sample above cannot measure its prevalence; the build's cross-source checks read NRDY.
 - **5c sources exclude Form 4 holding lines.** An earlier Form 4 holding of the same form cannot
   clear a 5c match, and one of another form cannot trigger it. Widening the sources would also
   change existing transaction-only verdicts, so it is left for a measured slice of its own.
 - **Dates.** A holding is dated by the form (#3882's rule 3), while the folded observation keeps
   the latest transaction date. Both describe the same filing's column 5 "by the date of the
   Form". The observation's `period_end` is left as it is, so winners do not move.
-- **Amendments.** As in the vehicle sum: a 4/A that supersedes a summable base but itself fails
-  a condition keeps one line or today's sum.
+- **Amendments.** A 4/A is in scope, as in the vehicle sum (43 `D` and 105 `I` `sums` keys).
+  - One that supersedes a summable base but itself fails a condition keeps today's value.
+  - Instruction 9 lets a 4/A restate only what it corrects. One that repeats the base's
+    transaction and corrects one holding line, but omits the unchanged ones, passes and folds
+    only the lines it carries: the base's holdings 40 and 60 beside a series at 100 fold to 200,
+    and a 4/A correcting 40 to 50 alone folds to 150, not 210. The amendment filter matches
+    transaction fields and cannot see the omitted holding. The value is still at or above the
+    4/A's value today (its latest line), so it is an incomplete fold, not a fall. The A/B lists
+    every 4/A `sums` key beside its base's verdict and value.
 - **One-line classes and Form 5 holdings:** unchanged residuals of the multi-title and Form 5
   slices.
 
@@ -260,8 +305,9 @@ backfilled (#3882).
 Corpus-change evidence per `.claude/CLAUDE.md`, recorded on the build PR with SHAs:
 
 1. **Unit tests**, both directions:
-   - folds: APO (`I`, 3,531,785), SLSN (`I`, 49,718,664), IP (`D`, 81,726), and a same-nature
-     "See footnote" holding beside a transacting form;
+   - folds: APO (`I`, 3,531,785), SLSN (`I`, 49,718,664), IP (`D`, 81,726), a same-nature
+     "See footnote" holding beside a transacting form, and a zero-opening series beside a
+     holding with no manifest time (sums: 5c is not reached);
    - refusals:
      - 5b, a transaction opening at a holding's amount;
      - 5b′, a holding equal to a transaction balance;
@@ -269,15 +315,26 @@ Corpus-change evidence per `.claude/CLAUDE.md`, recorded on the build PR with SH
      - 4, a joint filing;
      - 6, MXL's equal pairs;
      - 2, a transaction with no D/I and a value-only holding;
-     - 5c on a `D` series.
-     Each keeps today's value, including a today's `I` vehicle sum;
+     - 5c on a `D` series;
+     - a guard that crosses D/I: an `I` holding equal to a `D` transaction balance refuses the
+       `D` key, and a `D` holding equal to an `I` series' final refuses the `I` key (6).
+     Each keeps that key's own value today, including today's `I` vehicle sum; and a refused `D`
+     key beside a summable `I` key keeps its latest `D` line;
+   - a 4/A that repeats the base's transaction and carries one corrected holding;
+   - a holding-only group (#3882) beside a mixed key of the other D/I is written unchanged;
    - a unit with no holding line gives exactly today's verdicts (the vehicle-balance tests stay
      green); and Form 5 is unchanged.
-   - A DB test drives both writers on one stored mixed filing and gets equal observations.
+   - A DB test drives both writers on one stored mixed filing (`D` and `I` mixed) and gets equal
+     observations, with exact Decimal values.
 2. **Full-population A/B** over every Form 4/4A observation the weekly writer reaches. Report:
    - observations up, unchanged and down. Down must be 0. Up equals the census `sums` minus
      its equal ones, with any difference explained;
-   - the helper's verdict equals the census's on every mixed key;
+   - the helper's fold verdict equals the census's on every mixed key, and on every `sums` key
+     the recomputed observation equals the census value **exactly** (Decimal); on every refused
+     key it equals the stored value before the change;
+   - DERA `_current` winners dropped by de-collision clause 1: 0 new (every summed key already
+     has an XML observation on its accession);
+   - every 4/A `sums` key, listed beside its base's verdict and value;
    - `_current` keys changed, from both refreshers;
    - rollups moved, and `ownership_history` points rewritten;
    - newly oversubscribed instruments (gate: 0, or each inspected).
@@ -285,7 +342,9 @@ Corpus-change evidence per `.claude/CLAUDE.md`, recorded on the build PR with SH
 4. **Cross-source:**
    - SLSN against the 13D/A, 49,826,805;
    - against the EDGAR Form 4 rendering (sec.gov HTML): APO Kleinman, IP's two `D` lines,
-     CLBK, and one 5b refusal.
+     CLBK, NRDY `0001628280-25-056431` (whether the trusts' lines include Rarefied Air's shares),
+     and one 5b refusal. A `sums` example whose EDGAR text shows one line including another
+     blocks the build until the rule is revised.
 5. **Backfill and verify.** Run `sync_insiders` with no `since` and no `LIMIT`, then the batch
    `_current` refresh. Each of these must show 0 differences:
    - every stored Form 4/4A observation against the writers' recompute;

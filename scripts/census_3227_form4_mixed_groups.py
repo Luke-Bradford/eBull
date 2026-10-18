@@ -41,6 +41,8 @@ holding lines; any failed condition keeps today's value.
 from __future__ import annotations
 
 import argparse
+import random
+import re
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -52,12 +54,17 @@ import psycopg
 import psycopg.rows
 
 from app.config import settings
-from app.services.insider_transactions import form4_earlier_balances, form4_form_key
+from app.services.insider_transactions import form4_earlier_balances, form4_form_key, form4_within_retention
 
 _UNITS: Final[LiteralString] = """
-SELECT DISTINCT h.instrument_id, h.accession_number, h.filer_cik, f.document_type
+SELECT DISTINCT h.instrument_id, h.accession_number, h.filer_cik, f.document_type,
+       COALESCE((m.filed_at AT TIME ZONE 'UTC')::date,
+                (SELECT min(fe.filing_date) FROM filing_events fe
+                  WHERE fe.provider = 'sec' AND fe.provider_filing_id = h.accession_number
+                    AND fe.instrument_id = h.instrument_id)) AS filing_date
   FROM insider_form4_holdings h
   JOIN insider_filings f USING (accession_number)
+  LEFT JOIN sec_filing_manifest m ON m.accession_number = h.accession_number
  WHERE NOT h.is_derivative AND f.document_type IN ('4', '4/A') AND NOT f.is_tombstone
    AND h.direct_indirect IN ('D', 'I')
    AND EXISTS (
@@ -96,6 +103,43 @@ SELECT instrument_id, source_document_id, holder_cik, ownership_nature, shares, 
 _CURRENT: Final[LiteralString] = """
 SELECT instrument_id, holder_cik, ownership_nature, source_document_id, shares
   FROM ownership_insiders_current WHERE source = 'form4'
+"""
+
+# Invariants the unit grouping relies on: the parser writes CIKs stripped (``_text``), and each
+# accession has one current observation per holder and nature.
+_INVARIANTS: Final[dict[str, LiteralString]] = {
+    "insider_transactions CIKs not stripped": (
+        "SELECT count(*) FROM insider_transactions WHERE filer_cik IS DISTINCT FROM btrim(filer_cik)"
+    ),
+    "insider_form4_holdings CIKs not stripped": (
+        "SELECT count(*) FROM insider_form4_holdings WHERE filer_cik IS DISTINCT FROM btrim(filer_cik)"
+    ),
+    "insider_filers CIKs not stripped": (
+        "SELECT count(*) FROM insider_filers WHERE filer_cik IS DISTINCT FROM btrim(filer_cik)"
+    ),
+    "accession/holder/nature keys with several current form4 observations": """
+        SELECT count(*) FROM (
+          SELECT 1 FROM ownership_insiders_observations
+           WHERE source = 'form4' AND known_to IS NULL
+           GROUP BY instrument_id, source_document_id, holder_cik, ownership_nature
+          HAVING count(*) > 1) x""",
+}
+
+# A measurement only, never part of the rule: a folded line whose footnote names a stock unit.
+_UNIT_FOOTNOTE = re.compile(
+    r"restricted stock unit|\bRSUs?\b|deferred stock unit|\bDSUs?\b|performance (stock|share) unit|\bPSUs?\b"
+    r"|phantom|stock units?\b",
+    re.I,
+)
+
+_FOOTNOTES: Final[LiteralString] = """
+SELECT accession_number, footnote_id, footnote_text FROM insider_transaction_footnotes
+ WHERE accession_number = ANY(%(accs)s::text[])
+"""
+
+_FOLDED_LINE_REFS: Final[LiteralString] = """
+SELECT accession_number, filer_cik, direct_indirect, footnote_refs FROM insider_form4_holdings
+ WHERE accession_number = ANY(%(accs)s::text[]) AND NOT is_derivative
 """
 
 _CHUNK: Final = 2000
@@ -252,6 +296,8 @@ class Result:
     value: Decimal | None
     today: Decimal | None
     holding_lines: int
+    # The weekly writer's Form 4 retention gate on the manifest-first filing date (#1233).
+    in_retention: bool
 
 
 def collect(conn: psycopg.Connection[Any]) -> tuple[list[Result], Counter[str]]:
@@ -259,7 +305,7 @@ def collect(conn: psycopg.Connection[Any]) -> tuple[list[Result], Counter[str]]:
     units = conn.execute(_UNITS).fetchall()
     counts["mixed_units"] = len(units)
     accessions = sorted({u[1] for u in units})
-    unit_set = {(u[0], u[1], u[2]): u[3] for u in units}
+    unit_set = {(u[0], u[1], u[2]): (u[3], u[4]) for u in units}
     results: list[Result] = []
     for i in range(0, len(accessions), _CHUNK):
         chunk = accessions[i : i + _CHUNK]
@@ -295,7 +341,7 @@ def collect(conn: psycopg.Connection[Any]) -> tuple[list[Result], Counter[str]]:
         today: dict[tuple[int, str, str, str], tuple[Decimal, date]] = {}
         for iid, acc, cik, nature, shares, pend in conn.execute(_OBSERVATIONS, {"accs": chunk}).fetchall():
             today[(iid, acc, (cik or "").strip(), nature)] = (shares, pend)
-        for key, document_type in unit_set.items():
+        for key, (document_type, filing_date) in unit_set.items():
             if key[1] not in chunk_set:
                 continue
             iid, acc, cik = key
@@ -335,26 +381,74 @@ def collect(conn: psycopg.Connection[Any]) -> tuple[list[Result], Counter[str]]:
                         value=value,
                         today=obs[0] if obs else None,
                         holding_lines=sum(1 for h in h_lines if h.direct_indirect == di),
+                        in_retention=filing_date is not None and form4_within_retention(filing_date),
                     )
                 )
     return results, counts
+
+
+def _sample(conn: psycopg.Connection[Any], results: list[Result], spec: str) -> list[str]:
+    """``DI:SEED:N`` — N random ``sums`` keys of DI (ordered by accession, CIK first), each with its
+    lines and footnotes, for reading the folded lines against the filing's own text."""
+    di, seed, n = spec.split(":")
+    pool = sorted((r for r in results if r.verdict == SUMS and r.di == di), key=lambda r: (r.accession, r.filer_cik))
+    out: list[str] = []
+    for r in random.Random(int(seed)).sample(pool, int(n)):
+        out.append(f"  --- iid={r.instrument_id} {r.accession} CIK:{r.filer_cik} {r.di} today={r.today} -> {r.value}")
+        for row in conn.execute(
+            "SELECT 'T', txn_row_num, direct_indirect, nature_of_ownership, acquired_disposed_code, shares,"
+            " post_transaction_shares, footnote_refs FROM insider_transactions"
+            " WHERE accession_number = %s AND filer_cik = %s AND NOT is_derivative ORDER BY txn_row_num",
+            (r.accession, r.filer_cik),
+        ):
+            out.append(f"     {row}")
+        for row in conn.execute(
+            "SELECT 'H', row_num, direct_indirect, nature_of_ownership, shares, footnote_refs"
+            " FROM insider_form4_holdings"
+            " WHERE accession_number = %s AND filer_cik = %s AND NOT is_derivative ORDER BY row_num",
+            (r.accession, r.filer_cik),
+        ):
+            out.append(f"     {row}")
+        for fid, text in conn.execute(
+            "SELECT footnote_id, footnote_text FROM insider_transaction_footnotes"
+            " WHERE accession_number = %s ORDER BY footnote_id",
+            (r.accession,),
+        ):
+            out.append(f"       {fid}: {text[:200]}")
+    return out
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--examples", type=int, default=3)
     ap.add_argument("--show", action="append", default=[], help="print every mixed key of this accession")
+    ap.add_argument("--sample", action="append", default=[], help="DI:SEED:N — print N random sums keys of DI")
     args = ap.parse_args()
 
     with psycopg.connect(settings.database_url) as conn:
         conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        invariants = {name: conn.execute(sql).fetchone() for name, sql in _INVARIANTS.items()}
         results, counts = collect(conn)
+        sums_accessions = sorted({r.accession for r in results if r.verdict == SUMS})
+        footnotes: dict[tuple[str, str], str] = {}
+        folded_refs: list[tuple[Any, ...]] = []
+        for i in range(0, len(sums_accessions), _CHUNK):
+            chunk = sums_accessions[i : i + _CHUNK]
+            for acc, fid, text in conn.execute(_FOOTNOTES, {"accs": chunk}).fetchall():
+                footnotes[(acc, fid)] = text
+            folded_refs.extend(conn.execute(_FOLDED_LINE_REFS, {"accs": chunk}).fetchall())
+        samples = [_sample(conn, results, spec) for spec in args.sample]
         current = {
             (iid, (cik or "").strip(), nature): (sdoc, shares)
             for iid, cik, nature, sdoc, shares in conn.execute(_CURRENT).fetchall()
         }
 
-    print("== cohort ==")
+    print("== invariants (each must be 0) ==")
+    for name, row in invariants.items():
+        print(f"  {name}: {row[0] if row else '?'}")
+        assert row is not None and row[0] == 0, name
+
+    print("\n== cohort ==")
     for k in sorted(counts):
         print(f"  {k}: {counts[k]:,}")
     print(f"  mixed keys (unit, D/I): {len(results):,}")
@@ -363,6 +457,7 @@ def main() -> None:
         f" I {sum(r.holding_lines for r in results if r.di == 'I'):,}"
     )
     print(f"  keys with no stored observation today: {sum(1 for r in results if r.today is None):,}")
+    print(f"  keys outside the weekly writer's Form 4 retention: {sum(1 for r in results if not r.in_retention):,}")
 
     print("\n== verdict per mixed key ==")
     print("  di verdict                                   keys  instruments  4/A  current-winner keys")
@@ -399,6 +494,29 @@ def main() -> None:
     for di in ("D", "I"):
         ws = [r for r in moved_winners if r.di == di]
         print(f"    {di}: {len(ws):,} keys over {len({r.instrument_id for r in ws}):,} instruments")
+    stale = sum(
+        1 for r in results if id(r) in winner and current[(r.instrument_id, r.filer_cik, _NATURE[r.di])][1] != r.today
+    )
+    print(f"  winner keys whose _current shares differ from the stored observation: {stale:,}")
+    out = [r for r in results if r.verdict == SUMS and not r.in_retention]
+    print(
+        f"  sums keys outside retention (the weekly writer does not re-derive them): {len(out):,}"
+        f" (moving a _current winner: {sum(1 for r in out if r in moved_winners):,})"
+    )
+
+    print("\n== folded holding lines whose footnote names a stock unit (measurement only) ==")
+    summed = {(r.accession, r.filer_cik, r.di) for r in results if r.verdict == SUMS}
+    folded = flagged = 0
+    flagged_keys: set[tuple[str, str, str]] = set()
+    for acc, cik, di, refs in folded_refs:
+        key = (acc, (cik or "").strip(), di)
+        if key not in summed:
+            continue
+        folded += 1
+        if any(_UNIT_FOOTNOTE.search(footnotes.get((acc, ref["footnote_id"]), "")) for ref in refs):
+            flagged += 1
+            flagged_keys.add(key)
+    print(f"  folded lines: {folded:,}; naming a unit: {flagged:,}; sums keys with one: {len(flagged_keys):,}")
 
     print("\n== examples ==")
     shown: Counter[tuple[str, str]] = Counter()
@@ -410,6 +528,10 @@ def main() -> None:
         print(
             f"  [{r.di} {r.verdict}] iid={r.instrument_id} {r.accession} CIK:{r.filer_cik} today={r.today} -> {r.value}"
         )
+    for spec, lines in zip(args.sample, samples, strict=True):
+        print(f"\n== --sample {spec} ==")
+        for line in lines:
+            print(line)
     for acc in args.show:
         print(f"\n== --show {acc} ==")
         for r in results:
