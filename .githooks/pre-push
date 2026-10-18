@@ -509,8 +509,17 @@ fi
 # `docker exec`. On 2026-10-18 the Docker daemon stopped answering while
 # both Postgres containers kept serving TCP; the untimed `docker exec`
 # hung here, after every real gate had passed, and no push could finish.
+#
+# The whole probe is bounded by signal.alarm(10), set before any import.
+# Python installs no SIGALRM handler, so the default action kills the
+# interpreter even inside a blocking C call: DNS resolution (outside
+# psycopg's connect_timeout), the app.config import, the query. macOS has
+# no timeout(1). `uv run` itself costs no sync here: the ruff, pyright and
+# pytest steps above already ran it against the same environment.
 DB_SIZE_WARN_BYTES=64424509440  # 60 GB — rebased #1556 then #1436-followup; mirror of app/services/postgres_health.py
 db_size=$(uv run python -c "
+import signal
+signal.alarm(10)
 import psycopg
 from app.config import settings
 with psycopg.connect(settings.database_url, connect_timeout=3, options='-c statement_timeout=5000') as conn:
