@@ -67,7 +67,7 @@ PYTHONPATH=. uv run python -m scripts.census_3227_form4_mixed_groups --examples 
   --show 0000051434-26-000058 --sample D:7:6 --sample I:11:6
 ```
 
-It was run at 2026-10-18 13:15Z, in one `REPEATABLE READ` snapshot, from the script as committed
+It was run at 2026-10-18 13:23Z, in one `REPEATABLE READ` snapshot, from the script as committed
 in this PR (base `62c834e6`, after the #3882 backfill). It reads the stored lines
 (`insider_form4_holdings`, `insider_transactions`, `insider_filers`), applies the Change
 section's rule, and compares the result with the stored current observation (`known_to IS NULL`)
@@ -75,10 +75,10 @@ of the same accession, holder and nature.
 
 **Invariants the comparison relies on**, each checked by the script and asserted 0:
 - 0 rows in `insider_transactions`, `insider_form4_holdings`, `insider_filers` or the `form4`
-  rows of `ownership_insiders_observations` have a CIK with leading or trailing whitespace of
-  any kind (PostgreSQL `\s`). So grouping on the stored CIK equals grouping on the stripped one,
-  in the census, in the observation comparison and in the live writer, which groups on the raw
-  CIK.
+  rows of `ownership_insiders_observations` have a CIK that is NULL or not ASCII digits only. So
+  stripping is the identity on every stored CIK, and grouping on the raw CIK equals grouping on
+  the stripped one: in the census, in the observation comparison and in the live writer, which
+  groups its latest line on the raw CIK.
 - 0 `(instrument, accession, holder, nature)` keys have more than one current `form4`
   observation. So "today's observation" of a key is unique.
 - 0 `_current` winner keys hold shares different from their stored observation.
@@ -128,7 +128,8 @@ of the same accession, holder and nature.
   `D` over 87 instruments and 885 are `I` over 631. The observation's `period_end` does not
   change, so no key changes winner here. The A/B, not this table, is the proof.
 - **Share-class siblings** (#1117) hold 56 further observations on `sums` keys, over 18
-  instruments, of which 6 are `_current` winners. The live writer fans each filing out to every
+  instruments, of which 6 are `_current` winners; all 56 equal their entity's stored value
+  today. The live writer fans each filing out to every
   sibling (`insider_transactions.py:1734`); the weekly writer reads lines from the entity
   instrument only and never rewrites them. The backfill therefore replays (Change 3).
 
@@ -190,8 +191,8 @@ fix would be reverted by the weekly re-derivation (#3874).
     or any of its balances (5b, 5b′); a holding contained in a balance without equalling one is
     summed (overlap residuals below).
 - **Conditions.** These are `form4_observation_shares`'s, applied to every non-derivative line
-  of the unit, transactions **and** holdings, D and I. Every one must hold, and a NULL anywhere
-  refuses:
+  of the unit, transactions **and** holdings, D and I. Every one must hold, and a NULL in any
+  field a predicate requires refuses (a `D` line's nature is not required):
   1. *(Holds by construction for a mixed key: it has a transaction form and a holding form.)*
   2. **Every line usable.**
      - A transaction line: as today.
@@ -329,8 +330,13 @@ Corpus-change evidence per `.claude/CLAUDE.md`, recorded on the build PR with SH
 
 1. **Unit tests**, both directions:
    - folds: APO (`I`, 3,531,785), SLSN (`I`, 49,718,664), IP (`D`, 81,726), a same-nature
-     "See footnote" holding beside a transacting form, and a zero-opening series beside a
-     holding with no manifest time (sums: 5c is not reached);
+     "See footnote" holding beside a transacting form, a zero-opening series beside a holding
+     with no manifest time (5c is not reached), and the zero cases: a zero holding beside a zero
+     transaction balance, and two zero holdings. Each asserts the `sums` verdict, not only the
+     value;
+   - 5c is key-specific: `D` opens at 10, ends at 20, with a `D` holding of 7; `I` opens at 30,
+     ends at 40, with an `I` holding of 9; earlier history holds another `I` form at 30 and no
+     same-form match. `D` sums to 27 and `I` refuses at 5c;
    - refusals:
      - 5b, a transaction opening at a holding's amount;
      - 5b′, a holding equal to a transaction balance;
@@ -341,7 +347,6 @@ Corpus-change evidence per `.claude/CLAUDE.md`, recorded on the build PR with SH
      - 5c on a `D` series;
      - guards that cross D/I: an `I` holding equal to a `D` transaction balance refuses the `D`
        key (5b′), and a `D` holding equal to an `I` holding refuses both keys (6);
-     - zeros: a zero holding beside a zero transaction balance, and two zero holdings, both sum;
      Each keeps that key's own value today, including today's `I` vehicle sum; and a refused `D`
      key beside a summable `I` key keeps its latest `D` line;
    - a 4/A that repeats the base's transaction and carries one corrected holding;
@@ -358,6 +363,9 @@ Corpus-change evidence per `.claude/CLAUDE.md`, recorded on the build PR with SH
      key it equals the stored value before the change;
    - every observation's presence and every field other than `shares` (`period_end`, `filed_at`,
      accession, holder, nature, URL) are equal before and after, on every key;
+   - the 56 share-class sibling observations are in the same before/after comparison (presence,
+     shares, the other fields, and their `_current`), recomputed by the live writer, since the
+     weekly writer never reaches them; down must be 0 there too;
    - DERA `_current` winners dropped by de-collision clause 1: 0 new (every summed key already
      has an XML observation on its accession);
    - every 4/A `sums` key, listed beside its base's verdict and value;

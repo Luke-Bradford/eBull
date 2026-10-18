@@ -105,19 +105,22 @@ SELECT instrument_id, holder_cik, ownership_nature, source_document_id, shares
   FROM ownership_insiders_current WHERE source = 'form4'
 """
 
-# Invariants the unit grouping relies on: the parser writes CIKs stripped (``_text``), so no CIK
-# carries edge whitespace of any kind (``\s``, which covers what Python's ``str.strip`` removes for
-# ASCII), and each accession has one current observation per holder and nature.
+# Invariants the unit grouping relies on: every stored CIK is ASCII digits only, so ``str.strip`` and
+# ``btrim`` are the identity on it and raw grouping equals stripped grouping; and each accession has
+# one current observation per holder and nature.
 _INVARIANTS: Final[dict[str, LiteralString]] = {
-    "insider_transactions CIKs with edge whitespace": (
-        "SELECT count(*) FROM insider_transactions WHERE filer_cik ~ '^\\s|\\s$'"
+    "insider_transactions CIKs not all ASCII digits": (
+        "SELECT count(*) FROM insider_transactions WHERE filer_cik IS NULL OR filer_cik !~ '^[0-9]+$'"
     ),
-    "insider_form4_holdings CIKs with edge whitespace": (
-        "SELECT count(*) FROM insider_form4_holdings WHERE filer_cik ~ '^\\s|\\s$'"
+    "insider_form4_holdings CIKs not all ASCII digits": (
+        "SELECT count(*) FROM insider_form4_holdings WHERE filer_cik IS NULL OR filer_cik !~ '^[0-9]+$'"
     ),
-    "insider_filers CIKs with edge whitespace": "SELECT count(*) FROM insider_filers WHERE filer_cik ~ '^\\s|\\s$'",
-    "form4 observation holder CIKs with edge whitespace": (
-        "SELECT count(*) FROM ownership_insiders_observations WHERE source = 'form4' AND holder_cik ~ '^\\s|\\s$'"
+    "insider_filers CIKs not all ASCII digits": (
+        "SELECT count(*) FROM insider_filers WHERE filer_cik IS NULL OR filer_cik !~ '^[0-9]+$'"
+    ),
+    "form4 observation holder CIKs not all ASCII digits": (
+        "SELECT count(*) FROM ownership_insiders_observations"
+        " WHERE source = 'form4' AND (holder_cik IS NULL OR holder_cik !~ '^[0-9]+$')"
     ),
     "accession/holder/nature keys with several current form4 observations": """
         SELECT count(*) FROM (
@@ -452,12 +455,14 @@ def main() -> None:
         by_key = {(r.accession, r.filer_cik, _NATURE[r.di]): r for r in results if r.verdict == SUMS}
         entity = {(r.accession, r.instrument_id) for r in results}
         siblings: list[tuple[int, str, str, str]] = []
+        sibling_equal_to_entity = 0
         for i in range(0, len(sums_accessions), _CHUNK):
             chunk = sums_accessions[i : i + _CHUNK]
-            for iid, acc, cik, nature, _shares in conn.execute(_SIBLING_OBSERVATIONS, {"accs": chunk}).fetchall():
+            for iid, acc, cik, nature, shares in conn.execute(_SIBLING_OBSERVATIONS, {"accs": chunk}).fetchall():
                 key = (acc, (cik or "").strip(), nature)
                 if key in by_key and (acc, iid) not in entity:
                     siblings.append((iid, acc, key[1], nature))
+                    sibling_equal_to_entity += shares == by_key[key].today
         current = {
             (iid, (cik or "").strip(), nature): (sdoc, shares)
             for iid, cik, nature, sdoc, shares in conn.execute(_CURRENT).fetchall()
@@ -528,7 +533,8 @@ def main() -> None:
     sibling_current = sum(1 for iid, acc, cik, nature in siblings if current.get((iid, cik, nature), (None,))[0] == acc)
     print(
         f"  share-class sibling observations on a sums key (live writer only): {len(siblings):,}"
-        f" over {len({s[0] for s in siblings}):,} instruments; current winners: {sibling_current:,}"
+        f" over {len({s[0] for s in siblings}):,} instruments; current winners: {sibling_current:,};"
+        f" equal to their entity's stored value today: {sibling_equal_to_entity:,}"
     )
 
     print("\n== folded holding lines whose footnote names a stock unit (measurement only) ==")
