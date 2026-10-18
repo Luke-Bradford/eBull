@@ -348,6 +348,8 @@ def derive_form4_observations(
                 if ln.post_transaction_shares is None or ln.txn_date_invalid:
                     continue
                 prior = latest.get(ln.direct_indirect)
+                # ``txn_date`` is NOT NULL (sql/056_insider_transactions.sql, never relaxed), so this
+                # tuple order is the old ``txn_date DESC NULLS LAST, txn_row_num DESC`` exactly.
                 if prior is None or (ln.txn_date, ln.txn_row_num) > (prior.txn_date, prior.txn_row_num):
                     latest[ln.direct_indirect] = ln
             holder_cik = (key[2] or "").strip() or None
