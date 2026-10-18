@@ -524,10 +524,11 @@ def main() -> None:
     )
     print(f"  winner keys whose _current shares differ from the stored observation: {stale:,}")
     assert stale == 0, "the comparison assumes _current is in sync with the stored observations"
+    moved_ids = {id(r) for r in moved_winners}
     out = [r for r in results if r.verdict == SUMS and not r.in_retention]
     print(
         f"  sums keys outside retention (the weekly writer does not re-derive them): {len(out):,}"
-        f" (moving a _current winner: {sum(1 for r in out if r in moved_winners):,})"
+        f" (moving a _current winner: {sum(1 for r in out if id(r) in moved_ids):,})"
     )
 
     sibling_current = sum(1 for iid, acc, cik, nature in siblings if current.get((iid, cik, nature), (None,))[0] == acc)

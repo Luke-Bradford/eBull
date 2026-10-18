@@ -130,7 +130,7 @@ of the same accession, holder and nature.
 - **Share-class siblings** (#1117) hold 56 further observations on `sums` keys, over 18
   instruments, of which 6 are `_current` winners; all 56 equal their entity's stored value
   today. The live writer fans each filing out to every
-  sibling (`insider_transactions.py:1734`); the weekly writer reads lines from the entity
+  sibling (the sibling loop in `upsert_filing`); the weekly writer reads lines from the entity
   instrument only and never rewrites them. The backfill therefore replays (Change 3).
 
 **Examples** (`--show`):

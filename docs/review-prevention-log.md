@@ -13163,7 +13163,7 @@ neighbouring container and match it.**
 
 - Symptom: the #3227 mixed-groups spec first prescribed `sync_insiders` alone as the backfill. The live writer
   (`upsert_filing`) fans every Form 4 observation out to each share-class sibling of the issuer
-  (`insider_transactions.py:1734`), but `derive_form4_observations` reads lines from the entity instrument only, so the
+  (the sibling loop in `upsert_filing`), but `derive_form4_observations` reads lines from the entity instrument only, so the
   weekly re-derivation never rewrites a sibling's observation. 56 sibling observations (6 `_current` winners) sat on
   keys whose value the change moves. Codex checkpoint 1, round 2.
 - Prevention: when a change alters how a Form 4 observation's value is derived, the backfill replays the affected
