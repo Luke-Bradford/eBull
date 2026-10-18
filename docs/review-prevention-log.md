@@ -13230,3 +13230,22 @@ neighbouring container and match it.**
   `FORM4_TITLE_CLASS_VERSION`); `app/services/ownership_rollup.py` (`_summable_scope`);
   `tests/test_3227_form4_multi_title.py` (`_REFUSE`); `scripts/ab_3227_form4_multi_title.py` (prints every unified
   title set).
+
+### A one-off backfill that re-applies a chokepoint invariant must resolve its inputs the way the chokepoint does (#3884, 2026-10-18)
+
+- Symptom: the #3227 writer-parity check (`scripts/ab_3227_form4_holding_rows.py --verify`) reported one stored
+  observation the weekly writer re-derived after it had been closed. The ticket blamed #828 owner-stream routing;
+  it was wrong. Issuer CIK 0001713407 maps to no in-universe instrument, so routing keeps the discovery link and
+  `tombstone_non_sibling_insider_observations` returns `[]`. The close (`known_to` 2026-06-24 03:23:52.998553Z,
+  shared by 103 rows) was #1715's future-date supersede. That supersede fell back to the observation's own
+  `filed_at`. `sql/205`'s one-off `txn_date_invalid` flag joined `sec_filing_manifest` only, and this accession
+  has no manifest row, so the transaction stayed unflagged and the weekly writer, which skips flagged rows,
+  re-emitted it. The live chokepoint resolves `filed_at` manifest → `filing_events` (`lookup_sec_filed_at`) and
+  would have flagged it.
+- Prevention: a migration or script that applies a chokepoint's invariant to existing rows uses the chokepoint's own
+  input resolution (here `lookup_sec_filed_at`), or replays the rows through the chokepoint itself. A cheaper
+  join that covers "0 of the violators" today becomes a gap once another resolver path exists. Before blaming a
+  mechanism for a closed row, find the batch that shares its exact `known_to`.
+- Repaired by replaying the one accession through `rewash_filings._apply_form4`. The full-population count of
+  non-`E`, unflagged `txn_date >` chokepoint-anchor rows is 3: this one, plus 2 form-type-5 lines that #2790
+  exempts.
