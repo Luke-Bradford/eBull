@@ -43,12 +43,13 @@ than dropping silently.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from functools import partial
 from itertools import groupby
-from typing import Any
+from typing import Any, Final
 from uuid import uuid4
 
 import psycopg
@@ -160,6 +161,230 @@ class _StoredForm3Line:
         )
 
 
+@dataclass(frozen=True)
+class _StoredForm4Line:
+    """A stored ``insider_transactions`` line, shaped for ``form4_observation_shares``."""
+
+    row: dict[str, Any]
+    txn_row_num: int
+    is_derivative: bool
+    security_title: str | None
+    txn_date: date
+    txn_date_invalid: bool
+    shares: Decimal | None
+    acquired_disposed_code: str | None
+    post_transaction_shares: Decimal | None
+    direct_indirect: str | None
+    nature_of_ownership: str | None
+
+    @classmethod
+    def from_row(cls, row: dict[str, Any]) -> _StoredForm4Line:
+        return cls(
+            row=row,
+            txn_row_num=int(row["txn_row_num"]),
+            is_derivative=False,  # the line query reads non-derivative lines only
+            security_title=row["security_title"],
+            txn_date=row["txn_date"],
+            txn_date_invalid=bool(row["txn_date_invalid"]),
+            shares=Decimal(row["shares"]) if row["shares"] is not None else None,
+            acquired_disposed_code=row["acquired_disposed_code"],
+            post_transaction_shares=(
+                Decimal(row["post_transaction_shares"]) if row["post_transaction_shares"] is not None else None
+            ),
+            direct_indirect=row["direct_indirect"],
+            nature_of_ownership=row["nature_of_ownership"],
+        )
+
+
+@dataclass(frozen=True)
+class Form4Observation:
+    """One ``form4``-source observation as ``sync_insiders`` derives it, before it is recorded.
+    ``verdict`` is :func:`form4_observation_shares`'s for an ``I`` observation of a Form 4/4A, else
+    None; ``latest_line_shares`` is the latest eligible line's balance (the pre-#3227 value)."""
+
+    instrument_id: int
+    accession_number: str
+    holder_cik: str | None
+    holder_name: str
+    ownership_nature: str
+    source_url: str | None
+    sec_filed_at: datetime | None
+    period_end: date
+    shares: Decimal
+    latest_line_shares: Decimal
+    verdict: str | None
+
+
+# A unit is one filer's lines in one accession on one instrument (#3227). The CIK is stripped as
+# ``btrim`` strips; a null or blank CIK keeps the pre-#3227 grouping, which also split on the name.
+_FORM4_UNITS_SQL: Final = """
+SELECT it.instrument_id, it.accession_number,
+       CASE WHEN nullif(btrim(it.filer_cik), '') IS NULL THEN it.filer_cik ELSE btrim(it.filer_cik) END AS unit_cik,
+       CASE WHEN nullif(btrim(it.filer_cik), '') IS NULL THEN it.filer_name END AS unit_name,
+       f.document_type, f.primary_document_url,
+       min(COALESCE(m.filed_at, fe.filing_date::timestamp AT TIME ZONE 'UTC')) AS sec_filed_at
+  FROM insider_transactions it
+  JOIN insider_filings f USING (accession_number)
+  LEFT JOIN filing_events fe
+    ON fe.provider_filing_id = it.accession_number
+   AND fe.provider = 'sec'
+   AND fe.instrument_id = it.instrument_id
+  LEFT JOIN sec_filing_manifest m
+    ON m.accession_number = it.accession_number
+ {where}
+ GROUP BY 1, 2, 3, 4, 5, 6
+ ORDER BY 1, 2, 3, 4
+ {limit}
+"""
+
+_FORM4_LINES_SQL: Final = """
+SELECT it.instrument_id, it.accession_number, it.txn_row_num, it.filer_cik, it.filer_name,
+       it.security_title, it.txn_date, it.txn_date_invalid, it.shares, it.acquired_disposed_code,
+       it.post_transaction_shares, it.direct_indirect, it.nature_of_ownership
+  FROM insider_transactions it
+ WHERE it.accession_number = ANY(%(accs)s::text[]) AND NOT it.is_derivative
+ ORDER BY it.instrument_id, it.accession_number, it.txn_row_num
+"""
+
+_FORM4_OWNERS_SQL: Final = """
+SELECT accession_number, array_agg(filer_cik) FROM insider_filers
+ WHERE accession_number = ANY(%(accs)s::text[]) GROUP BY 1
+"""
+
+_FORM4_ACCESSION_CHUNK = 2000
+
+
+def _form4_unit_key(row: dict[str, Any]) -> tuple[int, str, str | None, str | None]:
+    """The same key ``_FORM4_UNITS_SQL`` selects, from a line row."""
+    cik = row["filer_cik"]
+    stripped = cik.strip(" ") if cik is not None else ""
+    if stripped:
+        return (int(row["instrument_id"]), row["accession_number"], stripped, None)
+    return (int(row["instrument_id"]), row["accession_number"], cik, row["filer_name"])
+
+
+def derive_form4_observations(
+    conn: psycopg.Connection[Any],
+    *,
+    since: date | None = None,
+    limit: int | None = None,
+) -> Iterator[Form4Observation]:
+    """Every ``form4``-source observation ``sync_insiders`` writes from ``insider_transactions``.
+
+    One observation per ``(unit, direct_indirect)``, holding the unit's latest eligible line
+    (``txn_date DESC, txn_row_num DESC``), where an eligible line is non-derivative, has a balance
+    and a valid date. An ``I`` observation of a Form 4/4A instead holds its vehicles' sum where
+    :func:`form4_observation_shares` allows it (#3227).
+
+    Units are selected FIRST — the units with an eligible line in the retention window (and dated
+    on or after ``since``), ``limit`` of them — and then every non-derivative line of those units
+    is read. A ``since`` on line dates would cut a filing's earlier lines and write a partial sum,
+    and the helper's completeness condition must see the lines this writer does not keep.
+
+    Retention (#1233 §4.4, #1247): Form 4 3y and Form 5 18-month caps, the filing date resolved
+    manifest-first (#899 Codex ckpt-2) and ``filing_events`` clamped to the row's own instrument
+    (data-engineer §Q15 — siblings share a CIK). Rows with neither date source stay excluded
+    (fail-closed for unattributed legacy rows). Form 3 rows here are uncapped.
+    """
+    from app.services.insider_transactions import (
+        FORM4_VEHICLE_SUM_DOCUMENT_TYPES,
+        FORM4_VEHICLE_SUMS,
+        form4_earlier_balances,
+        form4_observation_shares,
+        form4_retention_cutoff,
+        form5_retention_cutoff,
+    )
+
+    # #1687 — exclude future-dated txn_date typos so the latest-per-group
+    # re-derivation never picks an impossible date as the current holding.
+    where = "WHERE it.post_transaction_shares IS NOT NULL AND it.is_derivative = FALSE AND NOT it.txn_date_invalid"
+    params: dict[str, Any] = {
+        "form4_cutoff": form4_retention_cutoff(),
+        "form5_cutoff": form5_retention_cutoff(),
+    }
+    if since is not None:
+        where += " AND it.txn_date >= %(since)s"
+        params["since"] = since
+    where += (
+        " AND ("
+        "  f.document_type IN ('3','3/A')"
+        "  OR ("
+        "    f.document_type IN ('4','4/A')"
+        "    AND COALESCE((m.filed_at AT TIME ZONE 'UTC')::date, fe.filing_date) IS NOT NULL"
+        "    AND COALESCE((m.filed_at AT TIME ZONE 'UTC')::date, fe.filing_date) >= %(form4_cutoff)s"
+        "  )"
+        "  OR ("
+        "    f.document_type IN ('5','5/A')"
+        "    AND COALESCE((m.filed_at AT TIME ZONE 'UTC')::date, fe.filing_date) IS NOT NULL"
+        "    AND COALESCE((m.filed_at AT TIME ZONE 'UTC')::date, fe.filing_date) >= %(form5_cutoff)s"
+        "  )"
+        ")"
+    )
+    if limit is not None:
+        params["lim"] = limit
+    sql = _FORM4_UNITS_SQL.format(where=where, limit="LIMIT %(lim)s" if limit is not None else "")
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(sql, params)
+        units = {(int(u["instrument_id"]), u["accession_number"], u["unit_cik"], u["unit_name"]): u for u in cur}
+
+    accessions = list(dict.fromkeys(key[1] for key in units))
+    for i in range(0, len(accessions), _FORM4_ACCESSION_CHUNK):
+        chunk = accessions[i : i + _FORM4_ACCESSION_CHUNK]
+        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+            cur.execute(_FORM4_LINES_SQL, {"accs": chunk})
+            line_rows = cur.fetchall()
+            cur.execute(_FORM4_OWNERS_SQL, {"accs": chunk})
+            owners = {r["accession_number"]: list(r["array_agg"]) for r in cur.fetchall()}
+        # A dict, not ``groupby``: two filers' lines can interleave by ``txn_row_num``.
+        by_unit: dict[tuple[int, str, str | None, str | None], list[_StoredForm4Line]] = {}
+        for r in line_rows:
+            by_unit.setdefault(_form4_unit_key(r), []).append(_StoredForm4Line.from_row(r))
+        for key, lines in by_unit.items():
+            unit = units.get(key)
+            if unit is None:
+                continue
+            latest: dict[str | None, _StoredForm4Line] = {}
+            for ln in lines:
+                if ln.post_transaction_shares is None or ln.txn_date_invalid:
+                    continue
+                prior = latest.get(ln.direct_indirect)
+                if prior is None or (ln.txn_date, ln.txn_row_num) > (prior.txn_date, prior.txn_row_num):
+                    latest[ln.direct_indirect] = ln
+            holder_cik = (key[2] or "").strip() or None
+            for direct_indirect, ln in latest.items():
+                assert ln.post_transaction_shares is not None
+                shares, verdict = ln.post_transaction_shares, None
+                if direct_indirect == "I" and unit["document_type"] in FORM4_VEHICLE_SUM_DOCUMENT_TYPES:
+                    verdict, vehicle_sum = form4_observation_shares(
+                        lines,
+                        document_type=unit["document_type"],
+                        filer_cik=holder_cik if key[3] is None else None,
+                        owner_ciks=owners.get(key[1], []),
+                        earlier_balances=partial(
+                            form4_earlier_balances,
+                            conn,
+                            instrument_id=key[0],
+                            accession_number=key[1],
+                            filer_cik=holder_cik,
+                        ),
+                    )
+                    if verdict == FORM4_VEHICLE_SUMS and vehicle_sum is not None:
+                        shares = vehicle_sum
+                yield Form4Observation(
+                    instrument_id=key[0],
+                    accession_number=key[1],
+                    holder_cik=holder_cik,
+                    holder_name=str(ln.row["filer_name"] or "").strip(),
+                    ownership_nature="indirect" if direct_indirect == "I" else "direct",
+                    source_url=str(unit["primary_document_url"]) if unit["primary_document_url"] else None,
+                    sec_filed_at=unit["sec_filed_at"],
+                    period_end=ln.txn_date,
+                    shares=shares,
+                    latest_line_shares=ln.post_transaction_shares,
+                    verdict=verdict,
+                )
+
+
 def sync_insiders(
     conn: psycopg.Connection[Any],
     *,
@@ -183,147 +408,46 @@ def sync_insiders(
     instruments_touched: set[int] = set()
     run_id = uuid4()
 
-    # Form 4 — read insider_transactions joined to insider_filings for
-    # filed_at + url. Group by accession + filer to capture latest
-    # post_transaction_shares per holding.
-    #
-    # PR10b (#1233 §4.4) — Form 5 18-month retention cap chokepoint.
-    # ``sync_insiders`` is a steady-state observations writer: it
-    # mirrors typed-table rows into the observations layer, so a
-    # post-cap re-run would re-write pre-cap Form 5 observations
-    # without the gate. The LEFT JOIN to ``filing_events`` (canonical
-    # source of ``filing_date`` outside the typed tables) lets each
-    # retention-capped branch reference ``fe.filing_date >= cutoff``.
-    # The JOIN is clamped to ``fe.instrument_id = it.instrument_id``
-    # so a sibling share-class's ``filing_events`` row cannot satisfy
-    # the gate for the row's own instrument (#1247 Codex 2 — per
-    # data-engineer skill §Q15, ``filing_events`` is fanned out across
-    # share-class siblings sharing a CIK; without the instrument
-    # clamp, sibling-A's row would gate sibling-B's transaction).
-    #
-    # #1247 (PR4 follow-up) — Form 4 3y retention cap also gated here.
-    # Same strict shape as Form 5: ``fe.filing_date IS NOT NULL AND
-    # fe.filing_date >= form4_cutoff``. Closes the gap PR4 left for
-    # sync_insiders. Pre-cap Form 4 rows lacking a ``filing_events``
-    # row are excluded because we cannot prove their retention status
-    # — fail-closed for unattributed legacy rows is the conservative
-    # interpretation of §6.3 ingest-side capping. The prior PR10b
-    # carve-out ("Form 4 rows without ``filing_events`` still sync")
-    # is retired; the matching legacy-test
-    # ``test_form4_without_filing_events_row_still_syncs`` is updated
-    # to assert the new contract.
-    #
-    # Form 3 ('3'/'3/A') is read-side latest-per-pair (per PR10b
-    # §4.4); no ingest-side retention cap, so it stays in the
-    # unconditional branch.
-    from app.services.insider_transactions import (
-        form4_retention_cutoff,
-        form5_retention_cutoff,
-    )
-
-    # #1687 — exclude future-dated txn_date typos so the latest-per-group
-    # re-derivation never picks an impossible date as the current holding.
-    where = "WHERE it.post_transaction_shares IS NOT NULL AND it.is_derivative = FALSE AND NOT it.txn_date_invalid"
-    params: dict[str, Any] = {
-        "form4_cutoff": form4_retention_cutoff(),
-        "form5_cutoff": form5_retention_cutoff(),
-    }
-    if since is not None:
-        where += " AND it.txn_date >= %(since)s"
-        params["since"] = since
-    # Retention gates resolve the SEC filing date manifest-first
-    # (#899 Codex ckpt-2): a manifest-only accession (no filing_events
-    # row) is provably in/out of retention via m.filed_at — gating on
-    # fe.filing_date alone wrongly excluded it. Rows with NEITHER
-    # source stay excluded (fail-closed for unattributed legacy rows,
-    # #1247).
-    where += (
-        " AND ("
-        "  f.document_type IN ('3','3/A')"
-        "  OR ("
-        "    f.document_type IN ('4','4/A')"
-        "    AND COALESCE((m.filed_at AT TIME ZONE 'UTC')::date, fe.filing_date) IS NOT NULL"
-        "    AND COALESCE((m.filed_at AT TIME ZONE 'UTC')::date, fe.filing_date) >= %(form4_cutoff)s"
-        "  )"
-        "  OR ("
-        "    f.document_type IN ('5','5/A')"
-        "    AND COALESCE((m.filed_at AT TIME ZONE 'UTC')::date, fe.filing_date) IS NOT NULL"
-        "    AND COALESCE((m.filed_at AT TIME ZONE 'UTC')::date, fe.filing_date) >= %(form5_cutoff)s"
-        "  )"
-        ")"
-    )
-    if limit is not None:
-        params["lim"] = limit
-    limit_sql = "LIMIT %(lim)s" if limit is not None else ""
-
-    # Codex review for #840.E-prep:
-    # 1. ORDER BY adds ``txn_date DESC`` so the latest balance per
-    #    holding wins, not just the XML-last row.
-    # 2. DISTINCT ON keys on (accession, filer, direct_indirect) so
-    #    direct + indirect splits for the same filer/accession produce
-    #    SEPARATE observations (two-axis identity preserved).
-    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-        cur.execute(
-            f"""
-            SELECT DISTINCT ON (it.accession_number, it.filer_cik, it.filer_name, it.direct_indirect)
-                it.instrument_id, it.accession_number,
-                it.filer_cik, it.filer_name, it.direct_indirect,
-                it.txn_date, it.post_transaction_shares,
-                f.primary_document_url,
-                COALESCE(m.filed_at, fe.filing_date::timestamp AT TIME ZONE 'UTC') AS sec_filed_at
-            FROM insider_transactions it
-            JOIN insider_filings f USING (accession_number)
-            LEFT JOIN filing_events fe
-              ON fe.provider_filing_id = it.accession_number
-             AND fe.provider = 'sec'
-             AND fe.instrument_id = it.instrument_id
-            LEFT JOIN sec_filing_manifest m
-              ON m.accession_number = it.accession_number
-            {where}
-            ORDER BY it.accession_number, it.filer_cik, it.filer_name, it.direct_indirect,
-                     it.txn_date DESC NULLS LAST, it.txn_row_num DESC
-            {limit_sql}
-            """,
-            params,
-        )
-        rows = cur.fetchall()
-
-    for row in rows:
+    # Form 4 — one observation per (filer, D/I) per accession, derived by
+    # ``derive_form4_observations`` (retention gates, units, #3227 vehicle sum).
+    for obs in derive_form4_observations(conn, since=since, limit=limit):
         summary.rows_scanned += 1
-        cik = row["filer_cik"]
-        if cik is not None:
-            cik = str(cik).strip() or None
-        name = str(row["filer_name"] or "").strip()
-        if not name and cik is None:
-            summary.orphans.append(f"insider_transactions accession={row['accession_number']} (no cik or name)")
+        if not obs.holder_name and obs.holder_cik is None:
+            summary.orphans.append(f"insider_transactions accession={obs.accession_number} (no cik or name)")
             continue
-        nature = "indirect" if (row["direct_indirect"] == "I") else "direct"
         try:
             record_insider_observation(
                 conn,
-                instrument_id=int(row["instrument_id"]),
-                holder_cik=cik,
-                holder_name=name or (cik or "UNKNOWN"),
-                ownership_nature=nature,  # type: ignore[arg-type]
+                instrument_id=obs.instrument_id,
+                holder_cik=obs.holder_cik,
+                holder_name=obs.holder_name or (obs.holder_cik or "UNKNOWN"),
+                ownership_nature=obs.ownership_nature,  # type: ignore[arg-type]
                 source="form4",
-                source_document_id=str(row["accession_number"]),
-                source_accession=str(row["accession_number"]),
+                source_document_id=obs.accession_number,
+                source_accession=obs.accession_number,
                 source_field=None,
-                source_url=str(row["primary_document_url"]) if row["primary_document_url"] else None,
+                source_url=obs.source_url,
                 # #899 — SEC filing timestamp (manifest → filing_events);
                 # txn_date fallback only for rows with neither.
-                filed_at=row["sec_filed_at"]
-                if row["sec_filed_at"] is not None
-                else datetime.combine(row["txn_date"], datetime.min.time(), tzinfo=UTC),
+                filed_at=obs.sec_filed_at
+                if obs.sec_filed_at is not None
+                else datetime.combine(obs.period_end, datetime.min.time(), tzinfo=UTC),
                 period_start=None,
-                period_end=row["txn_date"],
+                period_end=obs.period_end,
                 ingest_run_id=run_id,
-                shares=Decimal(row["post_transaction_shares"]),
+                shares=obs.shares,
             )
             summary.observations_recorded += 1
-            instruments_touched.add(int(row["instrument_id"]))
+            instruments_touched.add(obs.instrument_id)
         except Exception as exc:
-            summary.orphans.append(f"insider_transactions accession={row['accession_number']}: {exc}")
+            summary.orphans.append(f"insider_transactions accession={obs.accession_number}: {exc}")
+
+    params: dict[str, Any] = {}
+    if since is not None:
+        params["since"] = since
+    if limit is not None:
+        params["lim"] = limit
+    limit_sql = "LIMIT %(lim)s" if limit is not None else ""
 
     # Form 3 — initial holdings baseline. Direct vs indirect tag lives
     # on insider_initial_holdings.direct_indirect ('D'/'I'). Map 'I'

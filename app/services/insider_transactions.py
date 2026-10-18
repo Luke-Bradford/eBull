@@ -40,9 +40,11 @@ import json
 import logging
 import re
 import xml.etree.ElementTree as ET  # noqa: S405 — Form 4 source is SEC EDGAR, trusted.
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
+from functools import partial
 from typing import Any, Final, Protocol
 from uuid import uuid4
 
@@ -1657,6 +1659,7 @@ def upsert_filing(
             primary_document_url=primary_document_url,
             parsed=parsed,
             filed_at=filed_at,
+            entity_instrument_id=entity_instrument_id,
         )
         refresh_insiders_current(conn, instrument_id=sibling_iid)
 
@@ -1696,6 +1699,7 @@ def _record_form4_observations_for_filing(
     primary_document_url: str,
     parsed: ParsedFiling,
     filed_at: datetime | None = None,
+    entity_instrument_id: int | None = None,
 ) -> None:
     """Derive one ``ownership_insiders_observations`` row per
     ``(filer_cik, direct_indirect)`` from the parsed transactions and
@@ -1708,7 +1712,9 @@ def _record_form4_observations_for_filing(
         ``is_derivative = FALSE`` (derivative-side rows aren't a
         share-balance signal).
       - Group key: ``(filer_cik, direct_indirect)``. Latest txn per
-        group wins (``txn_date DESC, txn_row_num DESC``).
+        group wins (``txn_date DESC, txn_row_num DESC``) — except an
+        ``I`` group whose vehicles' balances sum under
+        :func:`form4_observation_shares` (#3227).
       - ``ownership_nature``: ``'indirect'`` when direct_indirect='I',
         else ``'direct'``.
 
@@ -1753,6 +1759,7 @@ def _record_form4_observations_for_filing(
         )
 
     run_id = uuid4()
+    owner_ciks = [f.filer_cik for f in parsed.filers]
     for (filer_cik, direct_indirect), txn in latest.items():
         if txn.txn_date is None or txn.post_transaction_shares is None:
             # Belt-and-braces — the filter above already excludes these.
@@ -1761,6 +1768,27 @@ def _record_form4_observations_for_filing(
         if not holder_name and not filer_cik:
             # Skip rows with no identity at all.
             continue
+        shares = Decimal(txn.post_transaction_shares)
+        if direct_indirect == "I":
+            # #3227 — the sum of the filer's vehicles' balances where the filing's arithmetic
+            # allows it, else this latest line. ``insider_transactions`` holds the lines on the
+            # entity instrument, so the cross-filing check reads there, whichever sibling this is.
+            unit_cik = (filer_cik or "").strip() or None
+            verdict, vehicle_sum = form4_observation_shares(
+                [t for t in parsed.transactions if ((t.filer_cik or "").strip() or None) == unit_cik],
+                document_type=parsed.document_type,
+                filer_cik=unit_cik,
+                owner_ciks=owner_ciks,
+                earlier_balances=partial(
+                    form4_earlier_balances,
+                    conn,
+                    instrument_id=entity_instrument_id if entity_instrument_id is not None else instrument_id,
+                    accession_number=accession_number,
+                    filer_cik=unit_cik,
+                ),
+            )
+            if verdict == FORM4_VEHICLE_SUMS and vehicle_sum is not None:
+                shares = vehicle_sum
         nature = "indirect" if direct_indirect == "I" else "direct"
         record_insider_observation(
             conn,
@@ -1779,8 +1807,227 @@ def _record_form4_observations_for_filing(
             period_start=None,
             period_end=txn.txn_date,
             ingest_run_id=run_id,
-            shares=Decimal(txn.post_transaction_shares),
+            shares=shares,
         )
+
+
+# ---------------------------------------------------------------------
+# #3227 — a Form 4's indirect observation sums its vehicles' balances
+# ---------------------------------------------------------------------
+
+FORM4_VEHICLE_SUM_DOCUMENT_TYPES: Final = frozenset({"4", "4/A"})
+FORM4_VEHICLE_SUMS: Final = "sums"
+
+
+class Form4Line(Protocol):
+    """The Table I fields :func:`form4_observation_shares` reads. ``ParsedTransaction`` satisfies
+    it, and so does a stored ``insider_transactions`` row (``sync_insiders``)."""
+
+    @property
+    def txn_row_num(self) -> int: ...
+    @property
+    def is_derivative(self) -> bool: ...
+    @property
+    def security_title(self) -> str | None: ...
+    @property
+    def txn_date(self) -> date | None: ...
+    @property
+    def txn_date_invalid(self) -> bool: ...
+    @property
+    def shares(self) -> Decimal | None: ...
+    @property
+    def acquired_disposed_code(self) -> str | None: ...
+    @property
+    def post_transaction_shares(self) -> Decimal | None: ...
+    @property
+    def direct_indirect(self) -> str | None: ...
+    @property
+    def nature_of_ownership(self) -> str | None: ...
+
+
+def form4_form_key(direct_indirect: str | None, nature_of_ownership: str | None) -> tuple[str | None, str]:
+    """A line's form of ownership: ``('I', nature)`` with the nature reduced to lower-case ASCII
+    alphanumerics ('' is blank), and ``(code, '')`` for every other line, so the ``D`` lines are
+    one series whatever their nature text."""
+    if direct_indirect != "I":
+        return (direct_indirect, "")
+    return ("I", re.sub(r"[^a-zA-Z0-9]", "", nature_of_ownership or "").lower())
+
+
+def _form4_opening(line: Form4Line) -> Decimal | None:
+    """Column 5 before the line's own transaction: ``post - signed shares`` (``A`` adds)."""
+    post, shares = line.post_transaction_shares, line.shares
+    if post is None or shares is None:
+        return None
+    if line.acquired_disposed_code == "A":
+        return post - shares
+    if line.acquired_disposed_code == "D":
+        return post + shares
+    return None
+
+
+def _form4_line_usable(line: Form4Line) -> bool:
+    post, shares, opening = line.post_transaction_shares, line.shares, _form4_opening(line)
+    return (
+        post is not None
+        and post >= 0
+        and shares is not None
+        and shares >= 0
+        and opening is not None
+        and opening >= 0
+        and line.txn_date is not None
+        and not line.txn_date_invalid
+        and line.direct_indirect in ("D", "I")
+        and bool((line.security_title or "").strip())
+        and (line.direct_indirect == "D" or form4_form_key("I", line.nature_of_ownership)[1] != "")
+    )
+
+
+def form4_observation_shares(
+    lines: Iterable[Form4Line],
+    *,
+    document_type: str | None,
+    filer_cik: str | None,
+    owner_ciks: Iterable[str | None],
+    earlier_balances: Callable[[str], Iterable[tuple[str | None, str | None, Decimal]] | None],
+) -> tuple[str, Decimal | None]:
+    """Whether ONE filer's ``I`` observation of ONE Form 4 is the sum of its vehicles' balances.
+
+    Spec: ``docs/specs/ownership/2026-10-17-3227-form4-vehicle-balance.md``. ``lines`` are the
+    filer's lines in the accession (derivative ones are ignored), D and I, including those the
+    writers skip. Returns ``(verdict, sum)``; the sum is set only when the verdict is
+    :data:`FORM4_VEHICLE_SUMS`, and the caller otherwise keeps its own latest-line value, never a
+    partial sum. Other verdicts name the first failed condition, in the spec's order, with the
+    labels ``scripts.census_3227_form4_vehicle_balance`` prints.
+
+    Form 4 Instruction 4(b)(iii) puts each form of indirect ownership on its own line, and 4(a)(i)
+    requires the class total after the transactions, but not how that total is laid out across the
+    lines' column 5. Filers do it two ways: each line carries its own form's balance (MNSO, WOOF),
+    or a running total across forms (Abdiel ``0000950170-23-052960``). So the sum is taken only
+    where the filing's arithmetic does not contradict the per-form reading — a policy fixed by
+    construction, not a reading of the instructions:
+
+    1. more than one ``I`` form (a blank nature counts, so it refuses at 2);
+    2. every line usable: balance, shares and opening (``post - signed shares``) non-null and
+       >= 0, an ``A``/``D`` code, a valid date, ``D``/``I``, a non-blank title and, for ``I``, a
+       non-blank nature;
+    3. one security title, exact match — classes never sum;
+    4. the filing's reporting owners are exactly this filer — the parser gives every line to one
+       owner, so a joint filing could credit one co-filer with the others' vehicles;
+    5. (a) within each form, each line (by ``txn_row_num``) opens at the previous line's balance;
+       (b) no line opens at the non-zero balance of a line of another form (``D`` included), in
+       either row order; (c) no ``I`` form's first line opens at a non-zero balance that matches
+       another form's balance in an earlier filing and none of its own form's
+       (``earlier_balances``; ``None`` there means the filing has no manifest time, which refuses);
+    6. no two forms' final balances are equal and non-zero — one block reported under an entity
+       and again under its owner (Instruction 4(b)(iv)) cannot be told from two equal vehicles.
+
+    Every term is >= 0 and the latest ``I`` line's balance is one of them, so a sum is never below
+    the latest-line value.
+    """
+    if document_type not in FORM4_VEHICLE_SUM_DOCUMENT_TYPES or filer_cik is None:
+        return "out_of_scope", None
+    unit = sorted((ln for ln in lines if not ln.is_derivative), key=lambda ln: ln.txn_row_num)
+    forms = [form4_form_key(ln.direct_indirect, ln.nature_of_ownership) for ln in unit]
+    if len({f for f in forms if f[0] == "I"}) < 2:
+        return "1 one_form", None
+    if not all(_form4_line_usable(ln) for ln in unit):
+        return "2 incomplete", None
+    titles = {ln.security_title for ln in unit}
+    if len(titles) != 1:
+        return "3 multi_title", None
+    if {(c or "").strip() for c in owner_ciks} != {filer_cik}:
+        return "4 joint_or_owner_mismatch", None
+
+    # Usable lines: every balance, opening and date below is non-null.
+    by_form: dict[tuple[str | None, str], list[Form4Line]] = {}
+    for ln, form in zip(unit, forms, strict=True):
+        by_form.setdefault(form, []).append(ln)
+    for form_lines in by_form.values():
+        for prev, cur in zip(form_lines, form_lines[1:], strict=False):
+            if _form4_opening(cur) != prev.post_transaction_shares:
+                return "5a form_breaks_chain", None
+    forms_at_balance: dict[Decimal, set[tuple[str | None, str]]] = {}
+    for ln, form in zip(unit, forms, strict=True):
+        post = ln.post_transaction_shares
+        if post is not None and post != 0:
+            forms_at_balance.setdefault(post, set()).add(form)
+    for ln, form in zip(unit, forms, strict=True):
+        opening = _form4_opening(ln)
+        if opening is not None and forms_at_balance.get(opening, set()) - {form}:
+            return "5b running_total", None
+
+    firsts = {form: _form4_opening(fl[0]) for form, fl in by_form.items() if form[0] == "I"}
+    if any(o != 0 for o in firsts.values()):
+        history = earlier_balances(next(iter(titles)) or "")
+        if history is None:
+            return "5c running_total_across_filings", None
+        seen = {(form4_form_key(di, nature), bal) for di, nature, bal in history}
+        for form, opening in firsts.items():
+            if opening == 0:
+                continue
+            same = (form, opening) in seen
+            other = any(bal == opening and f != form for f, bal in seen)
+            if other and not same:
+                return "5c running_total_across_filings", None
+
+    finals = {
+        form: max(fl, key=lambda ln: (ln.txn_date or date.min, ln.txn_row_num)).post_transaction_shares or Decimal(0)
+        for form, fl in by_form.items()
+    }
+    nonzero = [v for v in finals.values() if v != 0]
+    if len(set(nonzero)) != len(nonzero):
+        return "6 equal_finals", None
+    return FORM4_VEHICLE_SUMS, sum((v for form, v in finals.items() if form[0] == "I"), Decimal(0))
+
+
+# Condition 5c's sources (spec): the filer's balances on the instrument, of the unit's title, in
+# filings with a manifest time strictly earlier than this accession's — non-derivative,
+# non-tombstoned Form 4/4A transaction lines and Form 3/3A holding lines, D or I.
+_FORM4_EARLIER_BALANCES_SQL: Final = """
+SELECT t.direct_indirect, t.nature_of_ownership, t.post_transaction_shares
+  FROM insider_transactions t
+  JOIN insider_filings f ON f.accession_number = t.accession_number
+  JOIN sec_filing_manifest m ON m.accession_number = t.accession_number
+ WHERE t.instrument_id = %(iid)s AND t.filer_cik = %(cik)s AND t.security_title = %(title)s
+   AND NOT t.is_derivative AND f.document_type IN ('4', '4/A') AND NOT f.is_tombstone
+   AND t.direct_indirect IN ('D', 'I') AND t.post_transaction_shares IS NOT NULL
+   AND m.filed_at < %(filed_at)s
+UNION ALL
+SELECT h.direct_indirect, h.nature_of_ownership, h.shares
+  FROM insider_initial_holdings h
+  JOIN insider_filings f ON f.accession_number = h.accession_number
+  JOIN sec_filing_manifest m ON m.accession_number = h.accession_number
+ WHERE h.instrument_id = %(iid)s AND h.filer_cik = %(cik)s AND h.security_title = %(title)s
+   AND NOT h.is_derivative AND f.document_type IN ('3', '3/A') AND NOT f.is_tombstone
+   AND h.direct_indirect IN ('D', 'I') AND h.shares IS NOT NULL
+   AND m.filed_at < %(filed_at)s
+"""
+
+
+def form4_earlier_balances(
+    conn: psycopg.Connection[Any],
+    title: str,
+    *,
+    instrument_id: int,
+    accession_number: str,
+    filer_cik: str | None,
+) -> list[tuple[str | None, str | None, Decimal]] | None:
+    """``(direct_indirect, nature, balance)`` for condition 5c of :func:`form4_observation_shares`,
+    or ``None`` when the accession has no ``sec_filing_manifest.filed_at`` to compare against.
+
+    The CIK matches the stored column exactly, so the ``(instrument_id, filer_cik)`` indexes serve
+    it; the parser writes CIKs stripped (``_text``)."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT filed_at FROM sec_filing_manifest WHERE accession_number = %s", (accession_number,))
+        row = cur.fetchone()
+        if row is None or row[0] is None:
+            return None
+        cur.execute(
+            _FORM4_EARLIER_BALANCES_SQL,
+            {"iid": instrument_id, "cik": filer_cik, "title": title, "filed_at": row[0]},
+        )
+        return [(r[0], r[1], Decimal(r[2])) for r in cur.fetchall()]
 
 
 def filer_role_string(filer: ParsedFiler) -> str | None:
