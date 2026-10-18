@@ -148,130 +148,136 @@ def _as_of(signature: date | None, period: date | None, filed: date) -> date | N
     return None
 
 
+def collect(conn: psycopg.Connection[Any]) -> tuple[list[Group], Counter[str], set[str]]:
+    """Every holding-only group of the cohort, with the cohort counters and the accessions read."""
+    groups: list[Group] = []
+    counts: Counter[str] = Counter()
+    accessions_seen: set[str] = set()
+    with conn.cursor(name="payloads") as cur:
+        cur.itersize = 2000
+        cur.execute(_PAYLOADS)
+        for accession, instrument_id, document_type, is_tombstone, filed_at, payload in cur:
+            counts["payload_rows"] += 1
+            accessions_seen.add(accession)
+            if instrument_id is None:
+                counts["excluded_no_filing_row"] += 1
+                continue
+            try:
+                root = ET.fromstring(_XMLNS_RE.sub("", _unwrap_sgml_submission(payload)))  # noqa: S314
+            except ET.ParseError:
+                counts["excluded_unparseable"] += 1
+                continue
+            if _localname(root.tag) != "ownershipDocument":
+                counts["excluded_not_ownership_document"] += 1
+                continue
+            filers = _extract_filers(root)
+            if not filers:
+                counts["excluded_no_filers"] += 1
+                continue
+            cik0 = filers[0].filer_cik
+            all_holdings = _extract_holdings(root, default_filer_cik=cik0)
+            holdings = [h for h in all_holdings if not h.is_derivative]
+            if not holdings:
+                if not all_holdings:
+                    counts["excluded_no_holding_parsed"] += 1
+                    continue
+                counts["derivative_holdings_only"] += 1
+                if is_tombstone:
+                    counts["derivative_holdings_only_tombstoned"] += 1
+                    payload_type = _text(root.find("./documentType")) or "4"
+                    if (
+                        payload_type in ("4", "4/A")
+                        and filed_at is not None
+                        and form4_within_retention(filed_at.astimezone(UTC).date())
+                    ):
+                        counts["derivative_holdings_only_tombstoned_replay_eligible"] += 1
+                continue
+            counts["with_nonderivative_holding"] += 1
+            counts["holding_lines"] += len(holdings)
+            payload_type = _text(root.find("./documentType")) or "4"
+            if payload_type != document_type:
+                counts["document_type_mismatch_payload_vs_filing_row"] += 1
+            if payload_type not in ("4", "4/A"):
+                counts["excluded_document_type"] += 1
+                continue
+            if filed_at is None:
+                counts["excluded_no_manifest_filed_at"] += 1
+                continue
+            filed = filed_at.astimezone(UTC).date()
+            if not form4_within_retention(filed):
+                counts["excluded_retention"] += 1
+                continue
+            txns = [t for t in _extract_transactions(root, default_filer_cik=cik0) if not t.is_derivative]
+            covered = {(t.filer_cik, "I" if t.direct_indirect == "I" else "D") for t in txns}
+            holding_amounts: dict[str, list[Decimal]] = defaultdict(list)
+            for h in holdings:
+                if h.shares is not None:
+                    holding_amounts[(h.security_title or "").strip()].append(h.shares)
+            txn_balances: dict[str, set[Decimal]] = defaultdict(set)
+            for t in txns:
+                if t.post_transaction_shares is not None:
+                    txn_balances[(t.security_title or "").strip()].add(t.post_transaction_shares)
+            as_of = _as_of(
+                _date(_text(root.find("./ownerSignature/signatureDate"))),
+                _date(_text(root.find("./periodOfReport"))),
+                filed,
+            )
+            owner_count = len({f.filer_cik for f in filers})
+            by_di: dict[str, list[tuple[str, Decimal]]] = defaultdict(list)
+            unreadable: set[str] = set()
+            for h in holdings:
+                if h.direct_indirect not in _NATURE:
+                    counts["holding_lines_no_di"] += 1
+                    continue
+                if (cik0, h.direct_indirect) in covered:
+                    counts[f"mixed_lines_{h.direct_indirect}"] += 1
+                    continue
+                if h.shares is None:
+                    # A value-only line (the SEC value branch) or an unreadable amount: either
+                    # way the group's share total is unknown, so the group refuses.
+                    counts["holding_lines_no_share_count"] += 1
+                    unreadable.add(h.direct_indirect)
+                    continue
+                by_di[h.direct_indirect].append(((h.security_title or "").strip(), h.shares))
+            for di in unreadable - set(by_di):
+                by_di[di] = []
+            for di, lines in by_di.items():
+                if di in unreadable:
+                    verdict, value = "refused:no_share_count_line", None
+                elif len(lines) == 1:
+                    verdict, value = "one_line", lines[0][1]
+                else:
+                    reason = _refusal(lines, holding_amounts, txn_balances, owner_count)
+                    verdict = "summed" if reason is None else f"refused:{reason}"
+                    value = sum((s for _, s in lines), Decimal(0)) if reason is None else None
+                groups.append(
+                    Group(
+                        instrument_id=instrument_id,
+                        accession=accession,
+                        document_type=document_type,
+                        is_tombstone=is_tombstone,
+                        filed_at=filed_at,
+                        filer_cik=(cik0 or "").strip(),
+                        di=di,
+                        titles=tuple(t for t, _ in lines),
+                        shares=tuple(s for _, s in lines),
+                        verdict=verdict,
+                        value=value,
+                        period_end=as_of,
+                    )
+                )
+    return groups, counts, accessions_seen
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--examples", type=int, default=3)
     ap.add_argument("--show", action="append", default=[], help="print every group of this accession")
     args = ap.parse_args()
 
-    groups: list[Group] = []
-    counts: Counter[str] = Counter()
-    accessions_seen: set[str] = set()
     with psycopg.connect(settings.database_url) as conn:
         conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-        with conn.cursor(name="payloads") as cur:
-            cur.itersize = 2000
-            cur.execute(_PAYLOADS)
-            for accession, instrument_id, document_type, is_tombstone, filed_at, payload in cur:
-                counts["payload_rows"] += 1
-                accessions_seen.add(accession)
-                if instrument_id is None:
-                    counts["excluded_no_filing_row"] += 1
-                    continue
-                try:
-                    root = ET.fromstring(_XMLNS_RE.sub("", _unwrap_sgml_submission(payload)))  # noqa: S314
-                except ET.ParseError:
-                    counts["excluded_unparseable"] += 1
-                    continue
-                if _localname(root.tag) != "ownershipDocument":
-                    counts["excluded_not_ownership_document"] += 1
-                    continue
-                filers = _extract_filers(root)
-                if not filers:
-                    counts["excluded_no_filers"] += 1
-                    continue
-                cik0 = filers[0].filer_cik
-                all_holdings = _extract_holdings(root, default_filer_cik=cik0)
-                holdings = [h for h in all_holdings if not h.is_derivative]
-                if not holdings:
-                    if not all_holdings:
-                        counts["excluded_no_holding_parsed"] += 1
-                        continue
-                    counts["derivative_holdings_only"] += 1
-                    if is_tombstone:
-                        counts["derivative_holdings_only_tombstoned"] += 1
-                        payload_type = _text(root.find("./documentType")) or "4"
-                        if (
-                            payload_type in ("4", "4/A")
-                            and filed_at is not None
-                            and form4_within_retention(filed_at.astimezone(UTC).date())
-                        ):
-                            counts["derivative_holdings_only_tombstoned_replay_eligible"] += 1
-                    continue
-                counts["with_nonderivative_holding"] += 1
-                counts["holding_lines"] += len(holdings)
-                payload_type = _text(root.find("./documentType")) or "4"
-                if payload_type != document_type:
-                    counts["document_type_mismatch_payload_vs_filing_row"] += 1
-                if payload_type not in ("4", "4/A"):
-                    counts["excluded_document_type"] += 1
-                    continue
-                if filed_at is None:
-                    counts["excluded_no_manifest_filed_at"] += 1
-                    continue
-                filed = filed_at.astimezone(UTC).date()
-                if not form4_within_retention(filed):
-                    counts["excluded_retention"] += 1
-                    continue
-                txns = [t for t in _extract_transactions(root, default_filer_cik=cik0) if not t.is_derivative]
-                covered = {(t.filer_cik, "I" if t.direct_indirect == "I" else "D") for t in txns}
-                holding_amounts: dict[str, list[Decimal]] = defaultdict(list)
-                for h in holdings:
-                    if h.shares is not None:
-                        holding_amounts[(h.security_title or "").strip()].append(h.shares)
-                txn_balances: dict[str, set[Decimal]] = defaultdict(set)
-                for t in txns:
-                    if t.post_transaction_shares is not None:
-                        txn_balances[(t.security_title or "").strip()].add(t.post_transaction_shares)
-                as_of = _as_of(
-                    _date(_text(root.find("./ownerSignature/signatureDate"))),
-                    _date(_text(root.find("./periodOfReport"))),
-                    filed,
-                )
-                owner_count = len({f.filer_cik for f in filers})
-                by_di: dict[str, list[tuple[str, Decimal]]] = defaultdict(list)
-                unreadable: set[str] = set()
-                for h in holdings:
-                    if h.direct_indirect not in _NATURE:
-                        counts["holding_lines_no_di"] += 1
-                        continue
-                    if (cik0, h.direct_indirect) in covered:
-                        counts[f"mixed_lines_{h.direct_indirect}"] += 1
-                        continue
-                    if h.shares is None:
-                        # A value-only line (the SEC value branch) or an unreadable amount: either
-                        # way the group's share total is unknown, so the group refuses.
-                        counts["holding_lines_no_share_count"] += 1
-                        unreadable.add(h.direct_indirect)
-                        continue
-                    by_di[h.direct_indirect].append(((h.security_title or "").strip(), h.shares))
-                for di in unreadable - set(by_di):
-                    by_di[di] = []
-                for di, lines in by_di.items():
-                    if di in unreadable:
-                        verdict, value = "refused:no_share_count_line", None
-                    elif len(lines) == 1:
-                        verdict, value = "one_line", lines[0][1]
-                    else:
-                        reason = _refusal(lines, holding_amounts, txn_balances, owner_count)
-                        verdict = "summed" if reason is None else f"refused:{reason}"
-                        value = sum((s for _, s in lines), Decimal(0)) if reason is None else None
-                    groups.append(
-                        Group(
-                            instrument_id=instrument_id,
-                            accession=accession,
-                            document_type=document_type,
-                            is_tombstone=is_tombstone,
-                            filed_at=filed_at,
-                            filer_cik=(cik0 or "").strip(),
-                            di=di,
-                            titles=tuple(t for t, _ in lines),
-                            shares=tuple(s for _, s in lines),
-                            verdict=verdict,
-                            value=value,
-                            period_end=as_of,
-                        )
-                    )
+        groups, counts, accessions_seen = collect(conn)
         form5 = conn.execute(_FORM5_WITH_HOLDINGS).fetchone()
         current_rows = conn.execute(_CURRENT).fetchall()
 

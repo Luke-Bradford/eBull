@@ -213,28 +213,80 @@ class Form4Observation:
     shares: Decimal
     latest_line_shares: Decimal
     verdict: str | None
+    # ``transaction``, or ``holding`` for a holding-only group (#3227, ``form4_holding_observations``;
+    # ``verdict`` is then its verdict and ``latest_line_shares`` equals ``shares``).
+    kind: str = "transaction"
+
+
+@dataclass(frozen=True)
+class _StoredForm4Holding:
+    """A stored ``insider_form4_holdings`` line, shaped for ``form4_holding_observations``."""
+
+    row: dict[str, Any]
+    is_derivative: bool
+    security_title: str | None
+    shares: Decimal | None
+    direct_indirect: str | None
+
+    @classmethod
+    def from_row(cls, row: dict[str, Any]) -> _StoredForm4Holding:
+        return cls(
+            row=row,
+            is_derivative=False,  # the holding query reads non-derivative lines only
+            security_title=row["security_title"],
+            shares=Decimal(row["shares"]) if row["shares"] is not None else None,
+            direct_indirect=row["direct_indirect"],
+        )
 
 
 # A unit is one filer's lines in one accession on one instrument (#3227). The CIK is stripped as
 # ``btrim`` strips; a null or blank CIK keeps the pre-#3227 grouping, which also split on the name.
+# Units come from the transaction lines ({where}) and, for Form 4/4A, from the non-derivative
+# holding lines of an accession with a manifest ``filed_at`` in retention ({holding_where}) — the
+# gates ``form4_holding_observations`` applies, which have no ``filing_events`` fallback.
 _FORM4_UNITS_SQL: Final = """
-SELECT it.instrument_id, it.accession_number,
-       CASE WHEN nullif(btrim(it.filer_cik), '') IS NULL THEN it.filer_cik ELSE btrim(it.filer_cik) END AS unit_cik,
-       CASE WHEN nullif(btrim(it.filer_cik), '') IS NULL THEN it.filer_name END AS unit_name,
-       f.document_type, f.primary_document_url,
-       min(COALESCE(m.filed_at, fe.filing_date::timestamp AT TIME ZONE 'UTC')) AS sec_filed_at
-  FROM insider_transactions it
-  JOIN insider_filings f USING (accession_number)
-  LEFT JOIN filing_events fe
-    ON fe.provider_filing_id = it.accession_number
-   AND fe.provider = 'sec'
-   AND fe.instrument_id = it.instrument_id
-  LEFT JOIN sec_filing_manifest m
-    ON m.accession_number = it.accession_number
- {where}
- GROUP BY 1, 2, 3, 4, 5, 6
+SELECT instrument_id, accession_number, unit_cik, unit_name, document_type, primary_document_url,
+       signature_date, period_of_report,
+       min(sec_filed_at) AS sec_filed_at, max(manifest_filed_at) AS manifest_filed_at,
+       bool_or(from_txn) AS from_txn
+  FROM (
+    SELECT it.instrument_id, it.accession_number,
+           CASE WHEN nullif(btrim(it.filer_cik), '') IS NULL THEN it.filer_cik ELSE btrim(it.filer_cik) END AS unit_cik,
+           CASE WHEN nullif(btrim(it.filer_cik), '') IS NULL THEN it.filer_name END AS unit_name,
+           f.document_type, f.primary_document_url, f.signature_date, f.period_of_report,
+           COALESCE(m.filed_at, fe.filing_date::timestamp AT TIME ZONE 'UTC') AS sec_filed_at,
+           m.filed_at AS manifest_filed_at, TRUE AS from_txn
+      FROM insider_transactions it
+      JOIN insider_filings f USING (accession_number)
+      LEFT JOIN filing_events fe
+        ON fe.provider_filing_id = it.accession_number
+       AND fe.provider = 'sec'
+       AND fe.instrument_id = it.instrument_id
+      LEFT JOIN sec_filing_manifest m
+        ON m.accession_number = it.accession_number
+     {where}
+    UNION ALL
+    SELECT h.instrument_id, h.accession_number,
+           CASE WHEN nullif(btrim(h.filer_cik), '') IS NULL THEN h.filer_cik ELSE btrim(h.filer_cik) END,
+           CASE WHEN nullif(btrim(h.filer_cik), '') IS NULL THEN h.filer_name END,
+           f.document_type, f.primary_document_url, f.signature_date, f.period_of_report,
+           m.filed_at, m.filed_at, FALSE
+      FROM insider_form4_holdings h
+      JOIN insider_filings f USING (accession_number)
+      JOIN sec_filing_manifest m ON m.accession_number = h.accession_number
+     {holding_where}
+  ) u
+ GROUP BY 1, 2, 3, 4, 5, 6, 7, 8
  ORDER BY 1, 2, 3, 4
  {limit}
+"""
+
+_FORM4_HOLDINGS_SQL: Final = """
+SELECT h.instrument_id, h.accession_number, h.row_num, h.filer_cik, h.filer_name,
+       h.security_title, h.shares, h.direct_indirect
+  FROM insider_form4_holdings h
+ WHERE h.accession_number = ANY(%(accs)s::text[]) AND NOT h.is_derivative
+ ORDER BY h.instrument_id, h.accession_number, h.row_num
 """
 
 _FORM4_LINES_SQL: Final = """
@@ -287,9 +339,11 @@ def derive_form4_observations(
     (fail-closed for unattributed legacy rows). Form 3 rows here are uncapped.
     """
     from app.services.insider_transactions import (
+        FORM4_HOLDING_NATURE,
         FORM4_VEHICLE_SUM_DOCUMENT_TYPES,
         FORM4_VEHICLE_SUMS,
         form4_earlier_balances,
+        form4_holding_observations,
         form4_observation_shares,
         form4_retention_cutoff,
         form5_retention_cutoff,
@@ -320,9 +374,20 @@ def derive_form4_observations(
         "  )"
         ")"
     )
+    # #3227 — holding units. ``since`` applies to the holding's ``period_end``
+    # (``form4_holding_as_of``), exactly in Python below; this prefilter only skips accessions whose
+    # later candidate date is already before it (``GREATEST`` ignores a NULL).
+    holding_where = (
+        "WHERE NOT h.is_derivative AND f.document_type IN ('4','4/A')"
+        " AND (m.filed_at AT TIME ZONE 'UTC')::date >= %(form4_cutoff)s"
+    )
+    if since is not None:
+        holding_where += " AND GREATEST(f.signature_date, f.period_of_report) >= %(since)s"
     if limit is not None:
         params["lim"] = limit
-    sql = _FORM4_UNITS_SQL.format(where=where, limit="LIMIT %(lim)s" if limit is not None else "")
+    sql = _FORM4_UNITS_SQL.format(
+        where=where, holding_where=holding_where, limit="LIMIT %(lim)s" if limit is not None else ""
+    )
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(sql, params)
         units = {(int(u["instrument_id"]), u["accession_number"], u["unit_cik"], u["unit_name"]): u for u in cur}
@@ -333,15 +398,50 @@ def derive_form4_observations(
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(_FORM4_LINES_SQL, {"accs": chunk})
             line_rows = cur.fetchall()
+            cur.execute(_FORM4_HOLDINGS_SQL, {"accs": chunk})
+            holding_rows = cur.fetchall()
             cur.execute(_FORM4_OWNERS_SQL, {"accs": chunk})
             owners = {r["accession_number"]: list(r["array_agg"]) for r in cur.fetchall()}
         # A dict, not ``groupby``: two filers' lines can interleave by ``txn_row_num``.
         by_unit: dict[tuple[int, str, str | None, str | None], list[_StoredForm4Line]] = {}
         for r in line_rows:
             by_unit.setdefault(_form4_unit_key(r), []).append(_StoredForm4Line.from_row(r))
+        holdings_by_unit: dict[tuple[int, str, str | None, str | None], list[_StoredForm4Holding]] = {}
+        for r in holding_rows:
+            holdings_by_unit.setdefault(_form4_unit_key(r), []).append(_StoredForm4Holding.from_row(r))
+        for key, held in holdings_by_unit.items():
+            unit = units.get(key)
+            if unit is None or key[3] is not None:
+                continue
+            groups = form4_holding_observations(
+                held,
+                by_unit.get(key, []),
+                document_type=unit["document_type"],
+                owner_ciks=owners.get(key[1], []),
+                signature_date=unit["signature_date"],
+                period_of_report=unit["period_of_report"],
+                manifest_filed_at=unit["manifest_filed_at"],
+            )
+            for g in groups:
+                if g.shares is None or g.period_end is None or (since is not None and g.period_end < since):
+                    continue
+                yield Form4Observation(
+                    instrument_id=key[0],
+                    accession_number=key[1],
+                    holder_cik=key[2],
+                    holder_name=str(held[0].row["filer_name"] or "").strip(),
+                    ownership_nature=FORM4_HOLDING_NATURE[g.direct_indirect],
+                    source_url=str(unit["primary_document_url"]) if unit["primary_document_url"] else None,
+                    sec_filed_at=unit["manifest_filed_at"],
+                    period_end=g.period_end,
+                    shares=g.shares,
+                    latest_line_shares=g.shares,
+                    verdict=g.verdict,
+                    kind="holding",
+                )
         for key, lines in by_unit.items():
             unit = units.get(key)
-            if unit is None:
+            if unit is None or not unit["from_txn"]:
                 continue
             latest: dict[str | None, _StoredForm4Line] = {}
             for ln in lines:

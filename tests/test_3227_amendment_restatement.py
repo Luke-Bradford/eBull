@@ -88,6 +88,7 @@ def _filing(
     lines: tuple[tuple[str, date], ...],
     original_date: date | None = None,
     txn_shares: int = 100,
+    di: str = "I",
 ) -> None:
     cur.execute(
         "INSERT INTO insider_filings (accession_number, instrument_id, document_type, period_of_report,"
@@ -107,9 +108,10 @@ def _filing(
     for row_num, (title, txn_date) in enumerate(lines):
         cur.execute(
             "INSERT INTO insider_transactions (accession_number, txn_row_num, instrument_id, filer_cik,"
-            " filer_name, security_title, txn_date, txn_code, shares, post_transaction_shares, is_derivative)"
-            " VALUES (%s, %s, %s, %s, 'Abate Christopher J', %s, %s, 'P', %s, 679, FALSE)",
-            (accession, row_num, _IID, owner, title, txn_date, txn_shares),
+            " filer_name, security_title, txn_date, txn_code, shares, post_transaction_shares, is_derivative,"
+            " direct_indirect)"
+            " VALUES (%s, %s, %s, %s, 'Abate Christopher J', %s, %s, 'P', %s, 679, FALSE, %s)",
+            (accession, row_num, _IID, owner, title, txn_date, txn_shares, di),
         )
 
 
@@ -131,6 +133,7 @@ def _seed(conn: psycopg.Connection[Any], case: _Case) -> None:
             case.amendment_lines,
             original_date=original_filed.date(),
             txn_shares=case.amendment_txn_shares,
+            di="D",  # RWT: the 4/A restates the original's "I by Trust" line as D
         )
         if case.second_original_same_day:
             _filing(cur, "0001104659-26-107868", "4", _OWNER, original_filed, (("Common Stock", _PERIOD),))
