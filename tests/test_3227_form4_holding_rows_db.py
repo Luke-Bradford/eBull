@@ -214,3 +214,54 @@ def test_form4_consumers_read_the_holding_lines(
     state = _form4_state(conn, _IID)
     assert state.typed_row_count == 3
     assert not any("rewash candidate" in n for n in state.notes)
+
+
+_ORIGINAL = "0003227501-26-000003"
+_AMENDMENT = "0003227501-26-000004"
+
+
+def test_an_amendment_restating_the_transactions_keeps_the_originals_holding(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+) -> None:
+    """FUSE ``0001493152-26-001021``: the original's ``D`` transaction is restated by its 4/A, its
+    ``I`` holding is not (Instruction 9 — lines not amended are not repeated). The holding stays."""
+    from app.services.ownership_observations import refresh_insiders_current
+
+    conn = ebull_test_conn
+    _seed(conn)
+    later = _FILED + timedelta(days=20)
+    for accession, filed in ((_ORIGINAL, _FILED), (_AMENDMENT, later)):
+        conn.execute(
+            "INSERT INTO sec_filing_manifest (accession_number, cik, form, source, subject_type, subject_id,"
+            " instrument_id, filed_at, ingest_status)"
+            " VALUES (%s, %s, '4', 'sec_form4', 'issuer', %s, %s, %s, 'parsed')",
+            (accession, _CIK, str(_IID), _IID, filed),
+        )
+    conn.commit()
+    original = _xml(_TXN_D + _holding("2677292", "I"))
+    amendment = original.replace("<documentType>4</documentType>", "<documentType>4/A</documentType>").replace(
+        "<periodOfReport>",
+        f"<dateOfOriginalSubmission>{_FILED.date()}</dateOfOriginalSubmission><periodOfReport>",
+    )
+    amendment = amendment.replace(_holding("2677292", "I"), "")
+    for accession, xml, filed in ((_ORIGINAL, original, _FILED), (_AMENDMENT, amendment, later)):
+        parsed = parse_form_4_xml(xml)
+        assert parsed is not None
+        upsert_filing(
+            conn,
+            instrument_id=_IID,
+            accession_number=accession,
+            primary_document_url="https://example.test/h.xml",
+            parsed=parsed,
+            filed_at=filed,
+        )
+    refresh_insiders_current(conn, instrument_id=_IID)
+    conn.commit()
+    rows = conn.execute(
+        "SELECT ownership_nature, source_accession, shares FROM ownership_insiders_current"
+        " WHERE instrument_id = %s AND holder_cik = %s",
+        (_IID, _CIK),
+    ).fetchall()
+    current = {nature: (accession, Decimal(shares)) for nature, accession, shares in rows}
+    assert current["indirect"] == (_ORIGINAL, Decimal("2677292"))
+    assert current["direct"][0] == _AMENDMENT  # the restated transaction is superseded
