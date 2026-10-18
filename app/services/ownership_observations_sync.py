@@ -216,17 +216,22 @@ class Form4Observation:
     # ``transaction``, or ``holding`` for a holding-only group (#3227, ``form4_holding_observations``;
     # ``verdict`` is then its verdict and ``latest_line_shares`` equals ``shares``).
     kind: str = "transaction"
+    # A transaction observation's ``form4_fold_shares`` verdict (#3227 mixed groups); ``shares`` is
+    # its folded value only when this is ``sums``. None on a holding-only observation.
+    fold_verdict: str | None = None
 
 
 @dataclass(frozen=True)
 class _StoredForm4Holding:
-    """A stored ``insider_form4_holdings`` line, shaped for ``form4_holding_observations``."""
+    """A stored ``insider_form4_holdings`` line, shaped for ``form4_holding_observations`` and
+    ``form4_fold_shares``."""
 
     row: dict[str, Any]
     is_derivative: bool
     security_title: str | None
     shares: Decimal | None
     direct_indirect: str | None
+    nature_of_ownership: str | None
 
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> _StoredForm4Holding:
@@ -236,6 +241,7 @@ class _StoredForm4Holding:
             security_title=row["security_title"],
             shares=Decimal(row["shares"]) if row["shares"] is not None else None,
             direct_indirect=row["direct_indirect"],
+            nature_of_ownership=row["nature_of_ownership"],
         )
 
 
@@ -283,7 +289,7 @@ SELECT instrument_id, accession_number, unit_cik, unit_name, document_type, prim
 
 _FORM4_HOLDINGS_SQL: Final = """
 SELECT h.instrument_id, h.accession_number, h.row_num, h.filer_cik, h.filer_name,
-       h.security_title, h.shares, h.direct_indirect
+       h.security_title, h.shares, h.direct_indirect, h.nature_of_ownership
   FROM insider_form4_holdings h
  WHERE h.accession_number = ANY(%(accs)s::text[]) AND NOT h.is_derivative
  ORDER BY h.instrument_id, h.accession_number, h.row_num
@@ -326,7 +332,8 @@ def derive_form4_observations(
     One observation per ``(unit, direct_indirect)``, holding the unit's latest eligible line
     (``txn_date DESC, txn_row_num DESC``), where an eligible line is non-derivative, has a balance
     and a valid date. An ``I`` observation of a Form 4/4A instead holds its vehicles' sum where
-    :func:`form4_observation_shares` allows it (#3227).
+    :func:`form4_observation_shares` allows it, and a ``D`` or ``I`` one whose unit has holding
+    lines of that D/I folds them in where :func:`form4_fold_shares` allows it (#3227).
 
     Units are selected FIRST — the units with an eligible line in the retention window (and dated
     on or after ``since``), ``limit`` of them — and then every non-derivative line of those units
@@ -343,6 +350,7 @@ def derive_form4_observations(
         FORM4_VEHICLE_SUM_DOCUMENT_TYPES,
         FORM4_VEHICLE_SUMS,
         form4_earlier_balances,
+        form4_fold_shares,
         form4_holding_observations,
         form4_observation_shares,
         form4_retention_cutoff,
@@ -472,6 +480,25 @@ def derive_form4_observations(
                     )
                     if verdict == FORM4_VEHICLE_SUMS and vehicle_sum is not None:
                         shares = vehicle_sum
+                fold_verdict: str | None = None
+                if direct_indirect in ("D", "I"):
+                    fold_verdict, folded = form4_fold_shares(
+                        lines,
+                        holdings_by_unit.get(key, []),
+                        direct_indirect,
+                        document_type=unit["document_type"],
+                        filer_cik=holder_cik if key[3] is None else None,
+                        owner_ciks=owners.get(key[1], []),
+                        earlier_balances=partial(
+                            form4_earlier_balances,
+                            conn,
+                            instrument_id=key[0],
+                            accession_number=key[1],
+                            filer_cik=holder_cik,
+                        ),
+                    )
+                    if fold_verdict == FORM4_VEHICLE_SUMS and folded is not None:
+                        shares = folded
                 yield Form4Observation(
                     instrument_id=key[0],
                     accession_number=key[1],
@@ -484,6 +511,7 @@ def derive_form4_observations(
                     shares=shares,
                     latest_line_shares=ln.post_transaction_shares,
                     verdict=verdict,
+                    fold_verdict=fold_verdict,
                 )
 
 

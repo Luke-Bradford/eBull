@@ -1796,7 +1796,8 @@ def _record_form4_observations_for_filing(
       - Group key: ``(filer_cik, direct_indirect)``. Latest txn per
         group wins (``txn_date DESC, txn_row_num DESC``) — except an
         ``I`` group whose vehicles' balances sum under
-        :func:`form4_observation_shares` (#3227).
+        :func:`form4_observation_shares`, and a group whose holding
+        lines fold in under :func:`form4_fold_shares` (#3227).
       - ``ownership_nature``: ``'indirect'`` when direct_indirect='I',
         else ``'direct'``.
 
@@ -1861,26 +1862,43 @@ def _record_form4_observations_for_filing(
             # Skip rows with no identity at all.
             continue
         shares = Decimal(txn.post_transaction_shares)
+        # ``insider_transactions`` holds the lines on the entity instrument, so the cross-filing
+        # check reads there, whichever sibling this is.
+        unit_cik = (filer_cik or "").strip() or None
+        unit_txns = [t for t in parsed.transactions if ((t.filer_cik or "").strip() or None) == unit_cik]
+        earlier = partial(
+            form4_earlier_balances,
+            conn,
+            instrument_id=entity_instrument_id if entity_instrument_id is not None else instrument_id,
+            accession_number=accession_number,
+            filer_cik=unit_cik,
+        )
         if direct_indirect == "I":
             # #3227 — the sum of the filer's vehicles' balances where the filing's arithmetic
-            # allows it, else this latest line. ``insider_transactions`` holds the lines on the
-            # entity instrument, so the cross-filing check reads there, whichever sibling this is.
-            unit_cik = (filer_cik or "").strip() or None
+            # allows it, else this latest line.
             verdict, vehicle_sum = form4_observation_shares(
-                [t for t in parsed.transactions if ((t.filer_cik or "").strip() or None) == unit_cik],
+                unit_txns,
                 document_type=parsed.document_type,
                 filer_cik=unit_cik,
                 owner_ciks=owner_ciks,
-                earlier_balances=partial(
-                    form4_earlier_balances,
-                    conn,
-                    instrument_id=entity_instrument_id if entity_instrument_id is not None else instrument_id,
-                    accession_number=accession_number,
-                    filer_cik=unit_cik,
-                ),
+                earlier_balances=earlier,
             )
             if verdict == FORM4_VEHICLE_SUMS and vehicle_sum is not None:
                 shares = vehicle_sum
+        if direct_indirect in ("D", "I"):
+            # #3227 — the filer's holding lines of this D/I fold in where the filing's arithmetic
+            # allows it; every holding line is attributed to the first owner, as the parser does.
+            fold_verdict, folded = form4_fold_shares(
+                unit_txns,
+                [h for h in parsed.holdings if ((h.filer_cik or "").strip() or None) == unit_cik],
+                direct_indirect,
+                document_type=parsed.document_type,
+                filer_cik=unit_cik,
+                owner_ciks=owner_ciks,
+                earlier_balances=earlier,
+            )
+            if fold_verdict == FORM4_VEHICLE_SUMS and folded is not None:
+                shares = folded
         nature = "indirect" if direct_indirect == "I" else "direct"
         record_insider_observation(
             conn,
@@ -2280,6 +2298,132 @@ def form4_observation_shares(
     if len(set(nonzero)) != len(nonzero):
         return "6 equal_finals", None
     return FORM4_VEHICLE_SUMS, sum((v for form, v in finals.items() if form[0] == "I"), Decimal(0))
+
+
+# ---------------------------------------------------------------------
+# #3227 — a Form 4's holding lines fold into the same filer's transaction observation
+# ---------------------------------------------------------------------
+
+FORM4_FOLD_NOT_MIXED: Final = "not_mixed"
+
+
+class Form4FoldHolding(Form4HoldingLine, Protocol):
+    """The holding fields :func:`form4_fold_shares` reads: :class:`Form4HoldingLine` plus the
+    nature, which condition 2 requires of an ``I`` line."""
+
+    @property
+    def nature_of_ownership(self) -> str | None: ...
+
+
+def _form4_holding_usable(line: Form4FoldHolding) -> bool:
+    shares = line.shares
+    return (
+        shares is not None
+        and shares >= 0
+        and line.direct_indirect in ("D", "I")
+        and bool((line.security_title or "").strip())
+        and (line.direct_indirect == "D" or form4_form_key("I", line.nature_of_ownership)[1] != "")
+    )
+
+
+def form4_fold_shares(
+    transactions: Iterable[Form4Line],
+    holdings: Iterable[Form4FoldHolding],
+    direct_indirect: str,
+    *,
+    document_type: str | None,
+    filer_cik: str | None,
+    owner_ciks: Iterable[str | None],
+    earlier_balances: Callable[[str], Iterable[tuple[str | None, str | None, Decimal]] | None],
+) -> tuple[str, Decimal | None]:
+    """Whether ONE filer's ``direct_indirect`` observation of ONE Form 4 folds in its holding lines.
+
+    Spec: ``docs/specs/ownership/2026-10-18-3227-form4-mixed-groups.md``, Change 1; both Form 4
+    observation writers call it, so the weekly re-derivation cannot revert the live one (#3874).
+    ``transactions`` and ``holdings`` are the filer's lines in the accession, derivative ones
+    included (they are ignored), D and I. Returns ``(fold verdict, value)``; the value is set only
+    on :data:`FORM4_VEHICLE_SUMS`, and on any other verdict the caller keeps that key's value as
+    it computes it without this helper — never a partial sum.
+
+    ``out_of_scope`` outside Form 4/4A or without a CIK; :data:`FORM4_FOLD_NOT_MIXED` unless the
+    unit has a non-derivative holding line AND a non-derivative transaction line of
+    ``direct_indirect`` (a transaction with no D/I counts as ``D``). Otherwise each holding line is
+    a one-line form of its own, whatever its nature, and :func:`form4_observation_shares`'s
+    conditions 2–6 run over every line of the unit, transactions and holdings, D and I — with 5b
+    counting a holding as another form, 5b′ refusing a non-zero holding equal to any transaction
+    balance (Instruction 4(b)(iv)), 5c over the summed key's transaction series only, and 6 over
+    the series' finals plus every holding. Zeros are ignored in 5b, 5b′ and 6. The other labels
+    are those ``scripts.census_3227_form4_mixed_groups`` prints.
+
+    The value is the key's transaction series' finals plus its holdings. Every term is >= 0, and
+    the writers' value without the fold (the latest line, or the ``I`` vehicle sum, whose
+    conditions are a subset of these) is one of the terms or their sum, so a fold never falls.
+    """
+    if document_type not in FORM4_VEHICLE_SUM_DOCUMENT_TYPES or filer_cik is None:
+        return "out_of_scope", None
+    txns = sorted((t for t in transactions if not t.is_derivative), key=lambda t: t.txn_row_num)
+    held = [h for h in holdings if not h.is_derivative]
+    if not any(("I" if t.direct_indirect == "I" else "D") == direct_indirect for t in txns) or not any(
+        h.direct_indirect == direct_indirect for h in held
+    ):
+        return FORM4_FOLD_NOT_MIXED, None
+    if not all(_form4_line_usable(t) for t in txns) or not all(_form4_holding_usable(h) for h in held):
+        return "2 incomplete", None
+    if len({t.security_title for t in txns} | {h.security_title for h in held}) != 1:
+        return "3 multi_title", None
+    if {(c or "").strip() for c in owner_ciks} != {filer_cik}:
+        return "4 joint_or_owner_mismatch", None
+
+    # Usable lines: every balance, opening and date below is non-null. A holding's form is
+    # ``("H", <its index>)``, distinct from every transaction form and every other holding.
+    by_form: dict[tuple[str | None, str], list[Form4Line]] = {}
+    for t in txns:
+        by_form.setdefault(form4_form_key(t.direct_indirect, t.nature_of_ownership), []).append(t)
+    for form_lines in by_form.values():
+        for prev, cur in zip(form_lines, form_lines[1:], strict=False):
+            if _form4_opening(cur) != prev.post_transaction_shares:
+                return "5a form_breaks_chain", None
+    forms_at_balance: dict[Decimal, set[tuple[str | None, str]]] = {}
+    for form, form_lines in by_form.items():
+        for t in form_lines:
+            if t.post_transaction_shares:
+                forms_at_balance.setdefault(t.post_transaction_shares, set()).add(form)
+    for i, h in enumerate(held):
+        if h.shares:
+            forms_at_balance.setdefault(h.shares, set()).add(("H", str(i)))
+    for form, form_lines in by_form.items():
+        for t in form_lines:
+            opening = _form4_opening(t)
+            if opening is not None and forms_at_balance.get(opening, set()) - {form}:
+                return "5b running_total", None
+    txn_balances = {t.post_transaction_shares for t in txns if t.post_transaction_shares}
+    if any(h.shares in txn_balances for h in held):
+        return "5b holding_equals_transaction_balance", None
+
+    summed = [f for f in by_form if (f[0] == "I") == (direct_indirect == "I")]
+    firsts = {f: _form4_opening(by_form[f][0]) for f in summed}
+    if any(o != 0 for o in firsts.values()):
+        history = earlier_balances(txns[0].security_title or "")
+        if history is None:
+            return "5c running_total_across_filings", None
+        seen = {(form4_form_key(di, nature), bal) for di, nature, bal in history}
+        for form, opening in firsts.items():
+            if opening == 0:
+                continue
+            if any(bal == opening and f != form for f, bal in seen) and (form, opening) not in seen:
+                return "5c running_total_across_filings", None
+
+    finals = {
+        form: max(fl, key=lambda t: (t.txn_date or date.min, t.txn_row_num)).post_transaction_shares or Decimal(0)
+        for form, fl in by_form.items()
+    }
+    every_final = [*finals.values(), *(h.shares or Decimal(0) for h in held)]
+    nonzero = [v for v in every_final if v != 0]
+    if len(set(nonzero)) != len(nonzero):
+        return "6 equal_finals", None
+    value = sum((finals[f] for f in summed), Decimal(0))
+    value += sum((h.shares or Decimal(0) for h in held if h.direct_indirect == direct_indirect), Decimal(0))
+    return FORM4_VEHICLE_SUMS, value
 
 
 # Condition 5c's sources (spec): the filer's balances on the instrument, of the unit's title, in
