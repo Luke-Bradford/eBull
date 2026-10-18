@@ -13146,3 +13146,15 @@ neighbouring container and match it.**
   new table, or say why not. The spec's list of readers was written to justify NOT reusing a table; the same list is
   the checklist of readers to extend.
 - Enforced in: `tests/test_3227_form4_holding_rows_db.py::test_form4_consumers_read_the_holding_lines`.
+
+### A best-effort hook step needs a hard time bound, not just a connect timeout (pre-push, 2026-10-18)
+
+- Symptom: the pre-push hook's last, non-blocking step (dev-DB size warning) ran an untimed `docker exec … psql`.
+  With the Docker daemon unresponsive while Postgres still served TCP, every gate passed and the hook then hung, so
+  no push could finish. The first fix (TCP via psycopg with `connect_timeout`) drew a review WARNING: in psycopg 3.3
+  `connect_timeout` bounds each connection attempt, but DNS resolution and the interpreter's imports sit outside it.
+- Prevention: any probe in `.githooks/` that is best-effort must be bounded as a whole. macOS has no `timeout(1)`;
+  inside `python -c`, call `signal.alarm(N)` before any import (no Python handler is installed for SIGALRM, so the
+  default action kills the process even inside a blocking C call; measured rc 142 at the deadline). Do not wrap a Go
+  CLI such as `docker` in `perl -e 'alarm N; exec …'`: on 2026-10-18 `docker ps` outlived a 20 s alarm.
+- Enforced in: `.githooks/pre-push` (DB size probe); review on PR #3881.
