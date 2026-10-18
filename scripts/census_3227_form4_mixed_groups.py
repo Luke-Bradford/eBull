@@ -57,15 +57,15 @@ from app.config import settings
 from app.services.insider_transactions import form4_earlier_balances, form4_form_key, form4_within_retention
 
 _UNITS: Final[LiteralString] = """
-SELECT DISTINCT h.instrument_id, h.accession_number, h.filer_cik, f.document_type,
+SELECT DISTINCT h.instrument_id, h.accession_number, h.filer_cik, f.document_type, f.is_tombstone,
        COALESCE((m.filed_at AT TIME ZONE 'UTC')::date,
-                (SELECT min(fe.filing_date) FROM filing_events fe
+                (SELECT max(fe.filing_date) FROM filing_events fe
                   WHERE fe.provider = 'sec' AND fe.provider_filing_id = h.accession_number
                     AND fe.instrument_id = h.instrument_id)) AS filing_date
   FROM insider_form4_holdings h
   JOIN insider_filings f USING (accession_number)
   LEFT JOIN sec_filing_manifest m ON m.accession_number = h.accession_number
- WHERE NOT h.is_derivative AND f.document_type IN ('4', '4/A') AND NOT f.is_tombstone
+ WHERE NOT h.is_derivative AND f.document_type IN ('4', '4/A')
    AND h.direct_indirect IN ('D', 'I')
    AND EXISTS (
          SELECT 1 FROM insider_transactions t
@@ -105,17 +105,19 @@ SELECT instrument_id, holder_cik, ownership_nature, source_document_id, shares
   FROM ownership_insiders_current WHERE source = 'form4'
 """
 
-# Invariants the unit grouping relies on: the parser writes CIKs stripped (``_text``), and each
-# accession has one current observation per holder and nature.
+# Invariants the unit grouping relies on: the parser writes CIKs stripped (``_text``), so no CIK
+# carries edge whitespace of any kind (``\s``, which covers what Python's ``str.strip`` removes for
+# ASCII), and each accession has one current observation per holder and nature.
 _INVARIANTS: Final[dict[str, LiteralString]] = {
-    "insider_transactions CIKs not stripped": (
-        "SELECT count(*) FROM insider_transactions WHERE filer_cik IS DISTINCT FROM btrim(filer_cik)"
+    "insider_transactions CIKs with edge whitespace": (
+        "SELECT count(*) FROM insider_transactions WHERE filer_cik ~ '^\\s|\\s$'"
     ),
-    "insider_form4_holdings CIKs not stripped": (
-        "SELECT count(*) FROM insider_form4_holdings WHERE filer_cik IS DISTINCT FROM btrim(filer_cik)"
+    "insider_form4_holdings CIKs with edge whitespace": (
+        "SELECT count(*) FROM insider_form4_holdings WHERE filer_cik ~ '^\\s|\\s$'"
     ),
-    "insider_filers CIKs not stripped": (
-        "SELECT count(*) FROM insider_filers WHERE filer_cik IS DISTINCT FROM btrim(filer_cik)"
+    "insider_filers CIKs with edge whitespace": "SELECT count(*) FROM insider_filers WHERE filer_cik ~ '^\\s|\\s$'",
+    "form4 observation holder CIKs with edge whitespace": (
+        "SELECT count(*) FROM ownership_insiders_observations WHERE source = 'form4' AND holder_cik ~ '^\\s|\\s$'"
     ),
     "accession/holder/nature keys with several current form4 observations": """
         SELECT count(*) FROM (
@@ -140,6 +142,14 @@ SELECT accession_number, footnote_id, footnote_text FROM insider_transaction_foo
 _FOLDED_LINE_REFS: Final[LiteralString] = """
 SELECT accession_number, filer_cik, direct_indirect, footnote_refs FROM insider_form4_holdings
  WHERE accession_number = ANY(%(accs)s::text[]) AND NOT is_derivative
+"""
+
+# Share-class siblings (#1117) carry Form 4 observations written only by the live writer, which fans
+# a filing out to every sibling; the weekly writer reads lines from the entity instrument alone.
+_SIBLING_OBSERVATIONS: Final[LiteralString] = """
+SELECT instrument_id, source_document_id, holder_cik, ownership_nature, shares
+  FROM ownership_insiders_observations
+ WHERE source = 'form4' AND known_to IS NULL AND source_document_id = ANY(%(accs)s::text[])
 """
 
 _CHUNK: Final = 2000
@@ -305,7 +315,8 @@ def collect(conn: psycopg.Connection[Any]) -> tuple[list[Result], Counter[str]]:
     units = conn.execute(_UNITS).fetchall()
     counts["mixed_units"] = len(units)
     accessions = sorted({u[1] for u in units})
-    unit_set = {(u[0], u[1], u[2]): (u[3], u[4]) for u in units}
+    unit_set = {(u[0], u[1], u[2]): (u[3], u[5]) for u in units}
+    counts["mixed_units_on_tombstoned_filings"] = sum(1 for u in units if u[4])
     results: list[Result] = []
     for i in range(0, len(accessions), _CHUNK):
         chunk = accessions[i : i + _CHUNK]
@@ -414,7 +425,7 @@ def _sample(conn: psycopg.Connection[Any], results: list[Result], spec: str) -> 
             " WHERE accession_number = %s ORDER BY footnote_id",
             (r.accession,),
         ):
-            out.append(f"       {fid}: {text[:200]}")
+            out.append(f"       {fid}: {text}")
     return out
 
 
@@ -438,6 +449,15 @@ def main() -> None:
                 footnotes[(acc, fid)] = text
             folded_refs.extend(conn.execute(_FOLDED_LINE_REFS, {"accs": chunk}).fetchall())
         samples = [_sample(conn, results, spec) for spec in args.sample]
+        by_key = {(r.accession, r.filer_cik, _NATURE[r.di]): r for r in results if r.verdict == SUMS}
+        entity = {(r.accession, r.instrument_id) for r in results}
+        siblings: list[tuple[int, str, str, str]] = []
+        for i in range(0, len(sums_accessions), _CHUNK):
+            chunk = sums_accessions[i : i + _CHUNK]
+            for iid, acc, cik, nature, _shares in conn.execute(_SIBLING_OBSERVATIONS, {"accs": chunk}).fetchall():
+                key = (acc, (cik or "").strip(), nature)
+                if key in by_key and (acc, iid) not in entity:
+                    siblings.append((iid, acc, key[1], nature))
         current = {
             (iid, (cik or "").strip(), nature): (sdoc, shares)
             for iid, cik, nature, sdoc, shares in conn.execute(_CURRENT).fetchall()
@@ -498,10 +518,17 @@ def main() -> None:
         1 for r in results if id(r) in winner and current[(r.instrument_id, r.filer_cik, _NATURE[r.di])][1] != r.today
     )
     print(f"  winner keys whose _current shares differ from the stored observation: {stale:,}")
+    assert stale == 0, "the comparison assumes _current is in sync with the stored observations"
     out = [r for r in results if r.verdict == SUMS and not r.in_retention]
     print(
         f"  sums keys outside retention (the weekly writer does not re-derive them): {len(out):,}"
         f" (moving a _current winner: {sum(1 for r in out if r in moved_winners):,})"
+    )
+
+    sibling_current = sum(1 for iid, acc, cik, nature in siblings if current.get((iid, cik, nature), (None,))[0] == acc)
+    print(
+        f"  share-class sibling observations on a sums key (live writer only): {len(siblings):,}"
+        f" over {len({s[0] for s in siblings}):,} instruments; current winners: {sibling_current:,}"
     )
 
     print("\n== folded holding lines whose footnote names a stock unit (measurement only) ==")

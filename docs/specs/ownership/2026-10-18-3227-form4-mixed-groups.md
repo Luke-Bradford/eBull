@@ -67,16 +67,18 @@ PYTHONPATH=. uv run python -m scripts.census_3227_form4_mixed_groups --examples 
   --show 0000051434-26-000058 --sample D:7:6 --sample I:11:6
 ```
 
-It was run at 2026-10-18 12:46Z, in one `REPEATABLE READ` snapshot, from the script as committed
+It was run at 2026-10-18 13:15Z, in one `REPEATABLE READ` snapshot, from the script as committed
 in this PR (base `62c834e6`, after the #3882 backfill). It reads the stored lines
 (`insider_form4_holdings`, `insider_transactions`, `insider_filers`), applies the Change
 section's rule, and compares the result with the stored current observation (`known_to IS NULL`)
 of the same accession, holder and nature.
 
-**Invariants the comparison relies on**, each checked by the script (and asserted 0):
-- 0 rows in `insider_transactions`, `insider_form4_holdings` or `insider_filers` have a CIK that
-  `btrim` would change. So grouping on the stored CIK equals grouping on the stripped one, in the
-  census and in the live writer, which groups on the raw CIK.
+**Invariants the comparison relies on**, each checked by the script and asserted 0:
+- 0 rows in `insider_transactions`, `insider_form4_holdings`, `insider_filers` or the `form4`
+  rows of `ownership_insiders_observations` have a CIK with leading or trailing whitespace of
+  any kind (PostgreSQL `\s`). So grouping on the stored CIK equals grouping on the stripped one,
+  in the census, in the observation comparison and in the live writer, which groups on the raw
+  CIK.
 - 0 `(instrument, accession, holder, nature)` keys have more than one current `form4`
   observation. So "today's observation" of a key is unique.
 - 0 `_current` winner keys hold shares different from their stored observation.
@@ -87,8 +89,11 @@ of the same accession, holder and nature.
 - The mixed holding lines are 12,796 `D` and 43,613 `I`. That matches the holding-row spec's
   12,796 and 43,612, with one more `I` line since its run.
 - 7 keys have no stored observation today. None of them sums.
-- 0 keys fall outside the weekly writer's Form 4 retention gate (manifest-first filing date):
-  #3882's backfill stored only in-retention holdings.
+- Tombstoned filings are not excluded (the weekly writer does not exclude them either); 0 mixed
+  units sit on a tombstoned filing.
+- 0 keys fall outside the weekly writer's Form 4 retention gate (manifest-first filing date, else
+  any `filing_events` date, as its join accepts): #3882's backfill stored only in-retention
+  holdings.
 - Of the mixed `I` lines, 7,078 share a normalised nature with a transacting form of the same
   filing (LGCY `0001493152-25-007246`: four "See Footnote" lines, one transacting); 36,535 do not.
 
@@ -122,6 +127,10 @@ of the same accession, holder and nature.
 - `_current` keys whose winner's value moves: **1,192 over 695 instruments**. Of these, 307 are
   `D` over 87 instruments and 885 are `I` over 631. The observation's `period_end` does not
   change, so no key changes winner here. The A/B, not this table, is the proof.
+- **Share-class siblings** (#1117) hold 56 further observations on `sums` keys, over 18
+  instruments, of which 6 are `_current` winners. The live writer fans each filing out to every
+  sibling (`insider_transactions.py:1734`); the weekly writer reads lines from the entity
+  instrument only and never rewrites them. The backfill therefore replays (Change 3).
 
 **Examples** (`--show`):
 - **SLSN** `I`: 49,043,149 → 49,718,664, which matches the 13D/A (above).
@@ -197,8 +206,8 @@ fix would be reverted by the weekly re-derivation (#3874).
      - (b) No transaction line opens at the non-zero balance of a line of another form, where a
        holding line is another form. A transaction that continues from a holding's amount means
        the holding is the same block before the transaction.
-     - (b′) No holding amount equals a non-zero column-5 balance on any transaction line of the
-       unit. This is #3882's guard (Instruction 4(b)(iv)), and it covers a holding that restates
+     - (b′) No non-zero holding amount equals a column-5 balance on any transaction line of the
+       unit. This adapts #3882's guard (Instruction 4(b)(iv)) and covers a holding that restates
        a transacting vehicle.
      - (c) As today, but over the **summed key's** transaction series: every `I` series for an
        `I` key, and the `D` series for a `D` key. The sources are unchanged: Form 4/4A
@@ -207,6 +216,11 @@ fix would be reverted by the weekly re-derivation (#3874).
        needs no history. When 5c is reached, a unit with no manifest time refuses.
   6. **No two non-zero final balances are equal** across all forms of the unit: the transaction
      series' finals and every holding line.
+
+  **Zeros are deliberately ignored in 5b, 5b′ and 6**, as today's `form4_observation_shares`
+  ignores them in 5b and 6: a zero term adds nothing to the sum, so a zero equal to another zero
+  is not a double count. #3882's holding-only guard counts zeros (two zero holdings refuse there);
+  the fold does not follow it, because the fold's arithmetic is the vehicle sum's.
 - **Value.** The sum over the summed key's forms: each transaction series' final balance
   (`txn_date DESC, txn_row_num DESC`), plus each of the key's holding lines.
 - **Refused.** The writer's own value for **that key** stands: for `I`, today's vehicle sum
@@ -247,8 +261,17 @@ transaction-only units. A `D` series is one form there, so it has nothing to sum
     eligible transaction line; a mixed key whose transaction lines are ineligible (null balance,
     invalid date) refuses at condition 2 and changes nothing.
 
-No schema change, no parser change, and no re-parse: the holding lines are already stored and
-backfilled (#3882).
+No schema change and no parser change: the holding lines are already stored and backfilled
+(#3882).
+
+### 3. Backfill
+
+1. Replay every accession with a mixed key through the production parse and upsert path, from
+   the stored `form4_xml` payload with no refetch, with the per-accession `_current` refresh off
+   (the shape of #3882's `ab_3227_form4_holding_rows --apply`). This is the only path that
+   rewrites the share-class siblings' observations.
+2. `sync_insiders` with no `since` and no `LIMIT`.
+3. The batch `_current` refresh over every touched instrument, siblings included.
 
 ### Unchanged
 
@@ -316,8 +339,9 @@ Corpus-change evidence per `.claude/CLAUDE.md`, recorded on the build PR with SH
      - 6, MXL's equal pairs;
      - 2, a transaction with no D/I and a value-only holding;
      - 5c on a `D` series;
-     - a guard that crosses D/I: an `I` holding equal to a `D` transaction balance refuses the
-       `D` key, and a `D` holding equal to an `I` series' final refuses the `I` key (6).
+     - guards that cross D/I: an `I` holding equal to a `D` transaction balance refuses the `D`
+       key (5b′), and a `D` holding equal to an `I` holding refuses both keys (6);
+     - zeros: a zero holding beside a zero transaction balance, and two zero holdings, both sum;
      Each keeps that key's own value today, including today's `I` vehicle sum; and a refused `D`
      key beside a summable `I` key keeps its latest `D` line;
    - a 4/A that repeats the base's transaction and carries one corrected holding;
@@ -332,6 +356,8 @@ Corpus-change evidence per `.claude/CLAUDE.md`, recorded on the build PR with SH
    - the helper's fold verdict equals the census's on every mixed key, and on every `sums` key
      the recomputed observation equals the census value **exactly** (Decimal); on every refused
      key it equals the stored value before the change;
+   - every observation's presence and every field other than `shares` (`period_end`, `filed_at`,
+     accession, holder, nature, URL) are equal before and after, on every key;
    - DERA `_current` winners dropped by de-collision clause 1: 0 new (every summed key already
      has an XML observation on its accession);
    - every 4/A `sums` key, listed beside its base's verdict and value;
@@ -345,9 +371,9 @@ Corpus-change evidence per `.claude/CLAUDE.md`, recorded on the build PR with SH
      CLBK, NRDY `0001628280-25-056431` (whether the trusts' lines include Rarefied Air's shares),
      and one 5b refusal. A `sums` example whose EDGAR text shows one line including another
      blocks the build until the rule is revised.
-5. **Backfill and verify.** Run `sync_insiders` with no `since` and no `LIMIT`, then the batch
-   `_current` refresh. Each of these must show 0 differences:
-   - every stored Form 4/4A observation against the writers' recompute;
+5. **Backfill and verify** (Change 3). Each of these must show 0 differences:
+   - every stored Form 4/4A observation against the writers' recompute, the 56 sibling
+     observations included (each equal to its entity's);
    - stored `_current` against a fresh refresh.
 6. **Live re-check:** `/instruments/SLSN/ownership-rollup`, where Whitmore's Form 4 total is
    49,826,805.
