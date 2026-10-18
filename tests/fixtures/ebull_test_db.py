@@ -382,6 +382,7 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "insider_transaction_footnotes",
     "insider_transactions",
     "insider_initial_holdings",
+    "insider_form4_holdings",
     "insider_filers",
     "insider_filings",
     "unresolved_13f_cusips",
