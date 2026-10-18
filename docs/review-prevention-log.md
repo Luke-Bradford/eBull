@@ -13161,11 +13161,11 @@ neighbouring container and match it.**
 
 ### A Form 4 derivation backfill must replay the live writer, or share-class siblings keep the old value (#3227, 2026-10-18)
 
-- Symptom: the #3227 mixed-groups spec first prescribed `sync_insiders` alone as the backfill. The live writer
-  (`upsert_filing`) fans every Form 4 observation out to each share-class sibling of the issuer
-  (the sibling loop in `upsert_filing`), but `derive_form4_observations` reads lines from the entity instrument only, so the
-  weekly re-derivation never rewrites a sibling's observation. 56 sibling observations (6 `_current` winners) sat on
-  keys whose value the change moves. Codex checkpoint 1, round 2.
+- Symptom: the #3227 mixed-groups spec first prescribed `sync_insiders` alone as the backfill. The live writer's
+  sibling loop in `upsert_filing` fans every Form 4 observation out to each share-class sibling of the issuer, but
+  `derive_form4_observations` reads lines from the entity instrument only, so the weekly re-derivation never
+  rewrites a sibling's observation. 56 sibling observations (6 `_current` winners) sat on keys whose value the
+  change moves. Codex checkpoint 1, round 2.
 - Prevention: when a change alters how a Form 4 observation's value is derived, the backfill replays the affected
   accessions through `upsert_filing` (stored payloads, `refresh_current=False`), then runs `sync_insiders`, then the
   batch `_current` refresh over every touched instrument, siblings included. The census and the A/B count sibling
