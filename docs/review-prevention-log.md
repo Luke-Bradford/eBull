@@ -13188,3 +13188,23 @@ neighbouring container and match it.**
   attested, and cross-holder dedup belongs to the rollup.
 - Enforced in: `scripts/ab_3227_form4_mixed_groups.py` (`_insider_view` returns the control-group collapse total;
   stage 1 prints every instrument whose collapse removes less).
+
+### A sum's components are only components if they add up to it; check that rather than re-deriving the writer (#3886, 2026-10-18)
+
+- Symptom: the read path needed the Table I lines behind a #3227 summed observation, and four writers decide a sum
+  under different verdicts (Form 3 line sum, vehicle sum, holding-only sum, mixed fold). Re-running each verdict in
+  the rollup would have been a fifth copy of the rules, free to drift from the writers.
+- Prevention: read every candidate line balance for the `(accession, filer, D/I)` and keep them as components only
+  when there are ≥ 2 and they sum to the stored `shares` exactly. The writers store a sum as exactly such terms, so
+  the check is self-validating, and a latest-line observation fails it and keeps none. Pick a series' final before
+  dropping zeros, or a series that ends at zero contributes its earlier balance.
+- ⚠ A pass that keeps a demoted row (subtracting a line) must not ask a release check written for passes that remove
+  it: `_select_control_group_rep` clause 4 treated the line member's other rows as stranded and kept the higher-CIK
+  spouse instead of the Table I `direct` holder on SMMT.
+- ⚠ Two SQL traps the tests and Codex checkpoint 2 caught. `bool_and` skips NULL, so a validity check over a nullable
+  column (`direct_indirect`) must `coalesce(..., FALSE)` or a NULL line passes. And the insider line tables are stored
+  under the filing's entity instrument while `_current` fans out to share-class siblings: join lines on accession and
+  filer, and never filter them on the `_current` row's `instrument_id`.
+- Enforced in: `app/services/ownership_rollup.py` (`_line_components`, `_INSIDER_LINE_COMPONENTS_SQL`,
+  `_reconcile_insider_line_components`); `tests/test_3886_line_component_collapse.py::test_the_attested_direct_holder_keeps_the_block`;
+  `tests/test_3886_line_component_collapse_db.py` (`a_null_di_unit_has_none`, `a_two_title_unit_has_none`).
