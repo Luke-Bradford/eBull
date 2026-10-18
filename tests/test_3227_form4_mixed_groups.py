@@ -42,6 +42,7 @@ class _H:
     nature_of_ownership: str | None = None
     security_title: str | None = "Common Stock"
     is_derivative: bool = False
+    holding_form_type: str | None = None
 
 
 def _txns(*specs: tuple[str | None, int | None, int | None, str | None, str | None]) -> list[_T]:
@@ -163,6 +164,7 @@ def test_a_holding_only_group_beside_a_mixed_key_is_left_to_its_own_writer() -> 
         signature_date=sig,
         period_of_report=sig,
         manifest_filed_at=datetime.combine(sig, time(21), tzinfo=UTC),
+        not_subject_to_section_16=None,
     )
     assert [(g.direct_indirect, g.verdict, g.shares) for g in groups] == [("D", "one_line", Decimal(108_141))]
 

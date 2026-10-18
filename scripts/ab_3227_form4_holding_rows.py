@@ -203,7 +203,10 @@ def _apply(conn: psycopg.Connection[Any]) -> int:
     return 1 if failed else 0
 
 
-def _verify(conn: psycopg.Connection[Any]) -> int:
+def _verify(conn: psycopg.Connection[Any], *, reverse_accessions: set[str] | None = None) -> int:
+    """Every recomputed observation equals its stored row; with ``reverse_accessions``, also every
+    stored XML observation of those accessions has a recompute (a stale extra fails). The reverse
+    check is scoped: an expired filing's stored observations are outside the weekly writer's reach."""
     stored = {(int(r[0]), r[1], r[2], r[3]): r[4] for r in conn.execute(_VERIFY_STORED).fetchall()}
     obs = list(derive_form4_observations(conn))
     diffs = [
@@ -217,6 +220,13 @@ def _verify(conn: psycopg.Connection[Any]) -> int:
     for o in diffs[:20]:
         k = (o.instrument_id, o.accession_number, o.holder_cik, o.ownership_nature)
         print(f"  {k} {o.kind}: stored {stored.get(k)}, recompute {o.shares}")
+    extra: list[tuple[Any, ...]] = []
+    if reverse_accessions is not None:
+        recomputed = {(o.instrument_id, o.accession_number, o.holder_cik, o.ownership_nature) for o in obs}
+        extra = sorted(k for k in stored if k[1] in reverse_accessions and k not in recomputed)
+        print(f"stored observations of {len(reverse_accessions):,} accessions with no recompute  {len(extra):>6,}")
+        for k in extra[:20]:
+            print(f"  {k}: stored {stored[k]}")
     ids = [
         int(r[0])
         for r in conn.execute(
@@ -232,7 +242,7 @@ def _verify(conn: psycopg.Connection[Any]) -> int:
         cur_diff += sum(1 for k in before.keys() | after.keys() if before.get(k) != after.get(k))
         conn.rollback()
     print(f"_current keys differing from a fresh refresh     {cur_diff:>10,}")
-    return 0 if not diffs and not cur_diff else 1
+    return 0 if not diffs and not extra and not cur_diff else 1
 
 
 def _stage01(conn: psycopg.Connection[Any]) -> dict[str, Any]:  # noqa: C901, PLR0912, PLR0915
@@ -275,6 +285,7 @@ def _stage01(conn: psycopg.Connection[Any]) -> dict[str, Any]:  # noqa: C901, PL
             signature_date=parsed.signature_date,
             period_of_report=parsed.period_of_report,
             manifest_filed_at=filed_at,
+            not_subject_to_section_16=parsed.not_subject_to_section_16,
         )
         rkey = (int(iid), parsed.issuer_cik)
         if rkey not in siblings_of:
@@ -371,9 +382,20 @@ def _stage01(conn: psycopg.Connection[Any]) -> dict[str, Any]:  # noqa: C901, PL
     return {"by_iid": dict(by_iid), "holding_rows": holding_rows, "evidence_iids": evidence_iids, "symbols": symbols}
 
 
-def _stage2(conn: psycopg.Connection[Any], data: dict[str, Any], ids: list[int]) -> dict[str, Any]:  # noqa: C901, PLR0912, PLR0915
+def _stage2(  # noqa: C901, PLR0912, PLR0915
+    conn: psycopg.Connection[Any],
+    data: dict[str, Any],
+    ids: list[int],
+    *,
+    insert_sql: LiteralString = _INSERT_HOLDING,
+    control_holdings_empty: bool = True,
+) -> dict[str, Any]:
     """Stage 2 over ``ids``, at READ COMMITTED: one transaction rolled back at the end, each arm a savepoint
-    (a REPEATABLE READ transaction this long fails on live jobs' concurrent ``_current`` updates)."""
+    (a REPEATABLE READ transaction this long fails on live jobs' concurrent ``_current`` updates).
+
+    ``insert_sql`` inserts ``data["holding_rows"]``; ``control_holdings_empty`` requires the holding
+    table empty before (the Form 4 build's control arm); ``data["gated_keys"]`` (optional) lists every
+    ``(instrument, holder, nature)`` key of a refused group whose ``_current`` row changes."""
     by_iid: dict[int, list[dict[str, Any]]] = data["by_iid"]
     holding_rows = [(*r[:-1], r[-1] if isinstance(r[-1], Jsonb) else Jsonb(r[-1])) for r in data["holding_rows"]]
     symbols: dict[int, str] = data["symbols"]
@@ -383,12 +405,13 @@ def _stage2(conn: psycopg.Connection[Any], data: dict[str, Any], ids: list[int])
     print("\n=== stage 2: _current, rollup, history (rolled back) ===")
     classes: Counter[str] = Counter()
     listing: dict[str, list[str]] = defaultdict(list)
+    gated_keys: set[tuple[int, str | None, str]] = set(data.get("gated_keys", ()))
     moved_total = up = down = newly = mismatch = hist_points = 0
     newly_rows: list[str] = []
     print(f"instruments in this run (holding observations or I holding lines)  {len(ids):,}")
     # sql/503 must already be applied (pre-push smoke applies it on dev); running it here would take
     # its table locks inside this long transaction, serialising concurrent shards.
-    if conn.execute("SELECT count(*) FROM insider_form4_holdings").fetchone() != (0,):
+    if control_holdings_empty and conn.execute("SELECT count(*) FROM insider_form4_holdings").fetchone() != (0,):
         raise SystemExit("insider_form4_holdings is not empty: the control arm would not be today's state")
 
     def _write(iid: int, group: list[dict[str, Any]]) -> None:
@@ -437,7 +460,7 @@ def _stage2(conn: psycopg.Connection[Any], data: dict[str, Any], ids: list[int])
         print(f"  control {i + len(batch):,} / {len(ids):,}", flush=True)
     print(f"control: stored _current keys differing from a fresh batch refresh  {stale:,}")
     with conn.cursor() as cur:
-        cur.executemany(_INSERT_HOLDING, holding_rows)
+        cur.executemany(insert_sql, holding_rows)
     print(f"  treatment: {len(holding_rows):,} holding rows inserted (rolled back at the end)", flush=True)
 
     # Treatment: the per-instrument refresher (the live writer's), then the batch refresher.
@@ -497,6 +520,10 @@ def _stage2(conn: psycopg.Connection[Any], data: dict[str, Any], ids: list[int])
             else:
                 cls = "changed: other"
             classes[cls] += 1
+            if (iid, key[1], key[2]) in gated_keys:
+                listing["gated key changed"].append(
+                    f"{sym} {key[1]} {key[2]}: {b and (b[3], b[9])} -> {a and (a[3], a[9])}"
+                )
             if not cls.startswith(("added (holding)", "changed: holding wins")):
                 listing[cls].append(f"{sym} {key[1]} {key[2]}: {b and (b[3], b[9])} -> {a and (a[3], a[9])}")
         if view_b[0] != view_a[0]:

@@ -1253,7 +1253,15 @@ _INSIDER_LINE_COMPONENTS_SQL: Final = """
         SELECT h.accession_number AS accession, h.filer_cik AS cik, h.direct_indirect AS di,
                h.security_title AS title, h.shares, FALSE AS form3
           FROM cur JOIN insider_form4_holdings h ON h.accession_number = cur.accession AND h.filer_cik = cur.cik
+          JOIN insider_filings f ON f.accession_number = h.accession_number
          WHERE NOT h.is_derivative
+           -- A Form 5 line the observation writers refuse (a 5/A, an exit-box filing, a delinquent
+           -- Form 3 line) is no evidence of a winning balance (#3227 Form 5 holdings, Change 2).
+           -- Every term is non-null, so a NULL document type or flag never drops a line.
+           AND NOT (f.document_type IS NOT DISTINCT FROM '5/A'
+                    OR (f.document_type IS NOT DISTINCT FROM '5'
+                        AND (coalesce(f.not_subject_to_section_16, FALSE)
+                             OR h.holding_form_type IS NOT DISTINCT FROM '3')))
         UNION ALL
         SELECT h.accession_number, h.filer_cik, h.direct_indirect, h.security_title, h.shares, TRUE
           FROM cur JOIN insider_initial_holdings h ON h.accession_number = cur.accession AND h.filer_cik = cur.cik

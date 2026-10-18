@@ -363,14 +363,15 @@ def _form4_state(conn: psycopg.Connection[Any], instrument_id: int) -> PipelineS
         )
         rows = cur.fetchone() or {"row_count": 0, "latest_period": None}
 
-        # #3227 — a holdings-only Form 4 is a live filing whose typed rows are in
-        # ``insider_form4_holdings``: count them too, so it never reads as a rewash candidate.
+        # #3227 — a holdings-only Form 4 or Form 5 is a live filing whose typed rows are in
+        # ``insider_form4_holdings``: count them too, over the transactions' document types, so it
+        # never reads as a rewash candidate.
         cur.execute(
             """
             SELECT COUNT(*) AS row_count, MAX(f.period_of_report) AS latest_period
             FROM insider_form4_holdings h
             JOIN insider_filings f ON f.accession_number = h.accession_number
-            WHERE f.document_type = '4'
+            WHERE f.document_type IN ('4', '5', '5/A')
               AND f.is_tombstone = FALSE
               AND EXISTS (
                   SELECT 1 FROM filing_events fe

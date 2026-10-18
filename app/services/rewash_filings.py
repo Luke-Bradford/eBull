@@ -435,7 +435,7 @@ def _apply_form5(
 
     Returns ``False`` when no existing ``insider_filings`` row is found (re-wash
     is not a first-time ingester). Raises :class:`RewashParseError` on parser
-    regression — for Form 5 that includes the holdings-only / wrong-document_type
+    regression — for Form 5 that includes the wrong-document_type and filer-less
     filings ``parse_form_5_xml`` returns ``None`` for, so the failure surfaces in
     ``rows_failed`` rather than silently in ``rows_skipped``."""
     from app.services.insider_transactions import parse_form_5_xml, upsert_filing
@@ -479,7 +479,7 @@ def _apply_form5(
 register_parser(
     ParserSpec(
         document_kind="form5_xml",
-        current_version="form5-v1",
+        current_version="form5-v2",
         apply_fn=_apply_form5,
     )
 )

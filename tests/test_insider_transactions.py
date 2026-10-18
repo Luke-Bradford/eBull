@@ -732,10 +732,9 @@ class TestParseForm5Xml:
     def test_form3_document_type_rejected(self) -> None:
         assert parse_form_5_xml(_wrap_form5(_FORM5_GIFT_TXN, document_type="3")) is None
 
-    def test_empty_transactions_returns_none(self) -> None:
-        # Form 5 with only a holdings reconciliation section — out of
-        # scope for this PR; parser returns None so manifest adapter
-        # tombstones.
+    def test_holdings_only_is_a_filing(self) -> None:
+        # #3227 — a Form 5 with only its year-end holding lines is a filing,
+        # its holdings parsed (tests/test_3227_form5_holdings.py).
         body = """
           <nonDerivativeTable>
             <nonDerivativeHolding>
@@ -749,7 +748,13 @@ class TestParseForm5Xml:
             </nonDerivativeHolding>
           </nonDerivativeTable>
         """
-        assert parse_form_5_xml(_wrap_form5(body)) is None
+        parsed = parse_form_5_xml(_wrap_form5(body))
+        assert parsed is not None
+        assert parsed.transactions == ()
+        assert [(h.shares, h.direct_indirect) for h in parsed.holdings] == [(Decimal("5000"), "D")]
+
+    def test_no_transactions_and_no_holdings_returns_none(self) -> None:
+        assert parse_form_5_xml(_wrap_form5("")) is None
 
     def test_malformed_xml_returns_none(self) -> None:
         assert parse_form_5_xml("<not actually xml") is None
