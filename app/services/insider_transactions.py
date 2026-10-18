@@ -2263,20 +2263,26 @@ def form4_title_match(titles: Iterable[str | None]) -> Form4TitleMatch | None:
     return lambda t: t is not None and form4_title_class(t) == key
 
 
-# Freezes the rule: every word list and pattern, and the source of both functions. A test pins it.
-FORM4_TITLE_CLASS_VERSION: Final = hashlib.sha256(
-    repr(
-        (
-            sorted(_TITLE_DROPPED_WORDS),
-            sorted(_TITLE_BASE_WORDS),
-            sorted(_TITLE_EQUITY_NOUNS),
-            *((r.pattern, r.flags) for r in (_TITLE_PAR, _TITLE_PLAN_ID, _TITLE_PROFIT_SHARING_PLAN)),
-            *((r.pattern, r.flags) for r in (_TITLE_CLASS_ID, _TITLE_TOKEN)),
-            inspect.getsource(form4_title_class),
-            inspect.getsource(form4_title_match),
-        )
-    ).encode()
-).hexdigest()[:12]
+# Freezes the rule. A literal, so importing never needs the source: the test asserts it equals
+# :func:`form4_title_class_fingerprint`, so any change to the rule must change this value.
+FORM4_TITLE_CLASS_VERSION: Final = "dfcd38a31f63"
+
+
+def form4_title_class_fingerprint() -> str:
+    """A hash of every word list, pattern and flag, and of both functions' source."""
+    return hashlib.sha256(
+        repr(
+            (
+                sorted(_TITLE_DROPPED_WORDS),
+                sorted(_TITLE_BASE_WORDS),
+                sorted(_TITLE_EQUITY_NOUNS),
+                *((r.pattern, r.flags) for r in (_TITLE_PAR, _TITLE_PLAN_ID, _TITLE_PROFIT_SHARING_PLAN)),
+                *((r.pattern, r.flags) for r in (_TITLE_CLASS_ID, _TITLE_TOKEN)),
+                inspect.getsource(form4_title_class),
+                inspect.getsource(form4_title_match),
+            )
+        ).encode()
+    ).hexdigest()[:12]
 
 
 def _form4_opening(line: Form4Line) -> Decimal | None:

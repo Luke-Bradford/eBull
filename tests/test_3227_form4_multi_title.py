@@ -20,6 +20,7 @@ from app.services.insider_transactions import (
     form4_holding_observations,
     form4_observation_shares,
     form4_title_class,
+    form4_title_class_fingerprint,
     form4_title_match,
 )
 from app.services.ownership_rollup import _summable_scope
@@ -29,7 +30,7 @@ _CIK = "0001"
 
 def test_rule_is_frozen() -> None:
     # The dropped words and both functions' source: a change re-runs the A/B and re-reads its title sets.
-    assert FORM4_TITLE_CLASS_VERSION == "dfcd38a31f63"
+    assert form4_title_class_fingerprint() == FORM4_TITLE_CLASS_VERSION
 
 
 # Title sets the A/B (scripts.ab_3227_form4_multi_title) unifies, as stored.
