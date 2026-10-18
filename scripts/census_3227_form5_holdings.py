@@ -315,35 +315,39 @@ def collect(
 
 
 def _compare(g: Group, cur_row: tuple[Any, ...] | None) -> str:
-    """The latest written group against the stored winner, by the winner order's keys."""
+    """The latest written group against the stored winner, by the winner order's keys: source rank,
+    then ``period_end`` DESC, then ``filed_at`` DESC, NULLS FIRST as PostgreSQL orders them."""
     if cur_row is None:
         return "new_key"
     assert g.period_end is not None
     source, _sdoc, cur_pend, cur_filed, cur_shares = cur_row
     new_rank, cur_rank = _SOURCE_RANK["form4"], _SOURCE_RANK.get(source, 10)
-    new_order = (g.period_end, g.filed_at)
-    cur_order = (cur_pend or date.min, cur_filed or datetime.min.replace(tzinfo=g.filed_at.tzinfo))
-    # PostgreSQL orders ``period_end DESC, filed_at DESC`` NULLS FIRST. This branch returns for every
-    # same-rank case where a NULL decides: a NULL ``period_end``, or a NULL ``filed_at`` at an equal
-    # ``period_end``. ``filed_at`` is compared only when the ``period_end``s are equal, so the
-    # ``datetime.min`` fallback above is never what orders a NULL.
-    if new_rank == cur_rank and (cur_pend is None or (cur_pend == g.period_end and cur_filed is None)):
-        return "loses_to_current_null_date"
-    if new_rank > cur_rank or (new_rank == cur_rank and new_order < cur_order):
+    if new_rank > cur_rank:
         return "loses_to_current"
-    if new_rank == cur_rank and new_order == cur_order:
-        return "ties_current"
-    if new_rank < cur_rank and cur_order > new_order:
-        return "wins_by_source_rank_over_later"
+    if new_rank == cur_rank:
+        # A NULL sorts first: a NULL ``period_end``, or a NULL ``filed_at`` at an equal one, wins.
+        if cur_pend is None or (cur_pend == g.period_end and cur_filed is None):
+            return "loses_to_current_null_date"
+        if (g.period_end, g.filed_at) < (cur_pend, cur_filed):
+            return "loses_to_current"
+        if (g.period_end, g.filed_at) == (cur_pend, cur_filed):
+            return "ties_current"
+    else:
+        later = cur_pend is not None and (
+            cur_pend > g.period_end or (cur_pend == g.period_end and cur_filed is not None and cur_filed > g.filed_at)
+        )
+        if later:
+            return "wins_by_source_rank_over_later"
     return "wins_same_value" if cur_shares == g.value else "wins_value_differs"
 
 
 def _fye_report(rows: list[tuple[Any, ...]]) -> None:
     print("\n== Item 3: periodOfReport vs instrument_sec_profile.fiscal_year_end (every form5_xml) ==")
     bands: Counter[str] = Counter()
+    no_filing_row = 0
     for por, fye, has_filing in rows:
-        if not has_filing:
-            bands["no insider_filings row"] += 1
+        # A linkage tally, not a band: a payload is counted here AND in its band below.
+        no_filing_row += not has_filing
         period = _date(por) if por else None
         if period is None:
             bands["no periodOfReport"] += 1
@@ -360,7 +364,8 @@ def _fye_report(rows: list[tuple[Any, ...]]) -> None:
             bands["1-7 days (52/53-week years)"] += 1
         else:
             bands[">7 days"] += 1
-    print(f"  payloads: {len(rows):,}")
+    print(f"  payloads: {len(rows):,} (bands below sum to this)")
+    print(f"  ... with no insider_filings row (also in a band): {no_filing_row:,}")
     for k, n in sorted(bands.items()):
         print(f"  {k}: {n:,}")
 
