@@ -1,6 +1,7 @@
 # #3227 — a Form 4's indirect observation sums its vehicles' balances
 
-Status: spec (2026-10-17). Residual of #3227 item 3 ("MNSO line-level supersession"), re-scoped
+Status: built (2026-10-18; `form4_observation_shares`, both writers, A/B
+`scripts/ab_3227_form4_vehicle_balance.py`). Residual of #3227 item 3 ("MNSO line-level supersession"), re-scoped
 by measurement. Rung: corpus change; this document is the judgement artefact (Codex checkpoint 1).
 
 ## Problem

@@ -13123,6 +13123,12 @@ neighbouring container and match it.**
   re-run and split one bucket in two ("8,835 same-form" became 7,304 + 1,419 = 8,723). After every census re-run,
   re-derive each quoted count by re-adding its components from the new output, and grep the spec for every number
   that came from the old output.
-- Enforced in: nothing mechanical yet. The rule lives in
-  `docs/specs/ownership/2026-10-17-3227-form4-vehicle-balance.md` and is measured by
-  `scripts/census_3227_form4_vehicle_balance.py`. The helper and tests that enforce it land with the build PR.
+- Null-safe sort keys (review bot, PR #3879): replacing an SQL `ORDER BY … NULLS LAST` with a Python tuple
+  comparison raises `TypeError` on the first NULL. Grep the column's DDL before porting the order: here
+  `insider_transactions.txn_date` is `NOT NULL` (`sql/056_insider_transactions.sql`), so the plain tuple is exact; a
+  nullable column needs an explicit `(x is not None, x or date.min)` key.
+- Enforced in: `app/services/insider_transactions.py::form4_observation_shares`, called by both writers
+  (`_record_form4_observations_for_filing`, `ownership_observations_sync.derive_form4_observations`);
+  `tests/test_3227_form4_vehicle_balance.py` (one test per condition, both directions) and
+  `tests/test_3227_form4_vehicle_balance_db.py`; full-population parity with the census in
+  `scripts/ab_3227_form4_vehicle_balance.py`.
