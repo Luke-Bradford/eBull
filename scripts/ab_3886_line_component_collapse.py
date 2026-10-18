@@ -31,6 +31,7 @@ from typing import Any, Final
 import psycopg
 
 from app.config import settings
+from app.db.snapshot import snapshot_read
 from app.services import ownership_rollup as rollup
 
 _POPULATION_SQL: Final = """
@@ -70,7 +71,8 @@ def _identity(
 
 
 def _view(conn: psycopg.Connection[Any], symbol: str, iid: int) -> dict[str, Any]:
-    r = rollup.get_ownership_rollup(conn, symbol, iid)
+    with snapshot_read(conn):
+        r = rollup.get_ownership_rollup(conn, symbol, iid)
     insiders = next((s.total_shares for s in r.slices if s.category == "insiders"), Decimal(0))
     pie = sum((s.total_shares for s in r.slices if s.denominator_basis == "pie_wedge"), Decimal(0))
     by_kind: dict[str, Decimal] = defaultdict(Decimal)
