@@ -38,9 +38,10 @@ import argparse
 import sys
 import time
 from collections import Counter, defaultdict
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Final, LiteralString
+from typing import Any, Final, LiteralString, Protocol
 
 import psycopg
 
@@ -117,6 +118,19 @@ def _stored(conn: psycopg.Connection[Any], accs: list[str] | None = None) -> dic
     for r in rows:
         out[(int(r[0]), r[1], r[2], r[3])] = tuple(r[4:])
     return out
+
+
+class CohortUnit(Protocol):
+    """What stage 1, ``--apply`` and ``--verify`` read of a cohort key (``census.Result`` has both)."""
+
+    @property
+    def instrument_id(self) -> int: ...
+    @property
+    def accession(self) -> str: ...
+
+
+# A cohort: its keys and its sorted accessions. ``scripts.ab_3227_form4_multi_title`` passes its own.
+Cohort = Callable[[psycopg.Connection[Any]], tuple[Sequence[CohortUnit], list[str]]]
 
 
 def _cohort(conn: psycopg.Connection[Any]) -> tuple[list[census.Result], list[str]]:
@@ -258,7 +272,7 @@ def _stage0(conn: psycopg.Connection[Any]) -> list[census.Result]:  # noqa: C901
     return results
 
 
-def _stage1(conn: psycopg.Connection[Any], results: list[census.Result]) -> None:  # noqa: C901, PLR0912, PLR0915
+def _stage1(conn: psycopg.Connection[Any], results: Sequence[CohortUnit]) -> None:  # noqa: C901, PLR0912, PLR0915
     accs = sorted({r.accession for r in results})
     print("\n=== stage 1: live-writer replay, _current, rollup, history (rolled back) ===")
     before = _stored(conn, accs)
@@ -412,8 +426,8 @@ def _stage1_before(
     print(f"replay failures {failed:,}")
 
 
-def _apply(conn: psycopg.Connection[Any]) -> int:
-    _results, accs = _cohort(conn)
+def _apply(conn: psycopg.Connection[Any], cohort: Cohort | None = None) -> int:
+    _results, accs = (cohort or _cohort)(conn)
     rows = _payloads(conn, accs)
     conn.commit()
     print(f"cohort accessions {len(accs):,}; with a form4_xml payload {len(rows):,}")
@@ -436,8 +450,8 @@ def _apply(conn: psycopg.Connection[Any]) -> int:
     return 1 if failed else 0
 
 
-def _verify(conn: psycopg.Connection[Any]) -> int:
-    results, accs = _cohort(conn)
+def _verify(conn: psycopg.Connection[Any], cohort: Cohort | None = None) -> int:
+    results, accs = (cohort or _cohort)(conn)
     stored = _stored(conn)
     obs = list(derive_form4_observations(conn))
     diffs = [

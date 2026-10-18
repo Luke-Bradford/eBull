@@ -13208,3 +13208,25 @@ neighbouring container and match it.**
 - Enforced in: `app/services/ownership_rollup.py` (`_line_components`, `_INSIDER_LINE_COMPONENTS_SQL`,
   `_reconcile_insider_line_components`); `tests/test_3886_line_component_collapse.py::test_the_attested_direct_holder_keeps_the_block`;
   `tests/test_3886_line_component_collapse_db.py` (`a_null_di_unit_has_none`, `a_two_title_unit_has_none`).
+
+### A free-text classifier that decides two lines are "the same" must be a whitelist, read against every set it unifies (#3227 multi-title, 2026-10-18)
+
+- Symptom: the first draft of `form4_title_class` (Form 4 Table I title → class) dropped parentheticals and refused
+  only on a blacklist of unit/preferred words. The full-population A/B summed Bio-Rad's Class A and Class B ("Bio-Rad
+  A Common Stock": the class letter has no "class" word), common with "Preference shares", and deferred stock-unit
+  accounts ("(SUA)", "Def. Stock Comp Plan"). Codex checkpoint 1 then constructed a dozen more collisions
+  ("Prfd Stock", "(A)/(B)", "II/III", "No Voting Rights", "Series 1/2, $0.01 par", "A convertible into B" reversed).
+- Prevention: when a text rule decides that two things are the same, build it as a whitelist. Drop only words known
+  to say nothing about identity (here: the equity noun, par-value phrases removed whole, plan, custody and ownership
+  wording). Keep every other word, in order, so an unexplained word refuses. A blacklist treats every word it has
+  not seen as irrelevant. Then print **every** set the rule unifies, not the top N: rare sets are where collisions
+  live. Hash the whole rule (word lists, patterns and the function source) so a behaviour change cannot pass the
+  pin.
+- ⚠ A read path that re-derives a writer's eligibility (here `_INSIDER_LINE_COMPONENTS_SQL`'s `count(DISTINCT title)
+  = 1`) must change with it. Otherwise the new sums lose their components and the rollup's control-group collapse
+  silently stops matching them (#3886's failure mode). Return the inputs (the titles) and apply the writer's own
+  function.
+- Enforced in: `app/services/insider_transactions.py` (`form4_title_class`, `form4_title_match`,
+  `FORM4_TITLE_CLASS_VERSION`); `app/services/ownership_rollup.py` (`_summable_scope`);
+  `tests/test_3227_form4_multi_title.py` (`_REFUSE`); `scripts/ab_3227_form4_multi_title.py` (prints every unified
+  title set).

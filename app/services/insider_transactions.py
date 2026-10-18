@@ -36,9 +36,12 @@ tombstoned filings via JOIN filter.
 
 from __future__ import annotations
 
+import hashlib
+import inspect
 import json
 import logging
 import re
+import unicodedata
 import xml.etree.ElementTree as ET  # noqa: S405 — Form 4 source is SEC EDGAR, trusted.
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
@@ -2058,8 +2061,9 @@ def form4_holding_observations(
         unreadable amount), so the group's share total is unknown;
       * ``one_line`` — its shares;
       * ``summed`` — several lines, summed when ``form3_observation_shares``'s conditions hold (one
-        owner, every line >= 0, one non-blank title, no two equal amounts among the filer's
-        holding lines of that title, D and I together) and no amount of the group equals a
+        owner, every line >= 0, one non-blank title or several naming one class
+        (:func:`form4_title_match`, which then decides "that title" below), no two equal amounts
+        among the filer's holding lines of that title, D and I together) and no amount of the group equals a
         column-5 balance of a transaction line of that title — a Form 4 carries balances on
         transaction rows, and a holding equal to one may be the same block restated (Instruction
         4(b)(iv));
@@ -2075,14 +2079,12 @@ def form4_holding_observations(
     lines = [h for h in holdings if not h.is_derivative]
     txns = [t for t in transactions if not t.is_derivative]
     covered = {"I" if t.direct_indirect == "I" else "D" for t in txns}
-    holding_amounts: dict[str, list[Decimal]] = {}
-    for h in lines:
-        if h.shares is not None:
-            holding_amounts.setdefault((h.security_title or "").strip(), []).append(h.shares)
-    txn_balances: dict[str, set[Decimal]] = {}
-    for t in txns:
-        if t.post_transaction_shares is not None:
-            txn_balances.setdefault((t.security_title or "").strip(), set()).add(t.post_transaction_shares)
+    holding_amounts = [((h.security_title or "").strip(), h.shares) for h in lines if h.shares is not None]
+    txn_balances = [
+        ((t.security_title or "").strip(), t.post_transaction_shares)
+        for t in txns
+        if t.post_transaction_shares is not None
+    ]
     owner_count = len({(c or "").strip() for c in owner_ciks})
     period_end = form4_holding_as_of(signature_date, period_of_report, filed)
 
@@ -2103,8 +2105,8 @@ def form4_holding_observations(
 
 def _form4_holding_verdict(
     group: list[Form4HoldingLine],
-    holding_amounts: dict[str, list[Decimal]],
-    txn_balances: dict[str, set[Decimal]],
+    holding_amounts: list[tuple[str, Decimal]],
+    txn_balances: list[tuple[str, Decimal]],
     owner_count: int,
 ) -> str:
     if any(h.shares is None for h in group):
@@ -2117,15 +2119,15 @@ def _form4_holding_verdict(
     if any(s < 0 for s in amounts):
         return "refused:negative"
     titles = {(h.security_title or "").strip() for h in group}
-    if len(titles) != 1:
+    same_title = form4_title_match(titles)
+    if same_title is None:
         return "refused:multi_title"
-    title = next(iter(titles))
-    if not title:
+    if titles == {""}:
         return "refused:blank_title"
-    same_title = holding_amounts.get(title, [])
-    if len(set(same_title)) != len(same_title):
+    same = [a for t, a in holding_amounts if same_title(t)]
+    if len(set(same)) != len(same):
         return "refused:equal_amounts"
-    if set(amounts) & txn_balances.get(title, set()):
+    if set(amounts) & {b for t, b in txn_balances if same_title(t)}:
         return "refused:equal_to_transaction_balance"
     return "summed"
 
@@ -2173,6 +2175,110 @@ def form4_form_key(direct_indirect: str | None, nature_of_ownership: str | None)
     return ("I", re.sub(r"[^a-zA-Z0-9]", "", nature_of_ownership or "").lower())
 
 
+# #3227 multi-title — a Table I security title's class, a rule fixed by construction (spec
+# ``docs/specs/ownership/2026-10-18-3227-form4-multi-title.md``). Form 4 General Instruction 3(b):
+# "The title of the security should clearly identify the class". ``<securityTitle>`` is free text
+# and a line carries no CUSIP or class code, so the class is the title's own words, minus only the
+# words below, which say where or how a share of the class is held, never which class it is. Any
+# other word stays in the key, so a title this list does not explain never matches another.
+_TITLE_DROPPED_WORDS: Final = frozenset(
+    {
+        # the generic noun of an equity title ("Common Shares" is "Common Stock")
+        *("stock", "stocks", "share", "shares"),
+        # vesting state of shares of the class ("units" stays; "restricted" stays beside "voting")
+        *("restricted", "unvested", "vested"),
+        # plan, account and custody wrappers named in the title
+        *("plan:401", "ira", "roth", "sep", "esop", "espp", "sip", "psp", "drp", "drip", "savings", "retirement"),
+        *("plan", "book", "entry", "street", "name", "direct", "indirect", "account"),
+        # ownership wording ("Held by Spouse", "Jointly Owned", the defined term "the")
+        *("by", "held", "in", "with", "of", "the", "and", "spouse", "joint", "jointly", "owned"),
+    }
+)
+_TITLE_BASE_WORDS: Final = frozenset({"common", "ordinary", "capital"})
+_TITLE_EQUITY_NOUNS: Final = frozenset({"stock", "stocks", "share", "shares"})
+# A par-value phrase as a whole, its amount included: "$.10 par value", "par value $0.01 per share",
+# "no par value". Numbers and "no"/"without" elsewhere in the title stay.
+_TITLE_PAR: Final = re.compile(
+    r"(?:\$\s*[\d.,/-]*\d[\d.,/-]*\s*)?(?:(?:no|without)\s+)?par\s+valu?e?\b(?:\s+of)?"
+    r"(?:\s*\$\s*[\d.,/-]*\d[\d.,/-]*)?(?:\s+per\s+(?:share|shares|shre))?"
+)
+# "401(k)", "401k", "401-K", "(401)k", "403(b)": a plan, so its letter is not read as a class. Never
+# after "class"/"series" (an identifier) or inside an extracted ``class:`` word.
+_TITLE_PLAN_ID: Final = re.compile(r"(?<!:)(?<!class )(?<!series )\b40[13][\s()\-]*[kb]\b")
+_TITLE_PROFIT_SHARING_PLAN: Final = re.compile(r"\bprofit\W+sharing\W+plan\b")
+_TITLE_CLASS_ID: Final = re.compile(r"\bclass\s+(\w+(?:[-.–/]\w+)*)")
+# A word, with any digits joined to it by "-", ".", "/" or a dash kept in it ("a-1", "1/2", "6.6").
+_TITLE_TOKEN: Final = re.compile(r"(?:class|plan):[\w.–/-]+|\w+(?:[-.–/]\d+)*")
+
+
+def form4_title_class(title: str | None) -> tuple[str, ...] | None:
+    """The class a Table I ``security_title`` is read as, as its ordered words, or ``None``.
+
+    NFC-normalised and lower-cased; a par-value phrase is removed whole (its trailing amount only
+    with a "$"); "401(k)"-style plan names become one dropped
+    word and "class X-1" the one word ``class:x-1`` (punctuation kept, so ``x-1`` is not ``x1``);
+    "profit sharing plan" is a plan; then the title's words in order (a base word once, any other
+    repeat kept), without :data:`_TITLE_DROPPED_WORDS` ("restricted"
+    is kept when the title says "voting": Canadian restricted voting shares are a class). ``None``
+    when no equity noun or base word (common, ordinary, capital) appears. A title whose only base
+    is its equity noun ("Restricted Stock") reads as ``common``. "Common Stock, $.10 par value (SIP)"
+    and "Restricted Shares of Common Stock" are ``("common",)``; "Class A Common Stock - Retirement
+    Plan" is ``("class:a", "common")``; "Common Stock (SUA)", "Prfd Stock", "Commom Stock" and
+    "2024 Annual Restricted Stock Units" each keep a word ``("common",)`` lacks.
+    """
+    text = _TITLE_PAR.sub(" ", unicodedata.normalize("NFC", title or "").lower())
+    text = _TITLE_CLASS_ID.sub(lambda m: " class:" + m.group(1) + " ", text)
+    text = _TITLE_PLAN_ID.sub(" plan:401 ", text)
+    text = _TITLE_PROFIT_SHARING_PLAN.sub(" plan ", text)
+    tokens = _TITLE_TOKEN.findall(text)
+    if not any(t in _TITLE_EQUITY_NOUNS or t in _TITLE_BASE_WORDS for t in tokens):
+        return None
+    keep_restricted = "voting" in tokens
+    kept = [t for t in tokens if t not in _TITLE_DROPPED_WORDS or (keep_restricted and t == "restricted")]
+    if not set(kept) & _TITLE_BASE_WORDS:
+        kept.append("common")
+    # A base word once ("Common Stock, par value $.01 (the "Common Stock")"); any other repeat stays.
+    first_base = [t not in _TITLE_BASE_WORDS or kept.index(t) == i for i, t in enumerate(kept)]
+    return tuple(t for t, keep in zip(kept, first_base, strict=True) if keep)
+
+
+Form4TitleMatch = Callable[[str | None], bool]
+
+
+def form4_title_match(titles: Iterable[str | None]) -> Form4TitleMatch | None:
+    """Condition 3's "one security title" test for a unit's titles, or ``None`` when it refuses.
+
+    One distinct title: the test is equality with it — exactly the rule before this function, so
+    a single-title unit's verdict cannot change. Several: each must have a :func:`form4_title_class`
+    and all the same one; the test is then class equality, so "same title" in the unit's other
+    conditions and in 5c's earlier balances means "same class"."""
+    distinct = set(titles)
+    if len(distinct) == 1:
+        only = next(iter(distinct))
+        return lambda t: t == only
+    classes = {form4_title_class(t) for t in distinct}
+    if len(classes) != 1 or None in classes:
+        return None
+    key = next(iter(classes))
+    return lambda t: t is not None and form4_title_class(t) == key
+
+
+# Freezes the rule: every word list and pattern, and the source of both functions. A test pins it.
+FORM4_TITLE_CLASS_VERSION: Final = hashlib.sha256(
+    repr(
+        (
+            sorted(_TITLE_DROPPED_WORDS),
+            sorted(_TITLE_BASE_WORDS),
+            sorted(_TITLE_EQUITY_NOUNS),
+            *((r.pattern, r.flags) for r in (_TITLE_PAR, _TITLE_PLAN_ID, _TITLE_PROFIT_SHARING_PLAN)),
+            *((r.pattern, r.flags) for r in (_TITLE_CLASS_ID, _TITLE_TOKEN)),
+            inspect.getsource(form4_title_class),
+            inspect.getsource(form4_title_match),
+        )
+    ).encode()
+).hexdigest()[:12]
+
+
 def _form4_opening(line: Form4Line) -> Decimal | None:
     """Column 5 before the line's own transaction: ``post - signed shares`` (``A`` adds)."""
     post, shares = line.post_transaction_shares, line.shares
@@ -2208,7 +2314,7 @@ def form4_observation_shares(
     document_type: str | None,
     filer_cik: str | None,
     owner_ciks: Iterable[str | None],
-    earlier_balances: Callable[[str], Iterable[tuple[str | None, str | None, Decimal]] | None],
+    earlier_balances: Callable[[Form4TitleMatch], Iterable[tuple[str | None, str | None, Decimal]] | None],
 ) -> tuple[str, Decimal | None]:
     """Whether ONE filer's ``I`` observation of ONE Form 4 is the sum of its vehicles' balances.
 
@@ -2230,7 +2336,8 @@ def form4_observation_shares(
     2. every line usable: balance, shares and opening (``post - signed shares``) non-null and
        >= 0, an ``A``/``D`` code, a valid date, ``D``/``I``, a non-blank title and, for ``I``, a
        non-blank nature;
-    3. one security title, exact match — classes never sum;
+    3. one security title, or several naming one class (:func:`form4_title_match`) — classes
+       never sum;
     4. the filing's reporting owners are exactly this filer — the parser gives every line to one
        owner, so a joint filing could credit one co-filer with the others' vehicles;
     5. (a) within each form, each line (by ``txn_row_num``) opens at the previous line's balance;
@@ -2252,8 +2359,8 @@ def form4_observation_shares(
         return "1 one_form", None
     if not all(_form4_line_usable(ln) for ln in unit):
         return "2 incomplete", None
-    titles = {ln.security_title for ln in unit}
-    if len(titles) != 1:
+    same_title = form4_title_match(ln.security_title for ln in unit)
+    if same_title is None:
         return "3 multi_title", None
     if {(c or "").strip() for c in owner_ciks} != {filer_cik}:
         return "4 joint_or_owner_mismatch", None
@@ -2278,7 +2385,7 @@ def form4_observation_shares(
 
     firsts = {form: _form4_opening(fl[0]) for form, fl in by_form.items() if form[0] == "I"}
     if any(o != 0 for o in firsts.values()):
-        history = earlier_balances(next(iter(titles)) or "")
+        history = earlier_balances(same_title)
         if history is None:
             return "5c running_total_across_filings", None
         seen = {(form4_form_key(di, nature), bal) for di, nature, bal in history}
@@ -2334,7 +2441,7 @@ def form4_fold_shares(
     document_type: str | None,
     filer_cik: str | None,
     owner_ciks: Iterable[str | None],
-    earlier_balances: Callable[[str], Iterable[tuple[str | None, str | None, Decimal]] | None],
+    earlier_balances: Callable[[Form4TitleMatch], Iterable[tuple[str | None, str | None, Decimal]] | None],
 ) -> tuple[str, Decimal | None]:
     """Whether ONE filer's ``direct_indirect`` observation of ONE Form 4 folds in its holding lines.
 
@@ -2369,7 +2476,8 @@ def form4_fold_shares(
         return FORM4_FOLD_NOT_MIXED, None
     if not all(_form4_line_usable(t) for t in txns) or not all(_form4_holding_usable(h) for h in held):
         return "2 incomplete", None
-    if len({t.security_title for t in txns} | {h.security_title for h in held}) != 1:
+    same_title = form4_title_match([*(t.security_title for t in txns), *(h.security_title for h in held)])
+    if same_title is None:
         return "3 multi_title", None
     if {(c or "").strip() for c in owner_ciks} != {filer_cik}:
         return "4 joint_or_owner_mismatch", None
@@ -2403,7 +2511,7 @@ def form4_fold_shares(
     summed = [f for f in by_form if (f[0] == "I") == (direct_indirect == "I")]
     firsts = {f: _form4_opening(by_form[f][0]) for f in summed}
     if any(o != 0 for o in firsts.values()):
-        history = earlier_balances(txns[0].security_title or "")
+        history = earlier_balances(same_title)
         if history is None:
             return "5c running_total_across_filings", None
         seen = {(form4_form_key(di, nature), bal) for di, nature, bal in history}
@@ -2429,21 +2537,22 @@ def form4_fold_shares(
 # Condition 5c's sources (spec): the filer's balances on the instrument, of the unit's title, in
 # filings with a manifest time strictly earlier than this accession's — non-derivative,
 # non-tombstoned Form 4/4A transaction lines and Form 3/3A holding lines, D or I.
+# The title is matched in Python (``form4_title_match``), so the query returns every title.
 _FORM4_EARLIER_BALANCES_SQL: Final = """
-SELECT t.direct_indirect, t.nature_of_ownership, t.post_transaction_shares
+SELECT t.security_title, t.direct_indirect, t.nature_of_ownership, t.post_transaction_shares
   FROM insider_transactions t
   JOIN insider_filings f ON f.accession_number = t.accession_number
   JOIN sec_filing_manifest m ON m.accession_number = t.accession_number
- WHERE t.instrument_id = %(iid)s AND t.filer_cik = %(cik)s AND t.security_title = %(title)s
+ WHERE t.instrument_id = %(iid)s AND t.filer_cik = %(cik)s
    AND NOT t.is_derivative AND f.document_type IN ('4', '4/A') AND NOT f.is_tombstone
    AND t.direct_indirect IN ('D', 'I') AND t.post_transaction_shares IS NOT NULL
    AND m.filed_at < %(filed_at)s
 UNION ALL
-SELECT h.direct_indirect, h.nature_of_ownership, h.shares
+SELECT h.security_title, h.direct_indirect, h.nature_of_ownership, h.shares
   FROM insider_initial_holdings h
   JOIN insider_filings f ON f.accession_number = h.accession_number
   JOIN sec_filing_manifest m ON m.accession_number = h.accession_number
- WHERE h.instrument_id = %(iid)s AND h.filer_cik = %(cik)s AND h.security_title = %(title)s
+ WHERE h.instrument_id = %(iid)s AND h.filer_cik = %(cik)s
    AND NOT h.is_derivative AND f.document_type IN ('3', '3/A') AND NOT f.is_tombstone
    AND h.direct_indirect IN ('D', 'I') AND h.shares IS NOT NULL
    AND m.filed_at < %(filed_at)s
@@ -2452,7 +2561,7 @@ SELECT h.direct_indirect, h.nature_of_ownership, h.shares
 
 def form4_earlier_balances(
     conn: psycopg.Connection[Any],
-    title: str,
+    title: str | Form4TitleMatch,
     *,
     instrument_id: int,
     accession_number: str,
@@ -2460,6 +2569,7 @@ def form4_earlier_balances(
 ) -> list[tuple[str | None, str | None, Decimal]] | None:
     """``(direct_indirect, nature, balance)`` for condition 5c of :func:`form4_observation_shares`,
     or ``None`` when the accession has no ``sec_filing_manifest.filed_at`` to compare against.
+    ``title`` is the unit's :func:`form4_title_match` test, or one exact title.
 
     The CIK matches the stored column exactly, so the ``(instrument_id, filer_cik)`` indexes serve
     it; the parser writes CIKs stripped (``_text``)."""
@@ -2470,9 +2580,10 @@ def form4_earlier_balances(
             return None
         cur.execute(
             _FORM4_EARLIER_BALANCES_SQL,
-            {"iid": instrument_id, "cik": filer_cik, "title": title, "filed_at": row[0]},
+            {"iid": instrument_id, "cik": filer_cik, "filed_at": row[0]},
         )
-        return [(r[0], r[1], Decimal(r[2])) for r in cur.fetchall()]
+        match = title if callable(title) else (lambda t: t == title)
+        return [(r[1], r[2], Decimal(r[3])) for r in cur.fetchall() if match(r[0])]
 
 
 def filer_role_string(filer: ParsedFiler) -> str | None:

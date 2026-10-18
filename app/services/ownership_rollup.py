@@ -49,7 +49,7 @@ import psycopg
 import psycopg.rows
 
 from app.services.holder_name_resolver import resolve_holder_to_filer
-from app.services.insider_transactions import form4_retention_cutoff
+from app.services.insider_transactions import form4_retention_cutoff, form4_title_match
 from app.services.institutional_families import (
     InstitutionalFamily,
     resolve_family,
@@ -1223,8 +1223,9 @@ _INSIDER_JOINT_DIRECT_LINES_SQL: Final = """
 # :func:`app.services.insider_transactions.form4_form_key`; final by ``(txn_date, txn_row_num)``
 # as the writers take it, chosen before zeros are dropped so a series ending at zero adds nothing)
 # and ``H`` for a Form 4 or Form 3 holding line. Each row carries whether the scope a writer would
-# have summed it in is summable — every line ``D``/``I`` with a non-blank title, one title
-# (``form4_fold_shares`` conditions 2 and 3, ``form3_observation_shares``):
+# have summed it in is summable — every line ``D``/``I`` with a non-blank title, and one title or
+# several naming one class, which the caller tests in Python as the writers do (``form4_title_match``,
+# #3227 multi-title; ``form4_fold_shares`` conditions 2 and 3, ``form3_observation_shares``):
 #   * ``kind_ok`` — for ``T``, the filer's transaction lines in the accession (the ``I`` vehicle
 #     sum's unit); for ``H``, the filer's holding lines of that D/I (the Form 3 line sum and the
 #     holding-only sum);
@@ -1250,22 +1251,22 @@ _INSIDER_LINE_COMPONENTS_SQL: Final = """
          WHERE NOT t.is_derivative
     ), hold AS (
         SELECT h.accession_number AS accession, h.filer_cik AS cik, h.direct_indirect AS di,
-               h.security_title AS title, h.shares
+               h.security_title AS title, h.shares, FALSE AS form3
           FROM cur JOIN insider_form4_holdings h ON h.accession_number = cur.accession AND h.filer_cik = cur.cik
          WHERE NOT h.is_derivative
         UNION ALL
-        SELECT h.accession_number, h.filer_cik, h.direct_indirect, h.security_title, h.shares
+        SELECT h.accession_number, h.filer_cik, h.direct_indirect, h.security_title, h.shares, TRUE
           FROM cur JOIN insider_initial_holdings h ON h.accession_number = cur.accession AND h.filer_cik = cur.cik
          WHERE NOT h.is_derivative
     ), lines AS (
-        SELECT accession, cik, di, title, 'T' AS kind FROM txn
+        SELECT accession, cik, di, title, 'T' AS kind, FALSE AS form3 FROM txn
         UNION ALL
-        SELECT accession, cik, di, title, 'H' FROM hold
+        SELECT accession, cik, di, title, 'H', form3 FROM hold
     ), scope AS (
         -- coalesce: ``bool_and`` skips NULL, and a NULL D/I is exactly a line no writer sums.
         SELECT accession, cik, kind, CASE WHEN kind = 'H' THEN di END AS di,
-               bool_and(coalesce(di IN ('D', 'I'), FALSE) AND btrim(coalesce(title, '')) <> '')
-                   AND count(DISTINCT title) = 1 AS ok
+               bool_and(coalesce(di IN ('D', 'I'), FALSE) AND btrim(coalesce(title, '')) <> '') AS lines_ok,
+               array_agg(DISTINCT title) AS titles, bool_or(form3) AS form3
           FROM lines
          GROUP BY GROUPING SETS ((accession, cik), (accession, cik, kind, CASE WHEN kind = 'H' THEN di END))
     ), finals AS (
@@ -1284,7 +1285,8 @@ _INSIDER_LINE_COMPONENTS_SQL: Final = """
         SELECT accession, cik, di, 'H', shares FROM hold WHERE di IN ('D', 'I')
     )
     SELECT x.accession, x.cik, x.di, x.kind, x.shares,
-           coalesce(k.ok, FALSE) AS kind_ok, coalesce(u.ok, FALSE) AS unit_ok
+           coalesce(k.lines_ok, FALSE) AS kind_lines_ok, k.titles AS kind_titles, k.form3 AS kind_form3,
+           coalesce(u.lines_ok, FALSE) AS unit_lines_ok, u.titles AS unit_titles, u.form3 AS unit_form3
       FROM terms x
       LEFT JOIN scope k ON k.accession = x.accession AND k.cik = x.cik AND k.kind = x.kind
                        AND k.di IS NOT DISTINCT FROM (CASE WHEN x.kind = 'H' THEN x.di END)
@@ -1293,6 +1295,21 @@ _INSIDER_LINE_COMPONENTS_SQL: Final = """
 """
 
 _TABLE_I_CODE_BY_NATURE: Final[Mapping[str, str]] = {"direct": "D", "indirect": "I"}
+
+
+def _summable_scope(lines_ok: bool, titles: Sequence[str | None] | None, *, form3: bool | None, holdings: bool) -> bool:
+    """A line scope a writer could have summed: every line usable, and the writer's title test.
+
+    A Form 3 scope keeps exact matching (``form3_observation_shares``: one title). A Form 4 scope
+    takes ``form4_title_match`` (one title, or several naming one class, #3227 multi-title), over
+    stripped titles for a holding group as ``form4_holding_observations`` strips them."""
+    if not lines_ok or titles is None:
+        return False
+    if form3:
+        return len(set(titles)) == 1
+    if holdings:
+        titles = [(t or "").strip() for t in titles]
+    return form4_title_match(titles) is not None
 
 
 def _line_components(lines: Sequence[tuple[str, Decimal, bool, bool]] | None, shares: Decimal) -> tuple[Decimal, ...]:
@@ -1370,7 +1387,14 @@ def _collect_canonical_holders_from_current(conn: psycopg.Connection[Any], instr
         line_balances: dict[tuple[str, str, str], list[tuple[str, Decimal, bool, bool]]] = {}
         for r in cur.fetchall():
             line_balances.setdefault((str(r["accession"]), str(r["cik"]), str(r["di"])), []).append(
-                (str(r["kind"]), Decimal(r["shares"]), bool(r["kind_ok"]), bool(r["unit_ok"]))
+                (
+                    str(r["kind"]),
+                    Decimal(r["shares"]),
+                    _summable_scope(
+                        r["kind_lines_ok"], r["kind_titles"], form3=r["kind_form3"], holdings=r["kind"] == "H"
+                    ),
+                    _summable_scope(r["unit_lines_ok"], r["unit_titles"], form3=r["unit_form3"], holdings=False),
+                )
             )
         cur.execute(
             f"""

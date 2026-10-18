@@ -110,6 +110,14 @@ def _seed(conn: psycopg.Connection[Any], indirect_shares: Decimal, *, null_di_li
         pytest.param(Decimal("573883879"), False, "Common Stock", (), id="latest_line_observation_has_none"),
         pytest.param(_SUM, True, "Common Stock", (), id="a_null_di_unit_has_none"),
         pytest.param(_SUM, False, "Class B Common Stock", (), id="a_two_title_unit_has_none"),
+        # #3227 multi-title: the writers sum titles naming one class, so the read path matches them.
+        pytest.param(
+            _SUM,
+            False,
+            "Common Stock, par value $0.01 per share",
+            (Decimal("573883879"), Decimal(_HOLDING)),
+            id="a_one_class_two_title_unit_has_its_lines",
+        ),
     ],
 )
 def test_line_components(
