@@ -29,6 +29,7 @@ import psycopg
 import pytest
 
 from app.services.insider_transactions import (
+    _PARSER_VERSION,
     ParsedFiler,
     ParsedFiling,
     ParsedTransaction,
@@ -376,7 +377,7 @@ class TestIngestInsiderTransactions:
             assert f[4] == "/s/ Jane Q. Lawyer"
             assert f[5] == date(2024, 6, 17)
             assert f[6] is False
-            assert f[7] == 2
+            assert f[7] == _PARSER_VERSION
 
             # insider_filers — full address + role
             cur.execute(

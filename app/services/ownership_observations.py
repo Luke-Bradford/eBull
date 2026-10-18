@@ -469,6 +469,15 @@ INSIDER_WINNER_ORDER_TAIL: Final[LiteralString] = """
 # an amendment carrying fewer or more lines.
 # Form 5 is out of scope: its amendment instruction is not cited here.
 #
+# A Form 4's XML observation is superseded only when its D/I has a transaction line in the
+# original (a line with no D/I counts as ``D``, the writers' ``direct``). A holding-only
+# observation (#3227, ``form4_holding_observations``) restates a holding line, which the
+# transaction match above never compares and which the amendment need not repeat ("Do not repeat
+# lines ... not being amended"). Without this, FUSE ``0001493152-26-001021``'s ``I`` holding
+# (2,677,292) was excluded because its 4/A restated the ``D`` transaction, and
+# ``_INSIDER_SUPERSEDED_KEY_DROP`` then deleted the key. DERA rows (``:`` in the id) keep the old
+# rule: their nature is the relationship flag, not D/I.
+#
 # The link amendment → original is the filing's own ``<dateOfOriginalSubmission>``
 # (``insider_filings.date_of_original_submission``) naming the original's SEC filing date, the
 # same issuer, the same ``period_of_report`` and at least one shared reporting owner. The date
@@ -587,6 +596,17 @@ INSIDER_SUPERSEDED_BY_AMENDMENT_FILTER: Final[LiteralString] = """
                                                   AND u.txn_code       IS NOT DISTINCT FROM t.txn_code
                                                   AND u.shares         IS NOT DISTINCT FROM t.shares
                                            )
+                                    )
+                                    AND (
+                                        ownership_insiders_observations.source_document_id ~ ':'
+                                        OR EXISTS (
+                                            SELECT 1 FROM insider_transactions t
+                                             WHERE t.accession_number = o.accession_number
+                                               AND NOT t.is_derivative
+                                               AND (CASE WHEN t.direct_indirect = 'I' THEN 'indirect'
+                                                         ELSE 'direct' END)
+                                                   = ownership_insiders_observations.ownership_nature
+                                        )
                                     )
                                 END
                              OFFSET 0

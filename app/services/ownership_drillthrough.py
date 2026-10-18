@@ -363,6 +363,31 @@ def _form4_state(conn: psycopg.Connection[Any], instrument_id: int) -> PipelineS
         )
         rows = cur.fetchone() or {"row_count": 0, "latest_period": None}
 
+        # #3227 — a holdings-only Form 4 is a live filing whose typed rows are in
+        # ``insider_form4_holdings``: count them too, so it never reads as a rewash candidate.
+        cur.execute(
+            """
+            SELECT COUNT(*) AS row_count, MAX(f.period_of_report) AS latest_period
+            FROM insider_form4_holdings h
+            JOIN insider_filings f ON f.accession_number = h.accession_number
+            WHERE f.document_type = '4'
+              AND f.is_tombstone = FALSE
+              AND EXISTS (
+                  SELECT 1 FROM filing_events fe
+                  WHERE fe.provider_filing_id = h.accession_number
+                    AND fe.provider = 'sec'
+                    AND fe.instrument_id = %s
+              )
+            """,
+            (instrument_id,),
+        )
+        held = cur.fetchone() or {"row_count": 0, "latest_period": None}
+        latest = [p for p in (rows.get("latest_period"), held.get("latest_period")) if p is not None]
+        rows = {
+            "row_count": int(rows["row_count"]) + int(held["row_count"]),
+            "latest_period": max(latest, default=None),
+        }
+
         cur.execute(
             """
             SELECT COUNT(*) AS tombstone_count

@@ -45,8 +45,8 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from functools import partial
-from typing import Any, Final, Protocol
-from uuid import uuid4
+from typing import Any, Final, Literal, Protocol
+from uuid import UUID, uuid4
 
 import psycopg
 from psycopg.types.json import Jsonb
@@ -78,7 +78,11 @@ logger = logging.getLogger(__name__)
 # Bump whenever parse_form_4_xml shape changes so the ingester can
 # re-parse older filings under the new parser without having to
 # re-fetch the universe of Form 4 XML from SEC.
-_PARSER_VERSION = 2
+# 3 (#3227): holding lines parsed and stored (``insider_form4_holdings``); a holdings-only Form 4
+# is a filing, not a tombstone. The raw-store watermark (``_PARSER_VERSION_FORM4``) is not bumped:
+# that would mark every stored Form 4 body stale for ``scripts/rewash.py``, and only bodies with a
+# holding line parse differently — ``scripts/backfill_3227_form4_holding_rows.py`` replays those.
+_PARSER_VERSION = 3
 
 # Form 4 retention cap (#1233 PR4, spec §4.3). Tightened from 5y to
 # 3y after the 2026-05-19 T9-POST drive surfaced that historical Form
@@ -442,6 +446,9 @@ class ParsedFiling:
     filers: tuple[ParsedFiler, ...]
     footnotes: tuple[ParsedFootnote, ...]
     transactions: tuple[ParsedTransaction, ...]
+    # #3227 — the Table I / II holding lines of a Form 4 (``parse_form_5_xml`` leaves this empty:
+    # Form 5 holdings stay out of scope).
+    holdings: tuple[ParsedHolding, ...] = ()
 
 
 # ---------------------------------------------------------------------
@@ -498,9 +505,10 @@ def parse_form_4_xml(raw_xml: str) -> ParsedFiling | None:
     - Input is empty or fails to parse as XML.
     - Document root is not ``ownershipDocument`` (URL rot — operator
       pointed us at a cover page or a wrong document).
-    - Zero transactions across both the non-derivative and derivative
-      tables. A filer-only filing is not a useful observation; drop it
-      rather than insert a phantom record.
+    - Zero transactions AND zero holdings across both tables. A
+      filer-only filing is not a useful observation; drop it rather than
+      insert a phantom record. A holdings-only Form 4 is a filing (#3227):
+      its holding lines are stated balances (General Instruction 4(c)(i)).
 
     Otherwise returns a :class:`ParsedFiling` with:
 
@@ -516,6 +524,9 @@ def parse_form_4_xml(raw_xml: str) -> ParsedFiling | None:
       ``(accession, row_num)`` keys. Each transaction carries its
       footnote refs so the UI can render the footnote text next to
       the specific field it qualifies.
+    - Every holding row (``holdings``), non-derivative then derivative, with
+      a shared ``row_num`` and attributed to the first listed owner like the
+      transactions.
     """
     if not raw_xml:
         return None
@@ -554,8 +565,9 @@ def parse_form_4_xml(raw_xml: str) -> ParsedFiling | None:
     default_filer_cik = filers[0].filer_cik
 
     transactions = _extract_transactions(root, default_filer_cik=default_filer_cik)
+    holdings = _extract_holdings(root, default_filer_cik=default_filer_cik)
 
-    if not transactions:
+    if not transactions and not holdings:
         return None
 
     remarks = _text(root.find("./remarks"))
@@ -579,6 +591,7 @@ def parse_form_4_xml(raw_xml: str) -> ParsedFiling | None:
         filers=filers,
         footnotes=footnotes,
         transactions=transactions,
+        holdings=holdings,
     )
 
 
@@ -1341,9 +1354,14 @@ def upsert_filing(
     parsed: ParsedFiling,
     is_rewash: bool = False,
     filed_at: datetime | None = None,
+    refresh_current: bool = True,
 ) -> None:
     """Insert/refresh the filing header + filer dim + footnote bodies +
     transaction rows for one accession.
+
+    ``refresh_current=False`` skips the per-sibling ``_current`` refresh after the observation
+    write-through — for a bulk replay that batch-refreshes once at the end (#3227's backfill: the
+    per-instrument refresh is ~97% of a replayed accession's time).
 
     Idempotency: every child table keys on ``(accession, …)`` with
     ON CONFLICT DO UPDATE so re-running the ingester on the same
@@ -1638,6 +1656,69 @@ def upsert_filing(
                 ),
             )
 
+        # #3227 — the holding lines, keyed like the transactions (sql/503).
+        for holding in parsed.holdings:
+            cur.execute(
+                """
+                INSERT INTO insider_form4_holdings (
+                    instrument_id, accession_number, row_num,
+                    filer_cik, filer_name, filer_role,
+                    security_title, shares, value_owned, is_derivative,
+                    direct_indirect, nature_of_ownership,
+                    conversion_exercise_price, exercise_date, expiration_date,
+                    underlying_security_title, underlying_shares, underlying_value,
+                    footnote_refs
+                ) VALUES (
+                    %s, %s, %s,
+                    %s, %s, %s,
+                    %s, %s, %s, %s,
+                    %s, %s,
+                    %s, %s, %s,
+                    %s, %s, %s,
+                    %s
+                )
+                ON CONFLICT (accession_number, row_num) DO UPDATE SET
+                    instrument_id             = EXCLUDED.instrument_id,
+                    filer_cik                 = EXCLUDED.filer_cik,
+                    filer_name                = EXCLUDED.filer_name,
+                    filer_role                = EXCLUDED.filer_role,
+                    security_title            = EXCLUDED.security_title,
+                    shares                    = EXCLUDED.shares,
+                    value_owned               = EXCLUDED.value_owned,
+                    is_derivative             = EXCLUDED.is_derivative,
+                    direct_indirect           = EXCLUDED.direct_indirect,
+                    nature_of_ownership       = EXCLUDED.nature_of_ownership,
+                    conversion_exercise_price = EXCLUDED.conversion_exercise_price,
+                    exercise_date             = EXCLUDED.exercise_date,
+                    expiration_date           = EXCLUDED.expiration_date,
+                    underlying_security_title = EXCLUDED.underlying_security_title,
+                    underlying_shares         = EXCLUDED.underlying_shares,
+                    underlying_value          = EXCLUDED.underlying_value,
+                    footnote_refs             = EXCLUDED.footnote_refs
+                """,
+                (
+                    entity_instrument_id,
+                    accession_number,
+                    holding.row_num,
+                    holding.filer_cik,
+                    _primary_filer_name(parsed, holding.filer_cik),
+                    _primary_filer_role(parsed, holding.filer_cik),
+                    holding.security_title,
+                    holding.shares,
+                    holding.value_owned,
+                    holding.is_derivative,
+                    holding.direct_indirect,
+                    holding.nature_of_ownership,
+                    holding.conversion_exercise_price,
+                    holding.exercise_date,
+                    holding.expiration_date,
+                    holding.underlying_security_title,
+                    holding.underlying_shares,
+                    holding.underlying_value,
+                    Jsonb([{"footnote_id": ref.footnote_id, "field": ref.field} for ref in holding.footnote_refs]),
+                ),
+            )
+
     # Write-through observations + refresh _current (#888 / spec §"Eliminate
     # periodic re-scan jobs"). Replaces the legacy nightly
     # ownership_observations_sync read-from-typed-tables path with an
@@ -1661,7 +1742,8 @@ def upsert_filing(
             filed_at=filed_at,
             entity_instrument_id=entity_instrument_id,
         )
-        refresh_insiders_current(conn, instrument_id=sibling_iid)
+        if refresh_current:
+            refresh_insiders_current(conn, instrument_id=sibling_iid)
 
     # #828 PR-1 — a mislinked filing's owner-instrument filing_events rows ARE
     # the L2/tombstone-count pollution (the per-instrument read bridges key on
@@ -1745,6 +1827,18 @@ def _record_form4_observations_for_filing(
         if (txn.txn_date, txn.txn_row_num) > ((prior.txn_date or date.min), prior.txn_row_num):
             latest[key] = txn
 
+    run_id = uuid4()
+    owner_ciks = [f.filer_cik for f in parsed.filers]
+    if parsed.holdings:
+        _record_form4_holding_observations(
+            conn,
+            instrument_id=instrument_id,
+            accession_number=accession_number,
+            primary_document_url=primary_document_url,
+            parsed=parsed,
+            run_id=run_id,
+        )
+
     if not latest:
         return
 
@@ -1758,8 +1852,6 @@ def _record_form4_observations_for_filing(
             accession_number,
         )
 
-    run_id = uuid4()
-    owner_ciks = [f.filer_cik for f in parsed.filers]
     for (filer_cik, direct_indirect), txn in latest.items():
         if txn.txn_date is None or txn.post_transaction_shares is None:
             # Belt-and-braces — the filter above already excludes these.
@@ -1809,6 +1901,215 @@ def _record_form4_observations_for_filing(
             ingest_run_id=run_id,
             shares=shares,
         )
+
+
+def _record_form4_holding_observations(
+    conn: psycopg.Connection[Any],
+    *,
+    instrument_id: int,
+    accession_number: str,
+    primary_document_url: str,
+    parsed: ParsedFiling,
+    run_id: UUID,
+) -> None:
+    """The live writer's half of :func:`form4_holding_observations` (#3227): one observation per
+    written holding-only group of the first listed owner (every line is attributed to them)."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT filed_at FROM sec_filing_manifest WHERE accession_number = %s", (accession_number,))
+        row = cur.fetchone()
+    manifest_filed_at = row[0] if row is not None else None
+    filer_cik = parsed.filers[0].filer_cik
+    groups = form4_holding_observations(
+        [h for h in parsed.holdings if h.filer_cik == filer_cik],
+        [t for t in parsed.transactions if t.filer_cik == filer_cik],
+        document_type=parsed.document_type,
+        owner_ciks=[f.filer_cik for f in parsed.filers],
+        signature_date=parsed.signature_date,
+        period_of_report=parsed.period_of_report,
+        manifest_filed_at=manifest_filed_at,
+    )
+    holder_name = _primary_filer_name(parsed, filer_cik).strip()
+    for g in groups:
+        if g.shares is None or g.period_end is None or manifest_filed_at is None:
+            continue
+        record_insider_observation(
+            conn,
+            instrument_id=instrument_id,
+            holder_cik=filer_cik,
+            holder_name=holder_name or filer_cik,
+            ownership_nature=FORM4_HOLDING_NATURE[g.direct_indirect],
+            source="form4",
+            source_document_id=accession_number,
+            source_accession=accession_number,
+            source_field=None,
+            source_url=primary_document_url or None,
+            filed_at=manifest_filed_at,
+            period_start=None,
+            period_end=g.period_end,
+            ingest_run_id=run_id,
+            shares=g.shares,
+        )
+
+
+# ---------------------------------------------------------------------
+# #3227 — a Form 4's Table I holding lines reach the insider observation
+# ---------------------------------------------------------------------
+
+FORM4_HOLDING_NATURE: Final[dict[str, Literal["direct", "indirect"]]] = {"D": "direct", "I": "indirect"}
+FORM4_HOLDING_WRITES: Final = frozenset({"one_line", "summed"})
+
+
+class Form4HoldingLine(Protocol):
+    """The holding fields :func:`form4_holding_observations` reads. ``ParsedHolding`` satisfies it,
+    and so does a stored ``insider_form4_holdings`` row (``derive_form4_observations``)."""
+
+    @property
+    def is_derivative(self) -> bool: ...
+    @property
+    def security_title(self) -> str | None: ...
+    @property
+    def shares(self) -> Decimal | None: ...
+    @property
+    def direct_indirect(self) -> str | None: ...
+
+
+class Form4BalanceLine(Protocol):
+    """The transaction fields :func:`form4_holding_observations` reads."""
+
+    @property
+    def is_derivative(self) -> bool: ...
+    @property
+    def security_title(self) -> str | None: ...
+    @property
+    def post_transaction_shares(self) -> Decimal | None: ...
+    @property
+    def direct_indirect(self) -> str | None: ...
+
+
+@dataclass(frozen=True)
+class Form4HoldingGroup:
+    """One holding-only group's verdict. ``shares`` is set only when the verdict is in
+    :data:`FORM4_HOLDING_WRITES` and the group has a ``period_end``."""
+
+    direct_indirect: str
+    verdict: str
+    shares: Decimal | None
+    period_end: date | None
+
+
+def form4_holding_as_of(signature_date: date | None, period_of_report: date | None, filed: date) -> date | None:
+    """A holding line's ``period_end``. The note to Instruction 4(a)(i) dates the balance "by the
+    date of the Form", and the XML carries no per-line date, so it is read as the signature date —
+    an interpretation fixed by construction (spec, Source rule): the signature date when
+    ``period_of_report <= signature <= filed``, else ``period_of_report`` when it is ``<= filed``,
+    else none. The bounds refuse a typo in either date that would dominate ``period_end DESC``
+    (the #1687 hazard). ``filed`` is the UTC date of ``sec_filing_manifest.filed_at``."""
+    if signature_date is not None and period_of_report is not None and period_of_report <= signature_date <= filed:
+        return signature_date
+    if period_of_report is not None and period_of_report <= filed:
+        return period_of_report
+    return None
+
+
+def form4_holding_observations(
+    holdings: Iterable[Form4HoldingLine],
+    transactions: Iterable[Form4BalanceLine],
+    *,
+    document_type: str | None,
+    owner_ciks: Iterable[str | None],
+    signature_date: date | None,
+    period_of_report: date | None,
+    manifest_filed_at: datetime | None,
+) -> list[Form4HoldingGroup]:
+    """ONE filer's holding-only groups in ONE Form 4/4A, each with its verdict.
+
+    Spec: ``docs/specs/ownership/2026-10-18-3227-form4-holding-rows.md``, Change 3; both Form 4
+    observation writers call this, so the weekly re-derivation cannot revert the live one (#3874).
+    ``holdings`` and ``transactions`` are the filer's lines in the accession, derivative ones
+    included (they are ignored). Returns nothing outside Form 4/4A, without a manifest
+    ``filed_at``, or outside :func:`form4_within_retention` — no fallback date applies.
+
+    A group is the filer's non-derivative ``D`` (or ``I``) holding lines, when the accession has no
+    non-derivative transaction line of that D/I — any line, used by the transaction writers or not,
+    and one with no D/I counts as ``D`` because both writers label it ``direct``. Where a
+    transaction line exists the transaction rule governs and the holding lines are left alone (the
+    mixed-group residual). A holding line with no D/I joins no group.
+
+    Verdicts (the labels ``scripts.census_3227_form4_holding_rows`` prints):
+      * ``refused:no_share_count_line`` — a line has no share count (the SEC value branch, or an
+        unreadable amount), so the group's share total is unknown;
+      * ``one_line`` — its shares;
+      * ``summed`` — several lines, summed when ``form3_observation_shares``'s conditions hold (one
+        owner, every line >= 0, one non-blank title, no two equal amounts among the filer's
+        holding lines of that title, D and I together) and no amount of the group equals a
+        column-5 balance of a transaction line of that title — a Form 4 carries balances on
+        transaction rows, and a holding equal to one may be the same block restated (Instruction
+        4(b)(iv));
+      * ``refused:<condition>`` otherwise. A refused group writes nothing: never a partial sum,
+        never the last line (UMH's last ``D`` line is a preferred class).
+    A group with no :func:`form4_holding_as_of` date writes nothing either.
+    """
+    if document_type not in FORM4_VEHICLE_SUM_DOCUMENT_TYPES or manifest_filed_at is None:
+        return []
+    filed = manifest_filed_at.astimezone(UTC).date()
+    if not form4_within_retention(filed):
+        return []
+    lines = [h for h in holdings if not h.is_derivative]
+    txns = [t for t in transactions if not t.is_derivative]
+    covered = {"I" if t.direct_indirect == "I" else "D" for t in txns}
+    holding_amounts: dict[str, list[Decimal]] = {}
+    for h in lines:
+        if h.shares is not None:
+            holding_amounts.setdefault((h.security_title or "").strip(), []).append(h.shares)
+    txn_balances: dict[str, set[Decimal]] = {}
+    for t in txns:
+        if t.post_transaction_shares is not None:
+            txn_balances.setdefault((t.security_title or "").strip(), set()).add(t.post_transaction_shares)
+    owner_count = len({(c or "").strip() for c in owner_ciks})
+    period_end = form4_holding_as_of(signature_date, period_of_report, filed)
+
+    out: list[Form4HoldingGroup] = []
+    for di in ("D", "I"):
+        if di in covered:
+            continue
+        group = [h for h in lines if h.direct_indirect == di]
+        if not group:
+            continue
+        verdict = _form4_holding_verdict(group, holding_amounts, txn_balances, owner_count)
+        shares: Decimal | None = None
+        if verdict in FORM4_HOLDING_WRITES and period_end is not None:
+            shares = sum((h.shares for h in group if h.shares is not None), Decimal(0))
+        out.append(Form4HoldingGroup(direct_indirect=di, verdict=verdict, shares=shares, period_end=period_end))
+    return out
+
+
+def _form4_holding_verdict(
+    group: list[Form4HoldingLine],
+    holding_amounts: dict[str, list[Decimal]],
+    txn_balances: dict[str, set[Decimal]],
+    owner_count: int,
+) -> str:
+    if any(h.shares is None for h in group):
+        return "refused:no_share_count_line"
+    if len(group) == 1:
+        return "one_line"
+    if owner_count != 1:
+        return "refused:joint_filing"
+    amounts = [h.shares for h in group if h.shares is not None]
+    if any(s < 0 for s in amounts):
+        return "refused:negative"
+    titles = {(h.security_title or "").strip() for h in group}
+    if len(titles) != 1:
+        return "refused:multi_title"
+    title = next(iter(titles))
+    if not title:
+        return "refused:blank_title"
+    same_title = holding_amounts.get(title, [])
+    if len(set(same_title)) != len(same_title):
+        return "refused:equal_amounts"
+    if set(amounts) & txn_balances.get(title, set()):
+        return "refused:equal_to_transaction_balance"
+    return "summed"
 
 
 # ---------------------------------------------------------------------

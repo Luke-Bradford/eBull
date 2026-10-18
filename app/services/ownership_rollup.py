@@ -3395,16 +3395,17 @@ def _read_record_holder_evidence(
     Section 16 Table I line makes about the block it reports, keyed by that line's own
     amount (#2408; see the construction note above :func:`_named_record_holder`).
 
-    Both row tables carry ``nature_of_ownership``: a Form 4 lands in
-    ``insider_transactions`` and a Form 3 in ``insider_initial_holdings``, so reading one
-    alone silently halves the evidence. Only ``insider_transactions`` carries
-    ``footnote_refs``, so a Form 3's ``See footnote.`` cannot be resolved and contributes
-    only the literal field — the honest asymmetry, not a gap to paper over.
+    Every row table carries ``nature_of_ownership``: a Form 4 lands in
+    ``insider_transactions`` and ``insider_form4_holdings`` (its holding lines, #3227) and a
+    Form 3 in ``insider_initial_holdings``, so reading one alone silently loses evidence. The
+    two Form 4 tables carry ``footnote_refs``; a Form 3's ``See footnote.`` cannot be
+    resolved and contributes only the literal field — the honest asymmetry, not a gap to
+    paper over.
 
     Value key: Form 4 reports the post-transaction holding in ``post_transaction_shares``
     (which is what ``ownership_insiders_current.shares`` holds for that source) and Form 3
     reports it in ``shares``. Every accession list passed here comes from holders already
-    read for ONE instrument, so all three queries hit an ``accession_number``-leading
+    read for ONE instrument, so every query hits an ``accession_number``-leading
     index.
 
     ⚠ ``NOT is_derivative`` on both row queries (Codex checkpoint 2). Table II derivative
@@ -3450,6 +3451,25 @@ def _read_record_holder_evidence(
         )
         for accession, shares, nature in cur.fetchall():
             texts.setdefault((str(accession), Decimal(shares)), []).append(str(nature))
+        # #3227 — a Form 4's holding lines (column 5 alone) make the same statement as its
+        # transaction lines, and carry ``footnote_refs`` like them.
+        cur.execute(
+            """
+            SELECT accession_number, shares, nature_of_ownership, footnote_refs
+              FROM insider_form4_holdings
+             WHERE accession_number = ANY(%s) AND direct_indirect = 'I'
+               AND NOT is_derivative
+               AND shares IS NOT NULL
+            """,
+            (acc,),
+        )
+        for accession, shares, nature, footnote_refs in cur.fetchall():
+            key = (str(accession), Decimal(shares))
+            if nature:
+                texts.setdefault(key, []).append(str(nature))
+            for ref in footnote_refs or ():
+                if isinstance(ref, dict) and ref.get("footnote_id"):
+                    refs.setdefault(key, set()).add(str(ref["footnote_id"]))
         if refs:
             cur.execute(
                 """

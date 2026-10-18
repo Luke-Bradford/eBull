@@ -20,9 +20,11 @@ Match precedence:
      entity (the instrument's share-class sibling union, #2108) whose
      normalised filer_name equals the normalised holder_name.
      Tie-broken by ``txn_date DESC, id DESC``.
-  2. Falling back to ``insider_initial_holdings`` (Form 3 baseline)
+  2. Then the latest Form 4 holding line (``insider_form4_holdings``,
+     #3227) — a balance reported without a transaction.
+  3. Falling back to ``insider_initial_holdings`` (Form 3 baseline)
      when no Form 4 row matches. Same DISTINCT ON cap.
-  3. Otherwise ``(False, None, None)`` — a coverage gap from the
+  4. Otherwise ``(False, None, None)`` — a coverage gap from the
      drift detector's perspective; for the ownership-rollup the row
      goes to the ``def14a_unmatched`` slice.
 
@@ -161,6 +163,30 @@ def resolve_holder_to_filer(
                     str(row["filer_cik"]) if row["filer_cik"] is not None else None,
                     row["post_transaction_shares"],
                 )
+
+    # #3227 — then a Form 4's holding lines: a filer who reports a balance only as a holding has
+    # a Form 4 observation and no transaction row, and unmatched it would also render as a
+    # ``def14a_unmatched`` holder. Latest by the filing's signature date, then period of report.
+    with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT ON (COALESCE(h.filer_cik, ''), h.filer_name)
+                h.filer_cik, h.filer_name, h.shares
+            FROM insider_form4_holdings h
+            JOIN insider_filings f ON f.accession_number = h.accession_number
+            WHERE h.instrument_id = ANY(%(iids)s)  -- #2108 sibling union
+              AND h.shares IS NOT NULL
+              AND h.is_derivative = FALSE
+              AND NOT f.is_tombstone
+            ORDER BY COALESCE(h.filer_cik, ''), h.filer_name,
+                     f.signature_date DESC NULLS LAST, f.period_of_report DESC NULLS LAST,
+                     h.accession_number DESC, h.row_num DESC
+            """,
+            {"iids": sibling_ids},
+        )
+        for row in sorted(cur.fetchall(), key=lambda r: str(r.get("filer_name") or "")):
+            if normalise_name(str(row["filer_name"])) == normalised:
+                return (True, str(row["filer_cik"]), row["shares"])
 
     # Fall back to Form 3 baseline. Same DISTINCT ON cap so the
     # Python filter never sees more than one row per filer.
