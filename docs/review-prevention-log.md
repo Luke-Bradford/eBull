@@ -13132,3 +13132,17 @@ neighbouring container and match it.**
   `tests/test_3227_form4_vehicle_balance.py` (one test per condition, both directions) and
   `tests/test_3227_form4_vehicle_balance_db.py`; full-population parity with the census in
   `scripts/ab_3227_form4_vehicle_balance.py`.
+
+### A new child table of a filing needs every reader of its sibling tables, not just the writer it was built for (#3227)
+
+- Symptom: the Form 4 holding-row build added `insider_form4_holdings` and wired both observation writers to it. Codex
+  checkpoint 2 then found three readers that only knew `insider_transactions` + `insider_initial_holdings`: the DEF 14A
+  name resolver (`resolve_holder_to_filer`; a holding-only filer stayed unmatched and could render twice, once as an
+  insider and once as `def14a_unmatched`), the rollup's record-holder evidence (`_read_record_holder_evidence`; the
+  holding line's nature and footnotes were invisible), and the drill-through count (`_form4_state`; a rescued
+  holdings-only filing read as "zero typed rows — rewash candidate").
+- Prevention: before adding a child table beside an existing one, grep every reader of the sibling table
+  (`grep -rn "FROM insider_transactions\|insider_initial_holdings" app/`) and decide each one explicitly: include the
+  new table, or say why not. The spec's list of readers was written to justify NOT reusing a table; the same list is
+  the checklist of readers to extend.
+- Enforced in: `tests/test_3227_form4_holding_rows_db.py::test_form4_consumers_read_the_holding_lines`.

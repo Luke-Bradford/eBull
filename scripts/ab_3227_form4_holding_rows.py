@@ -35,6 +35,9 @@ a fresh batch refresh.
 from __future__ import annotations
 
 import argparse
+import glob
+import json
+import pickle
 import sys
 import time
 from collections import Counter, defaultdict
@@ -63,7 +66,7 @@ from app.services.ownership_observations import (
     refresh_insiders_current_batch,
 )
 from app.services.ownership_observations_sync import derive_form4_observations, sync_insiders
-from app.services.sec_identity import resolve_insider_writer_routing
+from app.services.sec_identity import resolve_insider_writer_routing, sibling_instruments_for_instrument
 from scripts import census_3227_form4_holding_rows as census
 from scripts.ab_3227_holding_line_sum import _insider_view, _snapshot
 
@@ -93,8 +96,6 @@ SELECT instrument_id, source_accession, holder_cik, ownership_nature, shares
  WHERE source = 'form4' AND known_to IS NULL AND source_document_id !~ ':'
    AND source_accession = ANY(%(accs)s::text[])
 """
-
-_MIGRATION = Path(__file__).resolve().parent.parent / "sql" / "503_insider_form4_holdings.sql"
 
 _INSERT_HOLDING: Final[LiteralString] = """
 INSERT INTO insider_form4_holdings (instrument_id, accession_number, row_num, filer_cik, filer_name,
@@ -234,294 +235,377 @@ def _verify(conn: psycopg.Connection[Any]) -> int:
     return 0 if not diffs and not cur_diff else 1
 
 
-def main() -> int:  # noqa: C901, PLR0912, PLR0915 — one linear report
+def _stage01(conn: psycopg.Connection[Any]) -> dict[str, Any]:  # noqa: C901, PLR0912, PLR0915
+    """Stages 0 and 1, printed; returns the inputs stage 2 needs."""
+    # ---- stage 0: one snapshot for the census, the helper and the stored state
+    census_groups, _counts, _seen = census.collect(conn)
+    census_by = {(g.instrument_id, g.accession, g.filer_cik, g.di): g for g in census_groups}
+    rows = _cohort(conn)
+    accs = [r[0] for r in rows]
+    stored_txns: dict[str, set[tuple[Any, ...]]] = defaultdict(set)
+    stored_obs: dict[tuple[int, str, str | None, str], Decimal] = {}
+    for i in range(0, len(accs), 5000):
+        chunk = accs[i : i + 5000]
+        for r in conn.execute(_STORED_TXNS, {"accs": chunk}).fetchall():
+            stored_txns[r[0]].add(_txn_key(_Row(r)))
+        for r in conn.execute(_STORED_OBS, {"accs": chunk}).fetchall():
+            stored_obs[(int(r[0]), r[1], r[2], r[3])] = r[4]
+
+    helper: dict[tuple[int, str, str, str], tuple[str, Decimal | None, Any]] = {}
+    treatment: list[dict[str, Any]] = []
+    drift: list[str] = []
+    parsed_none = 0
+    siblings_of: dict[tuple[int, str | None], list[int]] = {}
+    entity_of: dict[tuple[int, str | None], int] = {}
+    holding_rows: list[tuple[Any, ...]] = []
+    evidence_iids: set[int] = set()
+    for accession, iid, url, tomb, _dt, _por, filed_at, payload in rows:
+        parsed: ParsedFiling | None = parse_form_4_xml(payload)
+        if parsed is None:
+            parsed_none += 1
+            continue
+        if {_txn_key(t) for t in parsed.transactions} != stored_txns.get(accession, set()):
+            drift.append(accession)
+        cik = parsed.filers[0].filer_cik
+        groups = form4_holding_observations(
+            [h for h in parsed.holdings if h.filer_cik == cik],
+            [t for t in parsed.transactions if t.filer_cik == cik],
+            document_type=parsed.document_type,
+            owner_ciks=[f.filer_cik for f in parsed.filers],
+            signature_date=parsed.signature_date,
+            period_of_report=parsed.period_of_report,
+            manifest_filed_at=filed_at,
+        )
+        rkey = (int(iid), parsed.issuer_cik)
+        if rkey not in siblings_of:
+            routing = resolve_insider_writer_routing(
+                conn, discovery_instrument_id=int(iid), issuer_cik=parsed.issuer_cik
+            )
+            siblings_of[rkey] = routing.sibling_instrument_ids or [routing.entity_instrument_id]
+            entity_of[rkey] = routing.entity_instrument_id
+        for h in parsed.holdings:
+            holding_rows.append(
+                (
+                    entity_of[rkey],
+                    accession,
+                    h.row_num,
+                    h.filer_cik,
+                    parsed.filers[0].filer_name,
+                    h.security_title,
+                    h.shares,
+                    h.is_derivative,
+                    h.direct_indirect,
+                    h.nature_of_ownership,
+                    [{"footnote_id": r.footnote_id, "field": r.field} for r in h.footnote_refs],
+                )
+            )
+            if h.direct_indirect == "I" and not h.is_derivative:
+                evidence_iids.update(siblings_of[rkey])
+        for g in groups:
+            helper[(int(iid), accession, cik, g.direct_indirect)] = (g.verdict, g.shares, g.period_end)
+            if g.shares is None or g.period_end is None:
+                continue
+            for sib in siblings_of[rkey]:
+                treatment.append(
+                    {
+                        "instrument_id": sib,
+                        "accession": accession,
+                        "holder_cik": cik,
+                        "holder_name": parsed.filers[0].filer_name.strip() or cik,
+                        "nature": FORM4_HOLDING_NATURE[g.direct_indirect],
+                        "url": str(url) if url else None,
+                        "filed_at": filed_at,
+                        "period_end": g.period_end,
+                        "shares": g.shares,
+                        "doc_type": parsed.document_type,
+                        "tombstoned": bool(tomb),
+                    }
+                )
+    symbols = dict(conn.execute("SELECT instrument_id, symbol FROM instruments").fetchall())
+
+    print("=== stage 0: helper vs census, parser vs stored transactions ===")
+    print(f"cohort payloads (gated)                         {len(rows):>10,}")
+    print(f"  parser returned None                          {parsed_none:>10,}")
+    print(f"  transaction drift (parse != stored rows)      {len(drift):>10,}")
+    for a in drift[:20]:
+        print(f"    {a}")
+    census_keys = {k: (g.verdict, g.value, g.period_end) for k, g in census_by.items()}
+    agree = sum(1 for k, v in helper.items() if census_keys.get(k) == v)
+    print(f"helper groups                                   {len(helper):>10,}")
+    print(f"census groups                                   {len(census_keys):>10,}")
+    print(f"  equal (verdict, value, period_end)            {agree:>10,}")
+    for k in sorted(helper.keys() ^ census_keys.keys())[:20]:
+        print(f"    only in {'helper' if k in helper else 'census'}: {k} {helper.get(k) or census_keys.get(k)}")
+    for k in sorted(k for k in helper.keys() & census_keys.keys() if helper[k] != census_keys[k])[:20]:
+        print(f"    differs {k}: helper {helper[k]}, census {census_keys[k]}")
+    print("helper verdicts:")
+    for v, n in sorted(Counter(v[0] for v in helper.values()).items()):
+        print(f"    {v:<40} {n:>8,}")
+
+    print("\n=== stage 1: observations ===")
+    verdict: Counter[str] = Counter()
+    for o in treatment:
+        prior = stored_obs.get((o["instrument_id"], o["accession"], o["holder_cik"], o["nature"]))
+        verdict["added" if prior is None else "unchanged" if prior == o["shares"] else "changed"] += 1
+    print(f"treatment observations (siblings included)      {len(treatment):>10,}")
+    print(
+        f"  added / unchanged / changed (changed must be 0)  "
+        f"{verdict['added']:,} / {verdict['unchanged']:,} / {verdict['changed']:,}"
+    )
+    print("  removed: 0 by construction (record_insider_observation only upserts)")
+    print(f"  from formerly tombstoned filings              {sum(o['tombstoned'] for o in treatment):>10,}")
+    by_iid: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for o in treatment:
+        by_iid[o["instrument_id"]].append(o)
+    print(f"  instruments                                   {len(by_iid):>10,}")
+    smoke = [symbols.get(i) for i in by_iid if symbols.get(i) in _SMOKE]
+    print(f"  smoke panel touched                           {smoke or 'none'}")
+    amend_keys = defaultdict(set)
+    for o in treatment:
+        amend_keys[(o["instrument_id"], o["holder_cik"], o["nature"])].add(o["doc_type"])
+    four_a = [k for k, types in amend_keys.items() if {"4", "4/A"} <= types]
+    print(f"  keys with holding observations from a 4 AND a 4/A  {len(four_a):,}")
+    for k in four_a:
+        print(f"    {symbols.get(k[0])} {k}")
+    conn.rollback()
+    return {"by_iid": dict(by_iid), "holding_rows": holding_rows, "evidence_iids": evidence_iids, "symbols": symbols}
+
+
+def _stage2(conn: psycopg.Connection[Any], data: dict[str, Any], ids: list[int]) -> dict[str, Any]:  # noqa: C901, PLR0912, PLR0915
+    """Stage 2 over ``ids``, at READ COMMITTED: one transaction rolled back at the end, each arm a savepoint
+    (a REPEATABLE READ transaction this long fails on live jobs' concurrent ``_current`` updates)."""
+    by_iid: dict[int, list[dict[str, Any]]] = data["by_iid"]
+    holding_rows = [(*r[:-1], r[-1] if isinstance(r[-1], Jsonb) else Jsonb(r[-1])) for r in data["holding_rows"]]
+    symbols: dict[int, str] = data["symbols"]
+    # ---- stage 2: ONE transaction, rolled back at the end; each arm in a savepoint. The rollup
+    # reads ``insider_form4_holdings`` (record-holder evidence, the name resolver), so the
+    # control arm runs against the table empty and the treatment arm with the cohort's rows.
+    print("\n=== stage 2: _current, rollup, history (rolled back) ===")
+    classes: Counter[str] = Counter()
+    listing: dict[str, list[str]] = defaultdict(list)
+    moved_total = up = down = newly = mismatch = hist_points = 0
+    newly_rows: list[str] = []
+    print(f"instruments in this run (holding observations or I holding lines)  {len(ids):,}")
+    # sql/503 must already be applied (pre-push smoke applies it on dev); running it here would take
+    # its table locks inside this long transaction, serialising concurrent shards.
+    if conn.execute("SELECT count(*) FROM insider_form4_holdings").fetchone() != (0,):
+        raise SystemExit("insider_form4_holdings is not empty: the control arm would not be today's state")
+
+    def _write(iid: int, group: list[dict[str, Any]]) -> None:
+        run = uuid4()
+        for o in group:
+            record_insider_observation(
+                conn,
+                instrument_id=iid,
+                holder_cik=o["holder_cik"],
+                holder_name=o["holder_name"],
+                ownership_nature=o["nature"],
+                source="form4",
+                source_document_id=o["accession"],
+                source_accession=o["accession"],
+                source_field=None,
+                source_url=o["url"],
+                filed_at=o["filed_at"],
+                period_start=None,
+                period_end=o["period_end"],
+                ingest_run_id=run,
+                shares=o["shares"],
+            )
+
+    def _reads(iid: int) -> tuple[Any, Any, Any]:
+        holders = {o["holder_cik"] for o in by_iid.get(iid, [])}
+        hist = {
+            (h, p.period_end, p.ownership_nature): p.shares
+            for h in holders
+            for p in get_ownership_history(conn, instrument_id=iid, category="insiders", holder_id=h)
+        }
+        return _snapshot(conn, [iid]), _insider_view(conn, symbols.get(iid, "?"), iid), hist
+
+    # Control: today's observations. A batch refresh first, which must be a no-op on stored _current.
+    control: dict[int, tuple[Any, Any, Any]] = {}
+    stale = 0
+    for i in range(0, len(ids), _BATCH):
+        batch = ids[i : i + _BATCH]
+        with conn.transaction():
+            stored = _snapshot(conn, batch)
+            refresh_insiders_current_batch(conn, instrument_ids=batch)
+            fresh = _snapshot(conn, batch)
+            stale += sum(1 for k in stored.keys() | fresh.keys() if stored.get(k) != fresh.get(k))
+            for iid in batch:
+                control[iid] = _reads(iid)
+            raise psycopg.Rollback()
+        print(f"  control {i + len(batch):,} / {len(ids):,}", flush=True)
+    print(f"control: stored _current keys differing from a fresh batch refresh  {stale:,}")
+    with conn.cursor() as cur:
+        cur.executemany(_INSERT_HOLDING, holding_rows)
+    print(f"  treatment: {len(holding_rows):,} holding rows inserted (rolled back at the end)", flush=True)
+
+    # Treatment: the per-instrument refresher (the live writer's), then the batch refresher.
+    treated: dict[int, tuple[Any, Any, Any]] = {}
+    for n, iid in enumerate(ids, 1):
+        with conn.transaction():
+            if by_iid.get(iid):
+                _write(iid, by_iid[iid])
+                refresh_insiders_current(conn, instrument_id=iid)
+            treated[iid] = _reads(iid)
+            raise psycopg.Rollback()
+        if n % 500 == 0:
+            print(f"  treatment {n:,} / {len(ids):,}", flush=True)
+    batched: dict[int, Any] = {}
+    for i in range(0, len(ids), _BATCH):
+        batch = ids[i : i + _BATCH]
+        with conn.transaction():
+            for iid in batch:
+                _write(iid, by_iid.get(iid, []))
+            refresh_insiders_current_batch(conn, instrument_ids=batch)
+            snap = _snapshot(conn, batch)
+            for iid in batch:
+                batched[iid] = {k: v for k, v in snap.items() if k[0] == iid}
+            raise psycopg.Rollback()
+
+    for n, iid in enumerate(ids, 1):
+        sym = symbols.get(iid, "?")
+        group = by_iid.get(iid, [])
+        holding_docs = {(o["holder_cik"], o["nature"], o["accession"]) for o in group}
+        before, view_b, hist_b = control[iid]
+        after, view_a, hist_a = treated[iid]
+        after_batch = batched[iid]
+        mismatch += after != after_batch
+        hist_points += sum(1 for k in hist_b.keys() | hist_a.keys() if hist_b.get(k) != hist_a.get(k))
+        for key in before.keys() | after.keys():
+            b, a = before.get(key), after.get(key)
+            if b == a:
+                continue
+            # value tuple: holder_cik, holder_name, source, source_document_id, source_accession,
+            # source_url, filed_at, period_start, period_end, shares
+            a_is_holding = a is not None and (a[0], key[2], a[3]) in holding_docs
+            if b is None:
+                cls = "added (holding)" if a_is_holding else "added (other)"
+            elif a is None:
+                cls = "removed: DERA winner dropped (clause 1)" if _is_dera(b[3]) else "removed: other"
+            elif a_is_holding:
+                if _is_dera(b[3]):
+                    cls = "changed: holding replaces a DERA winner"
+                elif b[2] == "form3" and b[8] is not None and b[8] > a[8]:
+                    cls = "changed: holding wins by source rank over a later form3"
+                elif b[2] == "form4" and b[8] == a[8] and b[6] == a[6]:
+                    cls = "changed: holding ties the winner (tail decides)"
+                elif b[9] == a[9]:
+                    cls = "changed: holding wins, same value"
+                else:
+                    cls = "changed: holding wins, value differs"
+            else:
+                cls = "changed: other"
+            classes[cls] += 1
+            if not cls.startswith(("added (holding)", "changed: holding wins")):
+                listing[cls].append(f"{sym} {key[1]} {key[2]}: {b and (b[3], b[9])} -> {a and (a[3], a[9])}")
+        if view_b[0] != view_a[0]:
+            moved_total += 1
+            up += view_a[0] > view_b[0]
+            down += view_a[0] < view_b[0]
+            if not group:
+                listing["rollup moved with no holding observation (evidence only)"].append(
+                    f"{sym} {view_b[0]:,.0f} -> {view_a[0]:,.0f}"
+                )
+        if view_b[3] != view_a[3] and not group:
+            listing["insider holder names changed with no holding observation"].append(sym)
+        if view_a[2] and not view_b[2]:
+            newly += 1
+            newly_rows.append(f"{sym} {view_b[0]:,.0f} -> {view_a[0]:,.0f}")
+    conn.rollback()
+
+    return {
+        "classes": dict(classes),
+        "listing": {k: list(v) for k, v in listing.items()},
+        "stale": stale,
+        "mismatch": int(mismatch),
+        "hist_points": hist_points,
+        "moved_total": moved_total,
+        "up": int(up),
+        "down": int(down),
+        "newly": newly,
+        "newly_rows": newly_rows,
+        "instruments": len(ids),
+    }
+
+
+def _report(res: dict[str, Any]) -> None:
+    classes, listing, newly_rows = res["classes"], res["listing"], res["newly_rows"]
+    mismatch, hist_points, moved_total = res["mismatch"], res["hist_points"], res["moved_total"]
+    up, down, newly = res["up"], res["down"], res["newly"]
+    print(f"instruments                                     {res['instruments']:>10,}")
+    print(f"control: stored _current keys differing from a fresh batch refresh  {res['stale']:,}")
+    for cls, k in sorted(classes.items()):
+        print(f"  {cls:<58} {k:>8,}")
+    print(f"instruments where batch != per-instrument       {mismatch:>10,}")
+    print(f"ownership_history points changed                {hist_points:>10,}")
+    print(f"insider rollup total moved                      {moved_total:>10,}  (up {up:,} / down {down:,})")
+    print(f"newly oversubscribed (gate 0, or inspect each)  {newly:>10,}")
+    for r in newly_rows:
+        print(f"  {r}")
+    for cls, items in sorted(listing.items()):
+        print(f"\n[{cls}] {len(items):,}")
+        for item in items:
+            print(f"  {item}")
+
+
+def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply", action="store_true", help="replay the cohort + full sync_insiders, and commit")
     ap.add_argument("--verify", action="store_true", help="check stored == recompute, for observations and _current")
+    ap.add_argument("--dump", help="run stages 0-1 and pickle stage 2's inputs to this path")
+    ap.add_argument("--load", help="run stage 2 from a --dump file (with --shard)")
+    ap.add_argument("--shard", default="0/1", help="K/N: this run's slice of stage 2's instruments")
+    ap.add_argument("--merge", help="print the merged stage-2 report of every <path>.shard*.json")
     args = ap.parse_args()
+
+    if args.merge:
+        parts = [json.loads(Path(f).read_text()) for f in sorted(glob.glob(f"{args.merge}.shard*.json"))]
+        merged: dict[str, Any] = {"classes": Counter(), "listing": defaultdict(list), "newly_rows": []}
+        for part in parts:
+            merged["classes"].update(part["classes"])
+            for k, v in part["listing"].items():
+                merged["listing"][k].extend(v)
+            merged["newly_rows"].extend(part["newly_rows"])
+            for k in ("stale", "mismatch", "hist_points", "moved_total", "up", "down", "newly", "instruments"):
+                merged[k] = merged.get(k, 0) + part[k]
+        print(f"=== stage 2 (merged {len(parts)} shards) ===")
+        _report(merged)
+        return 0
 
     with psycopg.connect(settings.database_url) as conn:
         conn.execute("SET jit = off")
         conn.commit()
         if args.apply:
             return _apply(conn)
-        conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
         if args.verify:
+            conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
             return _verify(conn)
-
-        # ---- stage 0: one snapshot for the census, the helper and the stored state
-        census_groups, _counts, _seen = census.collect(conn)
-        census_by = {(g.instrument_id, g.accession, g.filer_cik, g.di): g for g in census_groups}
-        rows = _cohort(conn)
-        accs = [r[0] for r in rows]
-        stored_txns: dict[str, set[tuple[Any, ...]]] = defaultdict(set)
-        stored_obs: dict[tuple[int, str, str | None, str], Decimal] = {}
-        for i in range(0, len(accs), 5000):
-            chunk = accs[i : i + 5000]
-            for r in conn.execute(_STORED_TXNS, {"accs": chunk}).fetchall():
-                stored_txns[r[0]].add(_txn_key(_Row(r)))
-            for r in conn.execute(_STORED_OBS, {"accs": chunk}).fetchall():
-                stored_obs[(int(r[0]), r[1], r[2], r[3])] = r[4]
-
-        helper: dict[tuple[int, str, str, str], tuple[str, Decimal | None, Any]] = {}
-        treatment: list[dict[str, Any]] = []
-        drift: list[str] = []
-        parsed_none = 0
-        siblings_of: dict[tuple[int, str | None], list[int]] = {}
-        entity_of: dict[tuple[int, str | None], int] = {}
-        holding_rows: list[tuple[Any, ...]] = []
-        evidence_iids: set[int] = set()
-        for accession, iid, url, tomb, _dt, _por, filed_at, payload in rows:
-            parsed: ParsedFiling | None = parse_form_4_xml(payload)
-            if parsed is None:
-                parsed_none += 1
-                continue
-            if {_txn_key(t) for t in parsed.transactions} != stored_txns.get(accession, set()):
-                drift.append(accession)
-            cik = parsed.filers[0].filer_cik
-            groups = form4_holding_observations(
-                [h for h in parsed.holdings if h.filer_cik == cik],
-                [t for t in parsed.transactions if t.filer_cik == cik],
-                document_type=parsed.document_type,
-                owner_ciks=[f.filer_cik for f in parsed.filers],
-                signature_date=parsed.signature_date,
-                period_of_report=parsed.period_of_report,
-                manifest_filed_at=filed_at,
-            )
-            rkey = (int(iid), parsed.issuer_cik)
-            if rkey not in siblings_of:
-                routing = resolve_insider_writer_routing(
-                    conn, discovery_instrument_id=int(iid), issuer_cik=parsed.issuer_cik
-                )
-                siblings_of[rkey] = routing.sibling_instrument_ids or [routing.entity_instrument_id]
-                entity_of[rkey] = routing.entity_instrument_id
-            for h in parsed.holdings:
-                holding_rows.append(
-                    (
-                        entity_of[rkey],
-                        accession,
-                        h.row_num,
-                        h.filer_cik,
-                        parsed.filers[0].filer_name,
-                        h.security_title,
-                        h.shares,
-                        h.is_derivative,
-                        h.direct_indirect,
-                        h.nature_of_ownership,
-                        Jsonb([{"footnote_id": r.footnote_id, "field": r.field} for r in h.footnote_refs]),
-                    )
-                )
-                if h.direct_indirect == "I" and not h.is_derivative:
-                    evidence_iids.update(siblings_of[rkey])
-            for g in groups:
-                helper[(int(iid), accession, cik, g.direct_indirect)] = (g.verdict, g.shares, g.period_end)
-                if g.shares is None or g.period_end is None:
-                    continue
-                for sib in siblings_of[rkey]:
-                    treatment.append(
-                        {
-                            "instrument_id": sib,
-                            "accession": accession,
-                            "holder_cik": cik,
-                            "holder_name": parsed.filers[0].filer_name.strip() or cik,
-                            "nature": FORM4_HOLDING_NATURE[g.direct_indirect],
-                            "url": str(url) if url else None,
-                            "filed_at": filed_at,
-                            "period_end": g.period_end,
-                            "shares": g.shares,
-                            "doc_type": parsed.document_type,
-                            "tombstoned": bool(tomb),
-                        }
-                    )
-        symbols = dict(conn.execute("SELECT instrument_id, symbol FROM instruments").fetchall())
-
-        print("=== stage 0: helper vs census, parser vs stored transactions ===")
-        print(f"cohort payloads (gated)                         {len(rows):>10,}")
-        print(f"  parser returned None                          {parsed_none:>10,}")
-        print(f"  transaction drift (parse != stored rows)      {len(drift):>10,}")
-        for a in drift[:20]:
-            print(f"    {a}")
-        census_keys = {k: (g.verdict, g.value, g.period_end) for k, g in census_by.items()}
-        agree = sum(1 for k, v in helper.items() if census_keys.get(k) == v)
-        print(f"helper groups                                   {len(helper):>10,}")
-        print(f"census groups                                   {len(census_keys):>10,}")
-        print(f"  equal (verdict, value, period_end)            {agree:>10,}")
-        for k in sorted(helper.keys() ^ census_keys.keys())[:20]:
-            print(f"    only in {'helper' if k in helper else 'census'}: {k} {helper.get(k) or census_keys.get(k)}")
-        for k in sorted(k for k in helper.keys() & census_keys.keys() if helper[k] != census_keys[k])[:20]:
-            print(f"    differs {k}: helper {helper[k]}, census {census_keys[k]}")
-        print("helper verdicts:")
-        for v, n in sorted(Counter(v[0] for v in helper.values()).items()):
-            print(f"    {v:<40} {n:>8,}")
-
-        print("\n=== stage 1: observations ===")
-        verdict: Counter[str] = Counter()
-        for o in treatment:
-            prior = stored_obs.get((o["instrument_id"], o["accession"], o["holder_cik"], o["nature"]))
-            verdict["added" if prior is None else "unchanged" if prior == o["shares"] else "changed"] += 1
-        print(f"treatment observations (siblings included)      {len(treatment):>10,}")
-        print(
-            f"  added / unchanged / changed (changed must be 0)  "
-            f"{verdict['added']:,} / {verdict['unchanged']:,} / {verdict['changed']:,}"
-        )
-        print("  removed: 0 by construction (record_insider_observation only upserts)")
-        print(f"  from formerly tombstoned filings              {sum(o['tombstoned'] for o in treatment):>10,}")
-        by_iid: dict[int, list[dict[str, Any]]] = defaultdict(list)
-        for o in treatment:
-            by_iid[o["instrument_id"]].append(o)
-        print(f"  instruments                                   {len(by_iid):>10,}")
-        smoke = [symbols.get(i) for i in by_iid if symbols.get(i) in _SMOKE]
-        print(f"  smoke panel touched                           {smoke or 'none'}")
-        amend_keys = defaultdict(set)
-        for o in treatment:
-            amend_keys[(o["instrument_id"], o["holder_cik"], o["nature"])].add(o["doc_type"])
-        four_a = [k for k, types in amend_keys.items() if {"4", "4/A"} <= types]
-        print(f"  keys with holding observations from a 4 AND a 4/A  {len(four_a):,}")
-        for k in four_a:
-            print(f"    {symbols.get(k[0])} {k}")
+        if args.load:
+            data = pickle.loads(Path(args.load).read_bytes())  # noqa: S301 — this script's own --dump output
+        else:
+            conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ  # one snapshot for stages 0-1
+            data = _stage01(conn)
+            if args.dump:
+                Path(args.dump).write_bytes(pickle.dumps(data))
+                return 0
+        k, n = (int(x) for x in args.shard.split("/"))
+        conn.isolation_level = psycopg.IsolationLevel.READ_COMMITTED
+        # Shard by issuer sibling group: an instrument's rollup reads holding rows of its own issuer's
+        # filings, and each shard inserts only its groups' rows, so no two open shard transactions
+        # insert the same ``(accession_number, row_num)`` (they would serialise on the unique index).
+        all_ids = sorted(set(data["by_iid"]) | data["evidence_iids"])
+        group = {
+            i: min(sibling_instruments_for_instrument(conn, i))
+            for i in set(all_ids) | {r[0] for r in data["holding_rows"]}
+        }
         conn.rollback()
-
-        # ---- stage 2: ONE transaction, rolled back at the end; each arm in a savepoint. The rollup
-        # reads ``insider_form4_holdings`` (record-holder evidence, the name resolver), so the
-        # control arm runs against the table empty and the treatment arm with the cohort's rows.
-        print("\n=== stage 2: _current, rollup, history (rolled back) ===")
-        classes: Counter[str] = Counter()
-        listing: dict[str, list[str]] = defaultdict(list)
-        moved_total = up = down = newly = mismatch = hist_points = 0
-        newly_rows: list[str] = []
-        ids = sorted(set(by_iid) | evidence_iids)
-        print(f"instruments (holding observations or I holding lines)  {len(ids):,}")
-        conn.execute(_MIGRATION.read_text())  # type: ignore[arg-type]  # no-op once applied
-        if conn.execute("SELECT count(*) FROM insider_form4_holdings").fetchone() != (0,):
-            print("insider_form4_holdings is not empty: the control arm would not be today's state")
-            return 1
-
-        def _arm(iid: int, group: list[dict[str, Any]], refresher: str) -> tuple[Any, Any, Any]:
-            sym = symbols.get(iid, "?")
-            holders = {o["holder_cik"] for o in group}
-            snap: Any = None
-            view: Any = None
-            hist: Any = None
-            with conn.transaction():
-                run = uuid4()
-                for o in group:
-                    record_insider_observation(
-                        conn,
-                        instrument_id=iid,
-                        holder_cik=o["holder_cik"],
-                        holder_name=o["holder_name"],
-                        ownership_nature=o["nature"],
-                        source="form4",
-                        source_document_id=o["accession"],
-                        source_accession=o["accession"],
-                        source_field=None,
-                        source_url=o["url"],
-                        filed_at=o["filed_at"],
-                        period_start=None,
-                        period_end=o["period_end"],
-                        ingest_run_id=run,
-                        shares=o["shares"],
-                    )
-                if refresher == "batch":
-                    refresh_insiders_current_batch(conn, instrument_ids=[iid])
-                else:
-                    refresh_insiders_current(conn, instrument_id=iid)
-                snap = _snapshot(conn, [iid])
-                if refresher == "one":
-                    view = _insider_view(conn, sym, iid)
-                    hist = {
-                        (h, p.period_end, p.ownership_nature): p.shares
-                        for h in holders
-                        for p in get_ownership_history(conn, instrument_id=iid, category="insiders", holder_id=h)
-                    }
-                raise psycopg.Rollback()
-            return snap, view, hist
-
-        control = {}
-        for n, iid in enumerate(ids, 1):
-            # Control: today's observations, freshly refreshed; history read for the same holders.
-            snap, view, _ = _arm(iid, [], "one")
-            holders = {o["holder_cik"] for o in by_iid.get(iid, [])}
-            with conn.transaction():
-                refresh_insiders_current(conn, instrument_id=iid)
-                hist = {
-                    (h, p.period_end, p.ownership_nature): p.shares
-                    for h in holders
-                    for p in get_ownership_history(conn, instrument_id=iid, category="insiders", holder_id=h)
-                }
-                raise psycopg.Rollback()
-            control[iid] = (snap, view, hist)
-            if n % 1000 == 0:
-                print(f"  control {n:,} / {len(ids):,}", flush=True)
-        with conn.cursor() as cur:
-            cur.executemany(_INSERT_HOLDING, holding_rows)
-        print(f"  treatment: {len(holding_rows):,} holding rows inserted (rolled back at the end)", flush=True)
-
-        for n, iid in enumerate(ids, 1):
-            sym = symbols.get(iid, "?")
-            group = by_iid.get(iid, [])
-            holding_docs = {(o["holder_cik"], o["nature"], o["accession"]) for o in group}
-            before, view_b, hist_b = control[iid]
-            after, view_a, hist_a = _arm(iid, group, "one")
-            after_batch, _, _ = _arm(iid, group, "batch")
-            mismatch += after != after_batch
-            hist_points += sum(1 for k in hist_b.keys() | hist_a.keys() if hist_b.get(k) != hist_a.get(k))
-            for key in before.keys() | after.keys():
-                b, a = before.get(key), after.get(key)
-                if b == a:
-                    continue
-                # value tuple: holder_cik, holder_name, source, source_document_id, source_accession,
-                # source_url, filed_at, period_start, period_end, shares
-                a_is_holding = a is not None and (a[0], key[2], a[3]) in holding_docs
-                if b is None:
-                    cls = "added (holding)" if a_is_holding else "added (other)"
-                elif a is None:
-                    cls = "removed: DERA winner dropped (clause 1)" if _is_dera(b[3]) else "removed: other"
-                elif a_is_holding:
-                    if _is_dera(b[3]):
-                        cls = "changed: holding replaces a DERA winner"
-                    elif b[2] == "form3" and b[8] is not None and b[8] > a[8]:
-                        cls = "changed: holding wins by source rank over a later form3"
-                    elif b[2] == "form4" and b[8] == a[8] and b[6] == a[6]:
-                        cls = "changed: holding ties the winner (tail decides)"
-                    elif b[9] == a[9]:
-                        cls = "changed: holding wins, same value"
-                    else:
-                        cls = "changed: holding wins, value differs"
-                else:
-                    cls = "changed: other"
-                classes[cls] += 1
-                if not cls.startswith(("added (holding)", "changed: holding wins")):
-                    listing[cls].append(f"{sym} {key[1]} {key[2]}: {b and (b[3], b[9])} -> {a and (a[3], a[9])}")
-            if view_b[0] != view_a[0]:
-                moved_total += 1
-                up += view_a[0] > view_b[0]
-                down += view_a[0] < view_b[0]
-                if not group:
-                    listing["rollup moved with no holding observation (evidence only)"].append(
-                        f"{sym} {view_b[0]:,.0f} -> {view_a[0]:,.0f}"
-                    )
-            if view_b[3] != view_a[3] and not group:
-                listing["insider holder names changed with no holding observation"].append(sym)
-            if view_a[2] and not view_b[2]:
-                newly += 1
-                newly_rows.append(f"{sym} {view_b[0]:,.0f} -> {view_a[0]:,.0f}")
-            if n % 1000 == 0:
-                print(f"  treatment {n:,} / {len(ids):,}", flush=True)
-        conn.rollback()
-
-        for cls, k in sorted(classes.items()):
-            print(f"  {cls:<58} {k:>8,}")
-        print(f"instruments where batch != per-instrument       {mismatch:>10,}")
-        print(f"ownership_history points changed                {hist_points:>10,}")
-        print(f"insider rollup total moved                      {moved_total:>10,}  (up {up:,} / down {down:,})")
-        print(f"newly oversubscribed (gate 0, or inspect each)  {newly:>10,}")
-        for r in newly_rows:
-            print(f"  {r}")
-        for cls, items in sorted(listing.items()):
-            print(f"\n[{cls}] {len(items):,}")
-            for item in items:
-                print(f"  {item}")
+        ids = [i for i in all_ids if group[i] % n == k]
+        data["holding_rows"] = [r for r in data["holding_rows"] if group[r[0]] % n == k]
+        res = _stage2(conn, data, ids)
+        if args.load:
+            Path(f"{args.load}.shard{k}.json").write_text(json.dumps(res, default=str))
+        _report(res)
     return 0
 
 
