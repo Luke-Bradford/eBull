@@ -501,26 +501,29 @@ fi
 # backticks would trigger command substitution at hook-run time,
 # silently running a second psql probe per push (Codex 1a BLOCKING).
 #
-# || true on every docker exec so set -euo pipefail (top of file)
-# cannot kill the whole hook if psql is briefly unavailable — same
-# best-effort posture as the orphan-sweep cleanup.
+# || true on the probe so set -euo pipefail (top of file) cannot kill
+# the whole hook if Postgres is briefly unavailable — same best-effort
+# posture as the orphan-sweep cleanup.
+#
+# The probe goes over TCP with connect and statement timeouts, not through
+# `docker exec`. On 2026-10-18 the Docker daemon stopped answering while
+# both Postgres containers kept serving TCP; the untimed `docker exec`
+# hung here, after every real gate had passed, and no push could finish.
 DB_SIZE_WARN_BYTES=64424509440  # 60 GB — rebased #1556 then #1436-followup; mirror of app/services/postgres_health.py
-if command -v docker >/dev/null 2>&1; then
-  db_size=$(docker exec ebull-postgres psql -U postgres -d ebull -tAc \
-    "SELECT pg_database_size('ebull')" 2>/dev/null | tr -d ' ' || true)
-  # Codex 2 LOW #4: `-gt` is bash arithmetic; a non-numeric blip (e.g.
-  # psql returning an error to stdout, container restart mid-probe)
-  # under `set -euo pipefail` would kill the hook. The integer regex
-  # below filters non-numeric values out so the warn block silently
-  # no-ops instead of failing the entire push.
-  if [[ "${db_size}" =~ ^[0-9]+$ && "${db_size}" -gt "${DB_SIZE_WARN_BYTES}" ]]; then
-    pretty=$(docker exec ebull-postgres psql -U postgres -d ebull -tAc \
-      "SELECT pg_size_pretty(pg_database_size('ebull'))" 2>/dev/null \
-      | tr -d ' ' || true)
-    echo '==> WARN: dev DB ebull size = '"${pretty}"' (> 60 GB).'
-    echo '==> WARN: investigate via GET /system/postgres-health.'
-    echo '==> WARN: non-blocking; push continues.'
-  fi
+db_size=$(uv run python -c "
+import psycopg
+from app.config import settings
+with psycopg.connect(settings.database_url, connect_timeout=3, options='-c statement_timeout=5000') as conn:
+    print(conn.execute('SELECT pg_database_size(current_database())').fetchone()[0])
+" 2>/dev/null || true)
+# Codex 2 LOW #4: `-gt` is bash arithmetic; a non-numeric blip (e.g. an
+# error on stdout, container restart mid-probe) under `set -euo pipefail`
+# would kill the hook. The integer regex below filters non-numeric values
+# out so the warn block silently no-ops instead of failing the entire push.
+if [[ "${db_size}" =~ ^[0-9]+$ && "${db_size}" -gt "${DB_SIZE_WARN_BYTES}" ]]; then
+  echo '==> WARN: dev DB size = '"$(( db_size / 1073741824 ))"' GB (> 60 GB).'
+  echo '==> WARN: investigate via GET /system/postgres-health.'
+  echo '==> WARN: non-blocking; push continues.'
 fi
 
 echo "==> Pre-push gate: green. Pushing."
