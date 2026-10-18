@@ -336,6 +336,11 @@ class Holder:
     # on a joint accession (``_INSIDER_JOINT_DIRECT_LINES_SQL``), so it is never counted:
     # :func:`_source_rows_and_total` folds it into provenance. ``False`` otherwise.
     joint_di_restatement: bool = False
+    # #3886 — the Form 4/3 Table I line balances that sum to ``shares`` when the observation
+    # is a sum of ≥2 lines (#3227's line, vehicle, holding and mixed sums), so
+    # :func:`_reconcile_insider_line_components` can match one line against another holder's
+    # block. Empty for a one-line figure and for every non-Section-16 holder.
+    line_components: tuple[Decimal, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -897,6 +902,9 @@ class _Candidate:
     # ``True`` on an ``indirect`` row restating the same owner's ``direct`` block on a joint
     # accession (#3349, ``_INSIDER_JOINT_DIRECT_LINES_SQL``). ``False`` otherwise.
     joint_di_restatement: bool = False
+    # #3886 — the Table I line balances ``shares`` is the sum of, when it is a sum of ≥2
+    # (``_INSIDER_LINE_COMPONENTS_SQL``). Empty otherwise.
+    line_components: tuple[Decimal, ...] = ()
 
 
 def edgar_archive_url(accession_number: str | None) -> str | None:
@@ -1209,6 +1217,109 @@ _INSIDER_JOINT_DIRECT_LINES_SQL: Final = """
              WHERE x.accession_number = d.source_accession) > 1
 """
 
+# #3886 — the non-zero Table I balances a ``_current`` Form 4/3 row's accession reports for its
+# holder, per ``(accession, filer, D/I)``, tagged ``T`` for a Form 4 transaction series' final
+# (one series for ``D``, one per nature for ``I``, as
+# :func:`app.services.insider_transactions.form4_form_key`; final by ``(txn_date, txn_row_num)``
+# as the writers take it, chosen before zeros are dropped so a series ending at zero adds nothing)
+# and ``H`` for a Form 4 or Form 3 holding line. Each row carries whether the scope a writer would
+# have summed it in is summable — every line ``D``/``I`` with a non-blank title, one title
+# (``form4_fold_shares`` conditions 2 and 3, ``form3_observation_shares``):
+#   * ``kind_ok`` — for ``T``, the filer's transaction lines in the accession (the ``I`` vehicle
+#     sum's unit); for ``H``, the filer's holding lines of that D/I (the Form 3 line sum and the
+#     holding-only sum);
+#   * ``unit_ok`` — every line of the filer in the accession, transactions and holdings (the
+#     mixed fold's unit).
+# Joined on accession and filer only: the line tables are stored under the filing's entity
+# instrument while ``_current`` fans out to every share-class sibling (Codex ckpt-2), and an
+# accession names one issuer. :func:`_line_components` decides which sum ``shares`` is.
+_INSIDER_LINE_COMPONENTS_SQL: Final = """
+    WITH cur AS (
+        SELECT DISTINCT oc.source_accession AS accession, oc.holder_cik AS cik
+          FROM ownership_insiders_current oc
+         WHERE oc.instrument_id = %(iid)s
+           AND oc.source IN ('form4', 'form3')
+           AND oc.holder_cik IS NOT NULL
+           AND oc.shares > 0
+           AND oc.source_document_id !~ ':(NDT|NDH):'
+    ), txn AS (
+        SELECT t.accession_number AS accession, t.filer_cik AS cik, t.direct_indirect AS di,
+               t.security_title AS title, t.nature_of_ownership, t.txn_date, t.txn_row_num,
+               t.post_transaction_shares AS shares
+          FROM cur JOIN insider_transactions t ON t.accession_number = cur.accession AND t.filer_cik = cur.cik
+         WHERE NOT t.is_derivative
+    ), hold AS (
+        SELECT h.accession_number AS accession, h.filer_cik AS cik, h.direct_indirect AS di,
+               h.security_title AS title, h.shares
+          FROM cur JOIN insider_form4_holdings h ON h.accession_number = cur.accession AND h.filer_cik = cur.cik
+         WHERE NOT h.is_derivative
+        UNION ALL
+        SELECT h.accession_number, h.filer_cik, h.direct_indirect, h.security_title, h.shares
+          FROM cur JOIN insider_initial_holdings h ON h.accession_number = cur.accession AND h.filer_cik = cur.cik
+         WHERE NOT h.is_derivative
+    ), lines AS (
+        SELECT accession, cik, di, title, 'T' AS kind FROM txn
+        UNION ALL
+        SELECT accession, cik, di, title, 'H' FROM hold
+    ), scope AS (
+        -- coalesce: ``bool_and`` skips NULL, and a NULL D/I is exactly a line no writer sums.
+        SELECT accession, cik, kind, CASE WHEN kind = 'H' THEN di END AS di,
+               bool_and(coalesce(di IN ('D', 'I'), FALSE) AND btrim(coalesce(title, '')) <> '')
+                   AND count(DISTINCT title) = 1 AS ok
+          FROM lines
+         GROUP BY GROUPING SETS ((accession, cik), (accession, cik, kind, CASE WHEN kind = 'H' THEN di END))
+    ), finals AS (
+        SELECT DISTINCT ON (accession, cik, di, nature_key) accession, cik, di, shares
+          FROM txn
+         CROSS JOIN LATERAL (
+               SELECT CASE WHEN di = 'I'
+                           THEN lower(regexp_replace(coalesce(nature_of_ownership, ''), '[^a-zA-Z0-9]', '', 'g'))
+                           ELSE '' END AS nature_key
+         ) k
+         WHERE di IN ('D', 'I')
+         ORDER BY accession, cik, di, nature_key, txn_date DESC NULLS LAST, txn_row_num DESC
+    ), terms AS (
+        SELECT accession, cik, di, 'T' AS kind, shares FROM finals
+        UNION ALL
+        SELECT accession, cik, di, 'H', shares FROM hold WHERE di IN ('D', 'I')
+    )
+    SELECT x.accession, x.cik, x.di, x.kind, x.shares,
+           coalesce(k.ok, FALSE) AS kind_ok, coalesce(u.ok, FALSE) AS unit_ok
+      FROM terms x
+      LEFT JOIN scope k ON k.accession = x.accession AND k.cik = x.cik AND k.kind = x.kind
+                       AND k.di IS NOT DISTINCT FROM (CASE WHEN x.kind = 'H' THEN x.di END)
+      LEFT JOIN scope u ON u.accession = x.accession AND u.cik = x.cik AND u.kind IS NULL
+     WHERE x.shares > 0
+"""
+
+_TABLE_I_CODE_BY_NATURE: Final[Mapping[str, str]] = {"direct": "D", "indirect": "I"}
+
+
+def _line_components(lines: Sequence[tuple[str, Decimal, bool, bool]] | None, shares: Decimal) -> tuple[Decimal, ...]:
+    """The line balances ``shares`` is the sum of, largest first, or ``()``.
+
+    ``lines`` are one ``(accession, filer, D/I)``'s ``(kind, balance, kind_ok, unit_ok)`` rows from
+    ``_INSIDER_LINE_COMPONENTS_SQL``. The writers store one of three sums (spec
+    ``2026-10-18-3886-control-group-line-components.md``, Change 1): every line (the mixed fold,
+    over a summable unit), the transaction finals alone (the ``I`` vehicle sum, kept when a mixed
+    fold refuses, over summable transactions) or the holdings alone (the Form 3 line sum and the
+    holding-only sum, over summable holdings of that D/I). The first of those with ≥2 terms whose
+    scope is summable and that adds up to ``shares`` exactly is the decomposition. A repeated
+    balance in it refuses: the writers refuse equal non-zero finals, and the pass could not tell
+    how many to match."""
+    if not lines:
+        return ()
+    candidates = (
+        (lines, all(unit_ok for *_, unit_ok in lines)),
+        ([ln for ln in lines if ln[0] == "T"], all(ln[2] for ln in lines if ln[0] == "T")),
+        ([ln for ln in lines if ln[0] == "H"], all(ln[2] for ln in lines if ln[0] == "H")),
+    )
+    for chosen, summable in candidates:
+        terms = [ln[1] for ln in chosen]
+        if summable and len(terms) >= 2 and sum(terms, Decimal(0)) == shares:
+            return tuple(sorted(terms, reverse=True)) if len(set(terms)) == len(terms) else ()
+    return ()
+
 
 def _collect_canonical_holders_from_current(conn: psycopg.Connection[Any], instrument_id: int) -> list[_Candidate]:
     """Build the canonical-holder candidate set from the per-source
@@ -1255,6 +1366,12 @@ def _collect_canonical_holders_from_current(conn: psycopg.Connection[Any], instr
         joint_direct_lines = {
             (str(r["accession"]), str(r["holder_identity_key"]), Decimal(r["shares"])) for r in cur.fetchall()
         }
+        cur.execute(_INSIDER_LINE_COMPONENTS_SQL, {"iid": instrument_id})
+        line_balances: dict[tuple[str, str, str], list[tuple[str, Decimal, bool, bool]]] = {}
+        for r in cur.fetchall():
+            line_balances.setdefault((str(r["accession"]), str(r["cik"]), str(r["di"])), []).append(
+                (str(r["kind"]), Decimal(r["shares"]), bool(r["kind_ok"]), bool(r["unit_ok"]))
+            )
         cur.execute(
             f"""
             SELECT oc.holder_cik, oc.holder_name, oc.holder_identity_key, oc.ownership_nature,
@@ -1315,6 +1432,22 @@ def _collect_canonical_holders_from_current(conn: psycopg.Connection[Any], instr
                             Decimal(row["shares"]),
                         )
                         in joint_direct_lines
+                    ),
+                    line_components=(
+                        _line_components(
+                            line_balances.get(
+                                (
+                                    str(row.get("source_accession") or ""),
+                                    str(row["holder_cik"]),
+                                    _TABLE_I_CODE_BY_NATURE[str(row["ownership_nature"])],
+                                )
+                            ),
+                            Decimal(row["shares"]),
+                        )
+                        if row["nature_from_table_i"]
+                        and row["holder_cik"]
+                        and str(row["ownership_nature"]) in _TABLE_I_CODE_BY_NATURE
+                        else ()
                     ),
                 )
             )
@@ -2220,6 +2353,7 @@ def _dedup_by_priority(candidates: Iterable[_Candidate]) -> list[Holder]:
                 joint_filing_lines=winner.joint_filing_lines,
                 # The WINNER's too: it is a property of the counted row's shares.
                 joint_di_restatement=winner.joint_di_restatement,
+                line_components=winner.line_components,
                 dropped_sources=tuple(
                     DroppedSource(
                         source=loser.source,
@@ -4040,6 +4174,147 @@ def _reconcile_insider_control_groups(
         else:
             for origin, h in members:
                 (survivors_out if origin == "s" else blockholders_out).append(h)
+    return survivors_out, blockholders_out, corrections
+
+
+def _reconcile_insider_line_components(
+    survivors: list[Holder],
+    blockholders: list[Holder],
+    record_holder_evidence: Mapping[tuple[str, Decimal], tuple[str, ...]] = _NO_RECORD_HOLDER_EVIDENCE,
+) -> tuple[list[Holder], list[Holder], list[CorrectionApplied]]:
+    """#1652's exact-value collapse at Table I line grain (#3886). Pure read-path; runs on
+    :func:`_reconcile_insider_control_groups`' output.
+
+    Spec: ``docs/specs/ownership/2026-10-18-3886-control-group-line-components.md``. A #3227
+    summed observation (``Holder.line_components``) hides the one line that equals another
+    holder's block, so the exact-``shares`` bucketing above no longer sees it: SMMT's
+    Zanganeh ``indirect`` (her "By Spouse" 573,883,879 plus two trusts and a family line)
+    stopped matching Duggan's ``direct`` 573,883,879, and the block rendered twice.
+
+    Each component value ``V`` that passes #1652's value proxies (≥ ``_INSIDER_GROUP_MIN_SHARES``,
+    :func:`_is_group_block`) is a bucket, largest first. Its members are every eligible holder
+    still standing whose remaining components include ``V`` (a *line* member) or whose
+    unmodified ``shares`` equal ``V`` (a *whole* member, as above). A bucket with a line member
+    and ≥2 distinct CIKs collapses — the same predicate as #1652's value-proxy route; the
+    deemed-chain tier (#2230) is not extended to lines. The keeper is
+    :func:`_select_control_group_rep` over the members, each line member seen at ``V``. Every
+    other whole member is consumed, as in #1652, unless removing one would release its identity's
+    other-channel rows (:func:`_releases_into_another_wedge`), which leaves the bucket alone; every
+    other line member KEEPS its row with ``V`` subtracted, so its other lines still count and its
+    identity stays in the owner-once grouping. A row may reach zero. One
+    ``insider_control_group_collapse`` correction per bucket.
+    """
+    pool: list[tuple[str, Holder]] = [("s", h) for h in survivors] + [("b", h) for h in blockholders]
+    state = [h for _, h in pool]
+    alive = [True] * len(pool)
+    modified = [False] * len(pool)
+    remaining = [list(h.line_components) for h in state]
+
+    def _eligible(h: Holder) -> bool:
+        cik = h.filer_cik
+        return h.shares > 0 and cik is not None and bool(cik.strip()) and h.winning_source in _GROUP_ELIGIBLE_SOURCES
+
+    values = sorted(
+        {v for comps in remaining for v in comps if v >= _INSIDER_GROUP_MIN_SHARES and _is_group_block(v)},
+        reverse=True,
+    )
+    corrections: list[CorrectionApplied] = []
+    for value in values:
+        line_members = [i for i in range(len(pool)) if alive[i] and _eligible(state[i]) and value in remaining[i]]
+        if not line_members:
+            continue
+        whole_members = [
+            i
+            for i in range(len(pool))
+            if alive[i] and not modified[i] and _eligible(state[i]) and state[i].shares == value
+        ]
+        members = whole_members + line_members
+        if len({state[i].filer_cik for i in members}) < 2:
+            continue
+        views = {i: (replace(state[i], shares=value) if i in line_members else state[i]) for i in members}
+        view_index = {id(v): i for i, v in views.items()}
+        others = [state[i] for i in range(len(pool)) if alive[i] and i not in views]
+        # The selector's release check (clause 4) asks what demoting the incumbent strands. A
+        # demoted line member keeps its row, so its own other Section 16 lots stay summed with it
+        # in owner-once (#1941) and strand nothing; hide those. Its rows in any other channel stay
+        # visible: a 13D/G restatement competes with the lot by MAX in owner-once, so demoting it
+        # can be undone downstream, and the selector must keep it as #2785 measured.
+        line_identities = {_identity_key(state[i].filer_cik, state[i].filer_name) for i in line_members}
+        rows_by_identity = _rows_by_identity(
+            views.values(),
+            [
+                h
+                for h in others
+                if not (
+                    _identity_key(h.filer_cik, h.filer_name) in line_identities
+                    and h.winning_source in _INSIDER_GROUP_SOURCES
+                )
+            ],
+        )
+        rep_view = _select_control_group_rep(list(views.values()), rows_by_identity, record_holder_evidence)
+        rep = view_index[id(rep_view)]
+        # A whole member is removed, as in #1652, which can RELEASE its identity's other-channel
+        # rows (#2230's hazard). This pass is new, so it fails closed on that as #2230 does.
+        full_index = _rows_by_identity(views.values(), others)
+        cluster = list(views.values())
+        if any(
+            i != rep and i not in line_members and _releases_into_another_wedge(views[i], cluster, full_index)
+            for i in members
+        ):
+            continue
+        dropped = list(state[rep].dropped_sources)
+        folded: list[str] = []
+        removed = Decimal(0)
+        for i in members:
+            if i == rep:
+                continue
+            h = state[i]
+            dropped.append(
+                DroppedSource(
+                    source=h.winning_source,
+                    accession_number=h.winning_accession,
+                    shares=value,
+                    as_of_date=h.as_of_date,
+                    edgar_url=h.winning_edgar_url,
+                    filer_cik=h.filer_cik,
+                    filer_name=h.filer_name,
+                )
+            )
+            if i in line_members:
+                state[i] = replace(h, shares=h.shares - value)
+                remaining[i].remove(value)
+                modified[i] = True
+                folded.append(f"{h.filer_name} ({h.filer_cik}) line {value} of {h.shares}")
+            else:
+                alive[i] = False
+                # Its own folded provenance (an earlier pass's losers) moves with it to the keeper.
+                dropped.extend(h.dropped_sources)
+                folded.append(f"{h.filer_name} ({h.filer_cik}) {h.shares}")
+            removed += value
+        state[rep] = replace(state[rep], dropped_sources=tuple(dropped))
+        corrections.append(
+            CorrectionApplied(
+                kind="insider_control_group_collapse",
+                filer_name=state[rep].filer_name,
+                shares_removed=removed,
+                filer_cik=state[rep].filer_cik,
+                source_channel=state[rep].winning_source,
+                winning_source=state[rep].winning_source,
+                winning_accession=state[rep].winning_accession,
+                detail=(
+                    f"Control group at Table I line grain: {len(members)} rows of related CIKs report "
+                    f"{value} (deemed ownership), counted once under {state[rep].filer_name}. Folded: "
+                    + "; ".join(folded)
+                ),
+            )
+        )
+    # A subtracted line is no longer a component of its row; the rest still sum to its shares. A
+    # keeper's components are unchanged, as its shares are.
+    for i in range(len(pool)):
+        if tuple(remaining[i]) != state[i].line_components:
+            state[i] = replace(state[i], line_components=tuple(remaining[i]))
+    survivors_out = [state[i] for i, (origin, _) in enumerate(pool) if alive[i] and origin == "s"]
+    blockholders_out = [state[i] for i, (origin, _) in enumerate(pool) if alive[i] and origin == "b"]
     return survivors_out, blockholders_out, corrections
 
 
@@ -5938,6 +6213,11 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
     survivors, blockholders, insider_group_corrections = _reconcile_insider_control_groups(
         survivors, blockholders, record_holder_evidence
     )
+    # #3886: the same collapse where the matching block is one Table I line of a #3227
+    # summed observation, which the exact-``shares`` bucketing above cannot see.
+    survivors, blockholders, line_group_corrections = _reconcile_insider_line_components(
+        survivors, blockholders, record_holder_evidence
+    )
     # 13D/G group collapse (#1645): a Rule 13d-5 group's members each report the
     # identical aggregate stake on separate accessions/CIKs and otherwise sum N× in
     # the blockholders wedge. Collapse a near-equal, same-period, non-round cluster to
@@ -6095,6 +6375,7 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
         *family_corrections,
         *same_accession_corrections,
         *insider_group_corrections,
+        *line_group_corrections,
         *group_corrections,
     )
     return OwnershipRollup(
