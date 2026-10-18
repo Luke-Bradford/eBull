@@ -800,7 +800,7 @@ def test_form5_happy_path(
     row = get_manifest_row(ebull_test_conn, "0000320193-26-000050")
     assert row is not None and row.ingest_status == "parsed"
     assert row.raw_status == "stored"
-    assert row.parser_version == "form5-v1"
+    assert row.parser_version == "form5-v2"
 
     with ebull_test_conn.cursor() as cur:
         cur.execute(

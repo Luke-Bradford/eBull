@@ -195,6 +195,7 @@ class _H:
     nature_of_ownership: str | None = None
     security_title: str | None = "Common Stock"
     is_derivative: bool = False
+    holding_form_type: str | None = None
 
 
 def _history(
@@ -274,6 +275,7 @@ def _groups(holdings: list[_H], transactions: Sequence[_T] = ()) -> dict[str, tu
         signature_date=_SIG,
         period_of_report=_SIG - timedelta(days=4),
         manifest_filed_at=_FILED,
+        not_subject_to_section_16=None,
     )
     return {g.direct_indirect: (g.verdict, g.shares) for g in groups}
 

@@ -13,7 +13,6 @@ from app.services.insider_transactions import (
     form4_holding_as_of,
     form4_holding_observations,
     parse_form_4_xml,
-    parse_form_5_xml,
 )
 
 # Relative to today, so the Form 4 retention window (3 years back) never ages the fixtures out.
@@ -29,6 +28,7 @@ class _H:
     direct_indirect: str | None = "D"
     security_title: str | None = "Common Stock"
     is_derivative: bool = False
+    holding_form_type: str | None = None
 
 
 @dataclass(frozen=True)
@@ -57,6 +57,7 @@ def _run(
         signature_date=signature,
         period_of_report=period,
         manifest_filed_at=filed_at,
+        not_subject_to_section_16=None,
     )
     return {g.direct_indirect: (g.verdict, g.shares, g.period_end) for g in groups}
 
@@ -136,10 +137,6 @@ def test_a_4a_holdings_only_parses() -> None:
     assert parsed is not None and parsed.document_type == "4/A"
 
 
-def test_form5_holdings_stay_out_of_scope() -> None:
-    assert parse_form_5_xml(_xml(_ND_HOLDING, document_type="5")) is None
-
-
 # ---------------------------------------------------------------- values
 
 
@@ -214,9 +211,10 @@ def test_a_holding_line_with_no_di_joins_no_group() -> None:
     assert _run([_H(_d("5"), direct_indirect=None)]) == {}
 
 
-def test_a_4a_is_in_scope_and_form5_is_not() -> None:
+def test_a_4a_is_in_scope_and_form3_is_not() -> None:
+    # Form 5 is in scope since #3227's Form 5 slice (tests/test_3227_form5_holdings.py).
     assert _run([_H(_d("5"))], document_type="4/A")["D"][:2] == ("one_line", _d("5"))
-    assert _run([_H(_d("5"))], document_type="5") == {}
+    assert _run([_H(_d("5"))], document_type="3") == {}
 
 
 def test_retention_and_a_missing_manifest_filed_at_write_nothing() -> None:

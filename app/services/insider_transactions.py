@@ -74,7 +74,8 @@ _PARSER_VERSION_FORM4 = "form4-v1"
 # ParsedFiling shape; the only delta is the documentType gate. Separate
 # manifest parser_version string lets the worker route Form 5 backlog
 # through ``rewash`` independently from Form 4.
-_PARSER_VERSION_FORM5 = "form5-v1"
+# form5-v2 (#3227): holding lines parsed and stored; a holdings-only Form 5 is a filing.
+_PARSER_VERSION_FORM5 = "form5-v2"
 
 logger = logging.getLogger(__name__)
 
@@ -449,8 +450,7 @@ class ParsedFiling:
     filers: tuple[ParsedFiler, ...]
     footnotes: tuple[ParsedFootnote, ...]
     transactions: tuple[ParsedTransaction, ...]
-    # #3227 — the Table I / II holding lines of a Form 4 (``parse_form_5_xml`` leaves this empty:
-    # Form 5 holdings stay out of scope).
+    # #3227 — the Table I / II holding lines of a Form 4 or Form 5.
     holdings: tuple[ParsedHolding, ...] = ()
 
 
@@ -610,14 +610,13 @@ def parse_form_5_xml(raw_xml: str) -> ParsedFiling | None:
     the same ``insider_filings`` + ``insider_transactions`` tables with
     ``document_type='5'`` recording the provenance.
 
-    Form 5 holdings (the optional year-end balance reconciliation
-    section) are out of scope for this PR. The annual sections most
-    operators use are the late-Form-4 transactions in
-    ``<nonDerivativeTable>/<nonDerivativeTransaction>`` /
-    ``<derivativeTable>/<derivativeTransaction>``, which this parser
-    handles. A filing carrying ONLY holdings sections returns
-    ``None`` — the manifest adapter then writes a tombstone so the
-    worker stops re-fetching the same payload every tick.
+    The holding lines (``nonDerivativeHolding`` / ``derivativeHolding``,
+    Table I/II column 5: the balance "at the end of Issuer's Fiscal
+    Year") are returned on ``holdings`` as :func:`parse_form_4_xml`
+    returns them, each with its ``transactionFormType`` (#3227, spec
+    ``docs/specs/ownership/2026-10-18-3227-form5-holdings.md``). A
+    holdings-only Form 5 — derivative holdings only included — is a
+    filing, not a tombstone.
 
     Returns ``None`` when:
 
@@ -625,8 +624,7 @@ def parse_form_5_xml(raw_xml: str) -> ParsedFiling | None:
     - Document root is not ``ownershipDocument``.
     - ``documentType`` is not ``5`` or ``5/A``.
     - Zero reporting owners.
-    - Zero transactions across both the non-derivative and derivative
-      tables.
+    - Zero transactions AND zero holdings across both tables.
 
     Observations: Form 5 transactions write through with
     ``source='form4'``. The shared ``OwnershipSource`` enum on
@@ -671,8 +669,9 @@ def parse_form_5_xml(raw_xml: str) -> ParsedFiling | None:
     default_filer_cik = filers[0].filer_cik
 
     transactions = _extract_transactions(root, default_filer_cik=default_filer_cik)
+    holdings = _extract_holdings(root, default_filer_cik=default_filer_cik)
 
-    if not transactions:
+    if not transactions and not holdings:
         return None
 
     remarks = _text(root.find("./remarks"))
@@ -696,6 +695,7 @@ def parse_form_5_xml(raw_xml: str) -> ParsedFiling | None:
         filers=filers,
         footnotes=footnotes,
         transactions=transactions,
+        holdings=holdings,
     )
 
 
@@ -1080,6 +1080,10 @@ class ParsedHolding:
     # silently violates the migration-057 "every structured field
     # surfaced" precedent.
     footnote_refs: tuple[ParsedFootnoteRef, ...] = ()
+    # #3227 — ``transactionCoding/transactionFormType`` of a Form 5 holding line ("3" marks a
+    # holding that should have been reported on a Form 3, Form 5 Instruction 8). None when absent,
+    # which is the Form 3 and Form 4 case.
+    holding_form_type: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1309,6 +1313,7 @@ def _parse_one_holding(
         underlying_shares=underlying_shares,
         underlying_value=underlying_value,
         footnote_refs=_collect_footnote_refs(el),
+        holding_form_type=_text(el.find("./transactionCoding/transactionFormType")),
     )
 
 
@@ -1670,7 +1675,7 @@ def upsert_filing(
                     direct_indirect, nature_of_ownership,
                     conversion_exercise_price, exercise_date, expiration_date,
                     underlying_security_title, underlying_shares, underlying_value,
-                    footnote_refs
+                    footnote_refs, holding_form_type
                 ) VALUES (
                     %s, %s, %s,
                     %s, %s, %s,
@@ -1678,7 +1683,7 @@ def upsert_filing(
                     %s, %s,
                     %s, %s, %s,
                     %s, %s, %s,
-                    %s
+                    %s, %s
                 )
                 ON CONFLICT (accession_number, row_num) DO UPDATE SET
                     instrument_id             = EXCLUDED.instrument_id,
@@ -1697,7 +1702,8 @@ def upsert_filing(
                     underlying_security_title = EXCLUDED.underlying_security_title,
                     underlying_shares         = EXCLUDED.underlying_shares,
                     underlying_value          = EXCLUDED.underlying_value,
-                    footnote_refs             = EXCLUDED.footnote_refs
+                    footnote_refs             = EXCLUDED.footnote_refs,
+                    holding_form_type         = EXCLUDED.holding_form_type
                 """,
                 (
                     entity_instrument_id,
@@ -1719,6 +1725,7 @@ def upsert_filing(
                     holding.underlying_shares,
                     holding.underlying_value,
                     Jsonb([{"footnote_id": ref.footnote_id, "field": ref.field} for ref in holding.footnote_refs]),
+                    holding.holding_form_type,
                 ),
             )
 
@@ -1934,7 +1941,8 @@ def _record_form4_holding_observations(
     run_id: UUID,
 ) -> None:
     """The live writer's half of :func:`form4_holding_observations` (#3227): one observation per
-    written holding-only group of the first listed owner (every line is attributed to them)."""
+    written holding-only group of the first listed owner (every line is attributed to them), on a
+    Form 4 or a Form 5."""
     with conn.cursor() as cur:
         cur.execute("SELECT filed_at FROM sec_filing_manifest WHERE accession_number = %s", (accession_number,))
         row = cur.fetchone()
@@ -1948,6 +1956,7 @@ def _record_form4_holding_observations(
         signature_date=parsed.signature_date,
         period_of_report=parsed.period_of_report,
         manifest_filed_at=manifest_filed_at,
+        not_subject_to_section_16=parsed.not_subject_to_section_16,
     )
     holder_name = _primary_filer_name(parsed, filer_cik).strip()
     for g in groups:
@@ -1992,6 +2001,8 @@ class Form4HoldingLine(Protocol):
     def shares(self) -> Decimal | None: ...
     @property
     def direct_indirect(self) -> str | None: ...
+    @property
+    def holding_form_type(self) -> str | None: ...
 
 
 class Form4BalanceLine(Protocol):
@@ -2032,6 +2043,21 @@ def form4_holding_as_of(signature_date: date | None, period_of_report: date | No
     return None
 
 
+def form5_holding_as_of(period_of_report: date | None, filed: date) -> date | None:
+    """A Form 5 holding line's ``period_end``: Item 3, "Statement for Issuer's Fiscal Year Ended",
+    which the XML carries as ``periodOfReport`` — Table I column 5 is the balance "at the end of
+    Issuer's Fiscal Year". None when it is missing, after ``filed`` (the UTC date of the manifest
+    ``filed_at``) or before the § 16 floor (:func:`predates_section_16`). The signature date plays
+    no part (spec ``docs/specs/ownership/2026-10-18-3227-form5-holdings.md``, Source rule)."""
+    if period_of_report is None or period_of_report > filed or predates_section_16(period_of_report):
+        return None
+    return period_of_report
+
+
+#: Form 5 submission types :func:`form4_holding_observations` reads; a 5/A writes nothing.
+FORM5_HOLDING_DOCUMENT_TYPES: Final = frozenset({"5", "5/A"})
+
+
 def form4_holding_observations(
     holdings: Iterable[Form4HoldingLine],
     transactions: Iterable[Form4BalanceLine],
@@ -2041,14 +2067,24 @@ def form4_holding_observations(
     signature_date: date | None,
     period_of_report: date | None,
     manifest_filed_at: datetime | None,
+    not_subject_to_section_16: bool | None,
 ) -> list[Form4HoldingGroup]:
-    """ONE filer's holding-only groups in ONE Form 4/4A, each with its verdict.
+    """ONE filer's holding-only groups in ONE Form 4/4A or Form 5/5A, each with its verdict.
 
-    Spec: ``docs/specs/ownership/2026-10-18-3227-form4-holding-rows.md``, Change 3; both Form 4
-    observation writers call this, so the weekly re-derivation cannot revert the live one (#3874).
+    Spec: ``docs/specs/ownership/2026-10-18-3227-form4-holding-rows.md``, Change 3, and
+    ``2026-10-18-3227-form5-holdings.md``, Change 3; both observation writers call this, so the
+    weekly re-derivation cannot revert the live one (#3874).
     ``holdings`` and ``transactions`` are the filer's lines in the accession, derivative ones
-    included (they are ignored). Returns nothing outside Form 4/4A, without a manifest
-    ``filed_at``, or outside :func:`form4_within_retention` — no fallback date applies.
+    included (they are ignored). Returns nothing outside Form 4/4A and 5/5A, without a manifest
+    ``filed_at``, or outside the form's retention window (:func:`form4_within_retention`,
+    :func:`form5_within_retention`) on its UTC date — no fallback date applies.
+
+    A Form 5 group is dated by :func:`form5_holding_as_of`, a Form 4 one by
+    :func:`form4_holding_as_of`. A Form 5 group writes nothing, with the verdict
+    ``refused:amendment`` on a 5/A (Instruction 9: an amendment repeats only the lines it amends),
+    ``refused:exit_box`` when ``not_subject_to_section_16`` is set (Instruction 4(a)(i): the balance
+    is as of an undated exit) and ``refused:delinquent_form3`` when a line has
+    ``holding_form_type`` "3" (Instruction 8: the form does not say which date its amount carries).
 
     A group is the filer's non-derivative ``D`` (or ``I``) holding lines, when the accession has no
     non-derivative transaction line of that D/I — any line, used by the transaction writers or not,
@@ -2071,10 +2107,23 @@ def form4_holding_observations(
         never the last line (UMH's last ``D`` line is a preferred class).
     A group with no :func:`form4_holding_as_of` date writes nothing either.
     """
-    if document_type not in FORM4_VEHICLE_SUM_DOCUMENT_TYPES or manifest_filed_at is None:
+    if manifest_filed_at is None:
         return []
     filed = manifest_filed_at.astimezone(UTC).date()
-    if not form4_within_retention(filed):
+    gate: str | None = None
+    if document_type in FORM4_VEHICLE_SUM_DOCUMENT_TYPES:
+        if not form4_within_retention(filed):
+            return []
+        period_end = form4_holding_as_of(signature_date, period_of_report, filed)
+    elif document_type in FORM5_HOLDING_DOCUMENT_TYPES:
+        if not form5_within_retention(filed):
+            return []
+        period_end = form5_holding_as_of(period_of_report, filed)
+        if document_type == "5/A":
+            gate = "refused:amendment"
+        elif not_subject_to_section_16:
+            gate = "refused:exit_box"
+    else:
         return []
     lines = [h for h in holdings if not h.is_derivative]
     txns = [t for t in transactions if not t.is_derivative]
@@ -2086,7 +2135,6 @@ def form4_holding_observations(
         if t.post_transaction_shares is not None
     ]
     owner_count = len({(c or "").strip() for c in owner_ciks})
-    period_end = form4_holding_as_of(signature_date, period_of_report, filed)
 
     out: list[Form4HoldingGroup] = []
     for di in ("D", "I"):
@@ -2095,7 +2143,12 @@ def form4_holding_observations(
         group = [h for h in lines if h.direct_indirect == di]
         if not group:
             continue
-        verdict = _form4_holding_verdict(group, holding_amounts, txn_balances, owner_count)
+        code3 = document_type in FORM5_HOLDING_DOCUMENT_TYPES and any(h.holding_form_type == "3" for h in group)
+        verdict = (
+            gate
+            or ("refused:delinquent_form3" if code3 else None)
+            or _form4_holding_verdict(group, holding_amounts, txn_balances, owner_count)
+        )
         shares: Decimal | None = None
         if verdict in FORM4_HOLDING_WRITES and period_end is not None:
             shares = sum((h.shares for h in group if h.shares is not None), Decimal(0))

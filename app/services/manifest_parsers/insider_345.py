@@ -16,10 +16,9 @@ and ``insider_transactions``. Observation write-through emits
 ``source='form4'`` since the ``OwnershipSource`` enum on the
 observations CHECK constraint does not include ``form5``;
 operator-visible provenance is preserved on ``insider_filings`` via
-the document_type JOIN. The optional Form 5 year-end holdings
-reconciliation section is out of scope — those filings return
-``None`` from the parser and tombstone via the standard manifest
-adapter path.
+the document_type JOIN. A Form 5's year-end holding lines are stored in
+``insider_form4_holdings`` beside a Form 4's (#3227), so a holdings-only
+Form 5 is a filing.
 
 ParseOutcome contract:
 
@@ -620,7 +619,9 @@ def _parse_form5(
             parser_version=_PARSER_VERSION_FORM5,
             error="missing filed_at",
         )
-    if not form5_within_retention(filed_at.date()):
+    # The UTC date, as ``form4_holding_observations`` takes it (#3227): a session-timezone
+    # ``.date()`` could disagree with the writers' retention gate near midnight.
+    if not form5_within_retention(filed_at.astimezone(UTC).date()):
         logger.debug(
             "form5 manifest parser: accession=%s filed_at=%s pre-18mo retention cap; tombstoning",
             accession,
