@@ -84,5 +84,8 @@ def test_shock_reads_material_8ks_only_and_reports_the_knowledge_delta() -> None
     assert decision["delta_s"] == -14400.0
     assert decision["changed"] is True
     assert shock_decision(_row("8-K", before, after, has_material_item=False)) is None
+    # A NULL side resolves to the next session open, not None: 2026-09-30 → 2026-10-01 09:30 ET.
+    to_null = shock_decision(_row("8-K", before, None))
+    assert to_null is not None and to_null["after"] == datetime(2026, 10, 1, 13, 30, tzinfo=UTC)
     assert shock_decision(_row("10-K/A", before, after, has_material_item=False)) is not None
     assert shock_decision(_row("4", before, after)) is None

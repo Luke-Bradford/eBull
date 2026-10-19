@@ -112,8 +112,10 @@ def shock_decision(row: ChangedInput) -> dict[str, object] | None:
         return None
     if row.form.startswith("8-K") and not row.has_material_item:
         return None
-    before = sec_knowledge_at(filed_at=row.filed_at, accepted_at=row.before)
-    after = sec_knowledge_at(filed_at=row.filed_at, accepted_at=row.after)
+    # ``sec_knowledge_at`` is declared ``-> datetime`` (strategy_shock_mechanism.py:338): a NULL acceptance falls back
+    # to the next session open, never to None. The annotations make pyright hold that here.
+    before: datetime = sec_knowledge_at(filed_at=row.filed_at, accepted_at=row.before)
+    after: datetime = sec_knowledge_at(filed_at=row.filed_at, accepted_at=row.after)
     return {"before": before, "after": after, "changed": before != after, "delta_s": (after - before).total_seconds()}
 
 
@@ -124,8 +126,9 @@ def pead_decision(
     if row.instrument_id is None or row.form not in PEAD_FORMS:
         return None
     filed_date = fact_filed if fact_filed is not None else utc_date(row.filed_at)
-    before = earliest_entry_date(filed_date, row.before)
-    after = earliest_entry_date(filed_date, row.after)
+    # ``earliest_entry_date`` is declared ``-> date`` (pead_outcomes.py:281): a NULL acceptance gives filed_date + 1.
+    before: date = earliest_entry_date(filed_date, row.before)
+    after: date = earliest_entry_date(filed_date, row.after)
     return {
         "before": before,
         "after": after,
