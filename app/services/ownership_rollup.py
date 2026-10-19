@@ -4475,8 +4475,7 @@ def _cofiler_graph(
     # one identity shares it by construction.
     canon = {k: _canonical_cik(k[4:]) if k.startswith("CIK:") else None for k in rows_by_identity}
 
-    def _eligible(k: str, excluded: Iterable[str]) -> bool:
-        excluded = frozenset(excluded)
+    def _is_node(k: str, excluded: frozenset[str]) -> bool:
         return (
             totals[k] > 0
             and canon[k] is not None
@@ -4486,9 +4485,9 @@ def _cofiler_graph(
     # #3895's graph: its categories, its exclusion (``def14a``), and an edge only between the owner
     # of a row on the accession and another owner it names.
     base_nodes = sorted(
-        k for k in rows_by_identity if category_of[k] in _COFILER_BASE_CATEGORIES and _eligible(k, {"def14a"})
+        k for k in rows_by_identity if category_of[k] in _COFILER_BASE_CATEGORIES and _is_node(k, frozenset({"def14a"}))
     )
-    nodes = sorted(k for k in rows_by_identity if _eligible(k, _COFILER_EXCLUDED_SOURCES))
+    nodes = sorted(k for k in rows_by_identity if _is_node(k, _COFILER_EXCLUDED_SOURCES))
     # One canonical-CIK index per node set: #3895's edges must resolve against #3895's own nodes, or a
     # breach of the guard's invariant (below) would drop a #3895 link and the fallback would not be #3895.
     by_canon: dict[str, list[str]] = {}
@@ -4555,7 +4554,9 @@ def _cofiler_graph(
         # #3895's cliques inside it collapse as they do today, so the pie is never above #3895's.
         chains.append(members)
         inside = frozenset(members)
-        cliques.extend(_keeper_first(m) for m in base_cliques if m[0] in inside)
+        # A #3895 clique is connected under #3895's edges, which are a subset of these, so it lies in one
+        # widened component; testing every member states that rather than relying on it.
+        cliques.extend(_keeper_first(m) for m in base_cliques if inside.issuperset(m))
     return _CofilerGraph(rows_by_identity, category_of, totals, edges, cliques, chains)
 
 

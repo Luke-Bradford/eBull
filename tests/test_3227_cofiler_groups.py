@@ -18,6 +18,7 @@ from app.services.ownership_rollup import (
     SliceCategory,
     SourceTag,
     _canonical_cik,
+    _cofiler_graph,
     _reconcile_cofiler_groups,
 )
 
@@ -335,3 +336,21 @@ def test_guard_invariant_breach_falls_back_to_the_3895_result() -> None:
     out, (c,) = _reconcile_cofiler_groups(cats, {"J": frozenset({"1", "2"})})
     assert c.shares_removed == Decimal(90)
     assert [h.filer_name for h in out["insiders"]] == ["A"]
+
+
+def test_every_3895_clique_lies_inside_one_widened_component() -> None:
+    # The guard's premise: #3895's edges are a subset of the widened ones, so each #3895 clique is
+    # connected, and collapsed whole, inside one widened component. Here {A, B} is #3895's clique and
+    # the widened graph adds I-B and C-I links, so {A, B, I, C} is one non-clique component.
+    cats = _cats(
+        insiders=[
+            _h("0000000001", "A", 100, accession="J"),
+            _h("0000000002", "B", 90, accession="J"),
+            _h("0000000003", "C", 20, accession="L"),
+        ],
+        institutions=[_h("0000000009", "I", 50, source="13d", accession="K")],
+    )
+    graph = _cofiler_graph(cats, {"J": frozenset({"1", "2"}), "K": frozenset({"2", "9"}), "L": frozenset({"3", "9"})})
+    component = ["CIK:0000000001", "CIK:0000000002", "CIK:0000000003", "CIK:0000000009"]
+    assert [sorted(m) for m in graph.chains] == [component]
+    assert graph.cliques == [["CIK:0000000001", "CIK:0000000002"]]

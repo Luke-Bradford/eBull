@@ -18,8 +18,9 @@ Gates (non-zero exit on any failure):
   * per instrument: new pie ≤ base pie; newly oversubscribed = 0; input − output = Σ ``shares_removed``;
   * input invariants: no ``insiders``/``blockholders`` row with a ``13f`` source; no ``institutions`` identity
     with a ``13f`` row and another row;
-  * family: no co-filer collapse holds a member CIK of an appended family holder (reported: every pass-input
-    identity that does — a family member's Form 3/4 row is a person-side survivor of the family pre-pass);
+  * family: no collapse this change adds holds a member CIK of an appended family holder (reported: every
+    pass-input identity that does, and every #3895 collapse that does — a family member's Form 3/4 row is a
+    person-side survivor of the family pre-pass);
   * treatment quality on the new cliques (``scripts.ab_3227_cofiler_groups.candidate_status``): = SUM ≤ 1,
     between-nearer-SUM ≤ 1, ≥ 4 in range;
   * latency: (co-filer read + pass) / (the rest of ``get_ownership_rollup``) per instrument, p95 ≤ 10%, on the
@@ -193,9 +194,12 @@ def main() -> int:
         t0 = time.perf_counter()
         out = real_pass(by_category, cofilers)
         cap["t"] = time.perf_counter() - t0
+        # The copies are bookkeeping the real rollup does not pay: timed apart and taken off ``elapsed``.
+        t1 = time.perf_counter()
         cap["input"] = {c: list(hs) for c, hs in by_category.items()}
         cap["output"] = {c: list(hs) for c, hs in out[0].items()}
         cap["cofilers"] = cofilers
+        cap["copy"] = time.perf_counter() - t1
         return out
 
     rollup_mod._reconcile_cofiler_groups = pass_wrapper  # type: ignore[assignment]
@@ -238,7 +242,7 @@ def main() -> int:
             try:
                 t0 = time.perf_counter()
                 r = rollup_mod.get_ownership_rollup(conn, symbol, iid)
-                elapsed = time.perf_counter() - t0
+                elapsed = time.perf_counter() - t0 - cap.get("copy", 0.0)
             except Exception as exc:  # noqa: BLE001 — counted and gated at 0
                 st["error"] += 1
                 fails.append(f"{symbol}: {exc!r}")
@@ -249,8 +253,6 @@ def main() -> int:
                     fails.append(f"{symbol}: did not reach the pass and has no no_data_reason")
                 continue
             st["reached"] += 1
-            # The capture's list copies are bookkeeping the real rollup does not pay; they sit inside
-            # the wrapper's timed region only as a few list() calls, which this share includes.
             cost = cap["t"] + cap.get("t_read", 0.0)
             share = cost / max(elapsed - cost, 1e-9)
             lat_all.append(share)
@@ -300,8 +302,14 @@ def main() -> int:
             st["pass-input identities with a family-member CIK"] += len(in_fam)
             for k in in_fam:
                 st[f"family-member CIK in pass input: {o['cat'][k]} ({o['rows'][k][0].winning_source})"] += 1
-            if any(m & in_fam for m in o["new"]):
-                fails.append(f"{symbol}: a co-filer collapse holds a family-member CIK")
+            for m in o["new"]:
+                if m & in_fam:
+                    if m in o["base"]:
+                        # #3895 already made this collapse (RBBN: JPMorgan Chase's Form 4 with OEP II's
+                        # Form 3); this change neither adds nor alters it.
+                        st["#3895 collapses holding a family-member CIK (reported)"] += 1
+                    else:
+                        fails.append(f"{symbol}: a collapse this change adds holds a family-member CIK")
             if symbol in _NAMED:
                 print(f"named {symbol}: pie {pie:,} base {base_pie:,} cliques {[sorted(m) for m in o['new']]}")
             if set(o["new"]) == set(o["base"]):

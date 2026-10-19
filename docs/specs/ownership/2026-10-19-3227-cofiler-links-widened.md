@@ -165,8 +165,10 @@ The caller of `_read_cofilers` passes the winning accessions of every kept row w
     families"), so it can reach the pass.
   - The build A/B found such identities in the pass input (2 in its first 300 instruments). That is a pre-existing
     path this change does not alter.
-  - Gate (build-time amendment): no co-filer collapse contains a family-member CIK, and the count in the input is
-    reported.
+  - Gate (build-time amendment): no collapse this change adds contains a family-member CIK. The pass-input count
+    and #3895's own such collapses are reported.
+    - On 2026-10-19 the input held 19 such identities.
+    - One #3895 collapse holds one: RBBN, JPMorgan Chase's Form 4 (52,036,572) with OEP II Partners' Form 3.
 - **Edges:** when a node's kept row (`shares > 0`, non-blank accession) sits on an accession whose co-filers include
   that node, **every pair of nodes whose canonical CIKs are among those co-filers links**, via that accession.
   - An accession that no node's own row sits on gives no edge.
@@ -280,7 +282,8 @@ What its own spec must answer first (Codex r1):
     - newly oversubscribed = 0;
     - input total − output total = Σ `shares_removed`;
     - the two input invariants above are 0;
-    - no co-filer collapse contains a family-member CIK; the pass-input count is reported.
+    - no collapse this change adds contains a family-member CIK; the pass-input count and #3895's own such collapses
+      are reported.
   - **Census reconciliation:** 107 instruments, −1,430,249,770, 11 fixed, 108 new cliques (64 / 44), and the category
     table above, with any drift explained.
   - **Treatment-quality gate, on the new cliques:**
