@@ -357,7 +357,10 @@ export type OwnershipCorrectionKind =
    *  ⚠ A change of STATUS, not a sale — the shares may still sit in the same hands and
    *  simply stop being attributable to this channel, so any label must read as a status
    *  change and never as a disposal. Same no-quoted-literal rule as above applies. */
-  | "insider_section16_exit_declared";
+  | "insider_section16_exit_declared"
+  /** #3227 — a clique of co-filers of joint accessions counted once, at its largest
+   *  member, a lower bound of the group's union. The detail states the SUM beside it. */
+  | "cofiler_group_collapse";
 
 export interface OwnershipCorrectionApplied {
   readonly kind: OwnershipCorrectionKind;

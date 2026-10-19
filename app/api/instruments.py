@@ -5114,6 +5114,8 @@ class _CorrectionAppliedModel(BaseModel):
         sit in the same hands and simply stop being attributable to this channel.
         ``winning_accession`` is the filing carrying the box, which for this kind is often
         the removed row's own accession.
+      * ``cofiler_group_collapse`` (#3227) — a clique of identities that co-filed joint
+        accessions counted once, at its largest member; ``detail`` states the SUM beside it.
 
     ⚠ This Literal is a CLOSED vocabulary and the service layer's ``kind`` strings are
     NOT validated against it until serialization — so a new kind added to
@@ -5138,6 +5140,7 @@ class _CorrectionAppliedModel(BaseModel):
         "superseded_by_later_13f_hr",
         "insider_beyond_form4_retention",
         "insider_section16_exit_declared",
+        "cofiler_group_collapse",
     ]
     filer_cik: str | None
     filer_name: str

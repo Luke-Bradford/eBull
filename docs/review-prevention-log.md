@@ -13310,3 +13310,14 @@ neighbouring container and match it.**
 - Enforced in: `docs/specs/ownership/2026-10-19-3227-cofiler-group-identity.md` (Evidence 2 and the build's
   treatment-quality gate). The data-engineer skill text is posted on #2403, because `.claude/**` is write-refused in
   loop worktrees.
+
+### A read-path invariant raise must cite the guarantee that makes it unreachable (#3227 co-filer groups, PR #3895)
+
+- Symptom: `_cofiler_graph` raises `ValueError` if owner-once placed one identity in two categories. The review bot
+  read it as a new way to 500 `/ownership-rollup`. The guarantee was real (`_reconcile_owner_once` groups by the same
+  `_identity_key` and extends exactly one category per group), but it lived only in the author's head and in a PR
+  reply, so the next round could not see it.
+- Prevention: a new `raise` on a read path carries a comment citing the code that makes it unreachable, by function and statement (line numbers go stale),
+  and says why raising beats log-and-skip. For a pass, skipping means serving a figure the invariant cannot vouch
+  for. Without such a citation, log-and-skip is the right default.
+- Enforced in: `app/services/ownership_rollup.py::_cofiler_graph` (the comment at the raise).
