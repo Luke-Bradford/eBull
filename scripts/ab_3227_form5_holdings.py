@@ -179,7 +179,7 @@ def _verify(conn: psycopg.Connection[Any]) -> int:
     print("  accession, tombstone, derivative lines, XML observations")
     for acc, tomb, lines, obs in conn.execute(_LEDGER, {"accs": ledger_accs}).fetchall():
         print(f"  {acc} {tomb} {lines} {obs}")
-    return ab4._verify(conn, reverse_accessions={r[0] for r in _cohort(conn)})
+    return ab4._verify(conn, reverse_accessions={r[0]: int(r[1]) for r in _cohort(conn)})
 
 
 def _stage01(conn: psycopg.Connection[Any], as_of: datetime) -> dict[str, Any]:  # noqa: C901, PLR0912, PLR0915

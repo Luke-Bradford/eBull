@@ -203,10 +203,13 @@ def _apply(conn: psycopg.Connection[Any]) -> int:
     return 1 if failed else 0
 
 
-def _verify(conn: psycopg.Connection[Any], *, reverse_accessions: set[str] | None = None) -> int:
-    """Every recomputed observation equals its stored row; with ``reverse_accessions``, also every
-    stored XML observation of those accessions has a recompute (a stale extra fails). The reverse
-    check is scoped: an expired filing's stored observations are outside the weekly writer's reach."""
+def _verify(conn: psycopg.Connection[Any], *, reverse_accessions: dict[str, int] | None = None) -> int:
+    """Every recomputed observation equals its stored row. With ``reverse_accessions`` (accession ->
+    its ``insider_filings.instrument_id``), also: every stored XML observation of those accessions on
+    that entity instrument has a recompute (a stale extra fails), and every one on a share-class
+    sibling mirrors the entity's row — the live writer fans out to siblings, the weekly writer
+    derives on the entity instrument only. Scoped: an expired filing's stored observations are
+    outside the weekly writer's reach."""
     stored = {(int(r[0]), r[1], r[2], r[3]): r[4] for r in conn.execute(_VERIFY_STORED).fetchall()}
     obs = list(derive_form4_observations(conn))
     diffs = [
@@ -223,8 +226,14 @@ def _verify(conn: psycopg.Connection[Any], *, reverse_accessions: set[str] | Non
     extra: list[tuple[Any, ...]] = []
     if reverse_accessions is not None:
         recomputed = {(o.instrument_id, o.accession_number, o.holder_cik, o.ownership_nature) for o in obs}
-        extra = sorted(k for k in stored if k[1] in reverse_accessions and k not in recomputed)
-        print(f"stored observations of {len(reverse_accessions):,} accessions with no recompute  {len(extra):>6,}")
+        scoped = [k for k in stored if k[1] in reverse_accessions]
+        entity = [k for k in scoped if k[0] == reverse_accessions[k[1]]]
+        sibling = [k for k in scoped if k[0] != reverse_accessions[k[1]]]
+        extra = sorted(k for k in entity if k not in recomputed)
+        extra += sorted(k for k in sibling if stored.get((reverse_accessions[k[1]], *k[1:])) != stored[k])
+        n = len(reverse_accessions)
+        print(f"stored observations of {n:,} accessions: entity {len(entity):,}, sibling {len(sibling):,}")
+        print(f"  entity rows with no recompute, or sibling rows not mirroring the entity  {len(extra):>6,}")
         for k in extra[:20]:
             print(f"  {k}: stored {stored[k]}")
     ids = [
