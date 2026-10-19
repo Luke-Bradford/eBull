@@ -11,6 +11,7 @@ is a base table; ``financial_periods_ttm`` is a view).
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Any
 
 import psycopg
@@ -18,6 +19,7 @@ import psycopg.rows
 import pytest
 
 from app.services.xbrl_derived_stats import resolve_market_cap_basis
+from tests.fixtures.pit_market_cap import seed_pit_step
 
 
 @pytest.fixture
@@ -73,6 +75,10 @@ def _seed(ebull_test_conn: psycopg.Connection[tuple]) -> psycopg.Connection[tupl
         "VALUES (25, '2025-01-01', 1e10, 'CommonClassA', '0009991943', '0000000000-00-000000', "
         "'10-K', '2025Q1', now(), 'curated', 1, now())"
     )
+    # #3850: caps come from the #3841 PIT row at the session. 22 is the domestic control; 24 has a published PIT row
+    # that the view still refuses (ads_ratio).
+    for iid in (22, 24):
+        seed_pit_step(conn, iid, session=date(2026, 10, 16), close=100, shares=1e10)
     conn.commit()
     return conn
 
@@ -132,19 +138,18 @@ def test_resolver_fails_closed_fpi_first(_seed: psycopg.Connection[tuple]) -> No
 
 
 @pytest.mark.db
-def test_ratio_known_adr_corrected_not_suppressed(_seed: psycopg.Connection[tuple]) -> None:
-    # #2117: iid 24 has a curated 10:1 ratio. The view divides the per-ADS price
-    # (metric_price = 100/10 = 10) so every price-bearing column is CORRECT and
-    # PUBLISHED (not fail-closed): market_cap = 10 × 1e10 = 1e11 (not 1e12),
-    # pe = 10 / 6 (not 100 / 6). The raw per-ADS price still displays.
+def test_ratio_known_adr_refuses_cap_keeps_per_share(_seed: psycopg.Connection[tuple]) -> None:
+    # #2117 divided the per-ADS price by the curated 10:1 ratio. #3850: the cap is refused (`ads_ratio`) because no
+    # ratio history exists, so an ADS re-basing cannot be told from a split; the per-share P/E keeps the divided
+    # price (100 / 10 / 6), and the raw per-ADS price still displays. The resolver reads the view's NULL back.
     row = _val(_seed, 24)
     assert row["current_price"] == 100
-    assert float(row["market_cap_live"]) == pytest.approx(1e11)  # corrected, not the 1e12 fake
+    assert row["market_cap_live"] is None
+    assert row["fcf_yield"] is None
     assert float(row["pe_ratio"]) == pytest.approx(10 / 6)
     res = resolve_market_cap_basis(_seed, instrument_id=24)
     assert res.basis == "fpi_adr_ratio"
-    assert res.value is not None
-    assert float(res.value) == pytest.approx(1e11)
+    assert res.value is None
 
 
 @pytest.mark.db
