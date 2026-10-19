@@ -13286,3 +13286,27 @@ neighbouring container and match it.**
   `conn.transaction()` (the older `ab_3227_form3_line_sum.py` did, uncommented, which is why the copy lost it), and
   comment why. After a dry run, check one row the arms touched for a `refreshed_at` inside the run.
 - Enforced in: `scripts/ab_3227_form3_multi_title.py` (the arm loop, the batch pass and `--verify`).
+
+### A validation that matches a group's proxy row against ANY member favours MAX by construction (#3227 co-filer groups, 2026-10-19)
+
+- Symptom: the first census for co-filer groups compared each group's MAX and SUM with the largest DEF 14A row whose
+  name matched any member, and read 279 groups for MAX against 16 for SUM. When members hold apart, Item 403(a) lists
+  each of them, and the largest matching row is then the largest member's own row, which equals MAX. The test could
+  not have returned SUM for a disjoint group. The same flaw sat under a 507 : 31 reading of the #837 joint-13D/G
+  writer convention. Codex checkpoint 1 caught it (round 1, finding 4).
+- Repaired test: a proxy row counts as a candidate group figure only under all of these conditions:
+  - it is the only distinct row matching any member;
+  - some minor member holds more than 5%, so Item 403(a) would list it if it held apart;
+  - every member's name tokenises;
+  - every member's date is aligned with the proxy.
+  
+  The result is 16 at MAX, 0 at SUM and 1 near SUM over 20 in-range cliques. It is labelled descriptive, not decisive.
+  A fuzzy matcher can still miss a member's own row.
+- Prevention:
+  - Before counting a comparison as evidence for one treatment, construct the input where the other treatment is true
+    and run the test on it. If it still reports the first treatment, the test measures the matcher, not the data.
+  - Count rows outside the admissible interval as excluded, never as support for the nearer bound.
+  - Classify against the interval before testing tolerance bands.
+- Enforced in: `docs/specs/ownership/2026-10-19-3227-cofiler-group-identity.md` (Evidence 2 and the build's
+  treatment-quality gate). The data-engineer skill text is posted on #2403, because `.claude/**` is write-refused in
+  loop worktrees.
