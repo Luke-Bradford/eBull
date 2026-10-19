@@ -13364,3 +13364,17 @@ neighbouring container and match it.**
 - Enforced in: `app/services/manifest_parsers/sec_tender.py` (`header_url`),
   `app/services/tender_offers.py::_primary_document`, `tests/test_manifest_parser_sec_tender.py`
   (`test_cik_directory_txt_url_fetches_header_from_the_accession_folder`).
+
+### A share basis verified at one price is not verified at a newer price (#3850, 2026-10-19)
+
+- Symptom (spec v2, Codex checkpoint 1 round 2): the first fix kept `instrument_valuation`'s live quote and swapped
+  in the #3841 effective count. #3841 verifies the count's basis against the stored session close only. On a split's
+  first day, before `daily_candle_refresh` back-adjusts `price_daily` and writes the revision row that makes PIT
+  `basis_stale`, the quote is already post-split. Count × quote would then publish a wrong cap with no refusal, and
+  the "wiring" acceptance check would reproduce the same wrong product.
+- Prevention: pair a basis-checked quantity only with the price it was checked against. For #3841, that is PIT's own
+  `market_cap` at the exact session (`price_date = session`, not "latest PIT row"). A consumer that also shows a newer
+  price exposes the valuation price and session beside it, and chooses the base per multiple: count-based multiples
+  use the session close, per-share multiples use the quote. Acceptance carries a synthetic quote-after-session case.
+- Enforced in: `docs/specs/fundamentals/2026-10-19-3850-live-cap-share-basis.md` (construction item 5, acceptance
+  item 5). The build PR adds the DB test. Skill text for `.claude/skills/metrics-analyst` is posted on #2403.
