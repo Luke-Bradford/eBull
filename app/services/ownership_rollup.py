@@ -1266,6 +1266,9 @@ _INSIDER_LINE_COMPONENTS_SQL: Final = """
         SELECT h.accession_number, h.filer_cik, h.direct_indirect, h.security_title, h.shares, TRUE
           FROM cur JOIN insider_initial_holdings h ON h.accession_number = cur.accession AND h.filer_cik = cur.cik
          WHERE NOT h.is_derivative
+           -- The lines ``form3_observation_lines`` builds from (``row_num`` is NOT NULL), so a
+           -- shareless line's title cannot refuse a scope the writer summed (#3227 Form 3 multi-title).
+           AND h.shares IS NOT NULL
     ), lines AS (
         SELECT accession, cik, di, title, 'T' AS kind, FALSE AS form3 FROM txn
         UNION ALL
@@ -1308,14 +1311,13 @@ _TABLE_I_CODE_BY_NATURE: Final[Mapping[str, str]] = {"direct": "D", "indirect": 
 def _summable_scope(lines_ok: bool, titles: Sequence[str | None] | None, *, form3: bool | None, holdings: bool) -> bool:
     """A line scope a writer could have summed: every line usable, and the writer's title test.
 
-    A Form 3 scope keeps exact matching (``form3_observation_shares``: one title). A Form 4 scope
-    takes ``form4_title_match`` (one title, or several naming one class, #3227 multi-title), over
-    stripped titles for a holding group as ``form4_holding_observations`` strips them."""
+    Every scope takes ``form4_title_match`` (one title, or several naming one class, #3227
+    multi-title; Form 3 since #3227 Form 3 multi-title, as ``form3_observation_shares``), over
+    stripped titles for a Form 4 holding group as ``form4_holding_observations`` strips them; a
+    Form 3 writer compares its raw titles."""
     if not lines_ok or titles is None:
         return False
-    if form3:
-        return len(set(titles)) == 1
-    if holdings:
+    if holdings and not form3:
         titles = [(t or "").strip() for t in titles]
     return form4_title_match(titles) is not None
 

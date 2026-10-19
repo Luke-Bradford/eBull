@@ -105,6 +105,27 @@ _CASES = [
         "100",
         id="two_classes_refuse",
     ),
+    # #3227 Form 3 multi-title: titles naming one class read as one title (``form4_title_class``).
+    pytest.param(
+        (
+            _Line(1, "100", title="Common Stock", di="D"),
+            _Line(2, "300", title="Common Stock 401(k)", di="D"),
+            _Line(3, "600", title="Common Stock (Restricted)", di="D"),
+        ),
+        "1000",
+        id="one_class_titles_sum",
+    ),
+    pytest.param(
+        (_Line(1, "100", title="Class A Common Stock", di="D"), _Line(2, "900", title="Class B Common Stock", di="D")),
+        "100",
+        id="class_letters_refuse",
+    ),
+    pytest.param(
+        # "Warrants" has no class (no equity noun or base word), so the group refuses.
+        (_Line(1, "100", title="Common Stock", di="D"), _Line(2, "900", title="Warrants", di="D")),
+        "100",
+        id="classless_title_refuses",
+    ),
     pytest.param(
         # Two trusts both worded "By Trust" are two holdings (0001209191-22-029116 on EDGAR).
         (_Line(1, "100", nature="By Trust"), _Line(2, "900", nature="By Trust")),

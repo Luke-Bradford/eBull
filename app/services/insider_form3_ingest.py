@@ -48,6 +48,7 @@ from app.services.filings import reconcile_mislinked_ownership_filing_events
 from app.services.insider_transactions import (
     ParsedForm3,
     _canonical_form_4_url,
+    form4_title_match,
     lookup_sec_filed_at,
     parse_form_3_xml,
 )
@@ -502,9 +503,11 @@ def form3_observation_shares(
       * the group's D/I is known (``D`` or ``I``) — the parser maps a missing or invalid one to
         ``None``, which the caller labels ``direct``, so a sum there would invent a direct total;
       * >1 line in the group, every one with non-negative shares;
-      * every line has a non-blank title, and the group has ONE title — classes never sum
-        (CNH's common + special voting shares). Exact match, so a re-spelled title refuses;
-      * no two of the filer's lines of that title carry the same amount, across D AND I. Instr.
+      * every line has a non-blank title, and the group has ONE title or several naming one class
+        (``form4_title_match``: Form 3 Instr. 4(b) is Form 4 Instr. 3(b) word for word, #3227
+        Form 3 multi-title) — classes never sum (CNH's common + special voting shares);
+      * no two of the filer's lines of that title (that class, for a multi-title group) carry the
+        same amount, across D AND I. Instr.
         5(b)(iv) lets an indirect line restate an entity's whole holding, so one block can
         appear twice (YPF ``0000903423-08-000197``); equal amounts cannot be told apart from a
         restatement, so they refuse, fixed by construction;
@@ -514,8 +517,9 @@ def form3_observation_shares(
 
     The nature of ownership is NOT a condition (#3227, 2026-10-17): the rule separates forms but
     does not limit a form to one line, so two unequal ``D`` lines, or two "By Trust" lines, are
-    two holdings of the class. The full reasoning, and why the DERA twin of this rule cannot read
-    nature at all, is at ``INSIDER_HOLDING_LINE_SUM_LATERAL``.
+    read as two holdings of the class (a line nested in another is not detected). The full
+    reasoning, and why the DERA twin of this rule cannot rely on its nature column, is at
+    ``INSIDER_HOLDING_LINE_SUM_LATERAL``.
     """
     lines = form3_observation_lines(holdings)
     groups: dict[tuple[str | None, str | None], list[Form3HoldingLine]] = {}
@@ -554,13 +558,13 @@ def _line_sum_if_distinct(
     if any(h.shares is None or h.shares < 0 for h in group):
         return None
     titles = {h.security_title for h in group}
-    if len(titles) != 1:
+    if any(t is None or not t.strip() for t in titles):
         return None
-    title = next(iter(titles))
-    if title is None or not title.strip():
+    same_title = form4_title_match(titles)
+    if same_title is None:
         return None
-    same_title = [h.shares for h in lines if h.filer_cik == key[0] and h.security_title == title]
-    if len(set(same_title)) != len(same_title):
+    same_class = [h.shares for h in lines if h.filer_cik == key[0] and same_title(h.security_title)]
+    if len(set(same_class)) != len(same_class):
         return None
     return sum((h.shares for h in group if h.shares is not None), Decimal(0))
 
