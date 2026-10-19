@@ -233,6 +233,10 @@ class CorrectionApplied:
         same deemed block under many related CIKs across Form 4 / Form 3 / 13D / 13G; the
         cross-channel group is counted once (insiders slice) and the other members folded.
         Folded member CIK+name+shares live in ``detail``.
+      * ``cofiler_group_collapse`` (#3227) — a clique of identities that co-filed joint
+        accessions counted once, at its largest member (a declared lower bound of the Rule
+        13d-5(b)(1)(i) union; ``detail`` states the SUM beside it and the links). The folded
+        members' rows are on the keeper's ``dropped_sources``.
 
     The NT-specific fields are ``Optional`` for the #1644/#1649/#1645 kinds (no NT
     quarters). The generic ``family_id`` / ``source_channel`` (the folded channel)
@@ -4352,6 +4356,229 @@ def _reconcile_insider_line_components(
     return survivors_out, blockholders_out, corrections
 
 
+# ---------------------------------------------------------------------------
+# Co-filer groups — a joint filing's reporting owners counted once (#3227)
+# See docs/specs/ownership/2026-10-19-3227-cofiler-group-identity.md
+# ---------------------------------------------------------------------------
+
+# The categories whose identities can join a co-filer group. ``institutions`` / ``etfs`` hold
+# a 13F or curated-family figure (and a 13F filer's 13D/G winner), which I14 keeps apart.
+_COFILER_CATEGORIES: Final[tuple[SliceCategory, ...]] = ("insiders", "blockholders")
+
+# accession → the canonical CIKs of its reporting owners, for accessions naming ≥2. Indexed on
+# ``accession_number`` in both tables; the caller strips the accessions it passes.
+_COFILERS_SQL: Final = """
+    SELECT accession, array_agg(DISTINCT cik) AS ciks
+      FROM (
+        SELECT accession_number AS accession, nullif(ltrim(btrim(filer_cik), '0'), '') AS cik
+          FROM insider_filers WHERE accession_number = ANY(%(accs)s::text[])
+        UNION ALL
+        SELECT accession_number, nullif(ltrim(btrim(reporter_cik), '0'), '')
+          FROM blockholder_filings WHERE accession_number = ANY(%(accs)s::text[])
+      ) x
+     WHERE cik IS NOT NULL
+     GROUP BY accession
+    HAVING count(DISTINCT cik) >= 2
+"""
+
+
+def _canonical_cik(cik: str | None) -> str | None:
+    """A CIK as the co-filer lookup compares it: whitespace and leading zeros stripped, or
+    ``None`` for a blank or all-zero value."""
+    stripped = (cik or "").strip().lstrip("0")
+    return stripped or None
+
+
+def _read_cofilers(conn: psycopg.Connection[Any], accessions: Iterable[str]) -> dict[str, frozenset[str]]:
+    """The reporting owners of each joint accession among ``accessions`` (``insider_filers``
+    plus ``blockholder_filings`` reporter CIKs), keyed by accession; single-owner accessions
+    are absent. An empty input queries nothing."""
+    accs = sorted({a.strip() for a in accessions if a and a.strip()})
+    if not accs:
+        return {}
+    with conn.cursor() as cur:
+        cur.execute(_COFILERS_SQL, {"accs": accs})
+        return {acc: frozenset(ciks) for acc, ciks in cur.fetchall()}
+
+
+@dataclass(frozen=True)
+class _CofilerGraph:
+    """The co-filer graph over owner-once's output (:func:`_cofiler_graph`). ``cliques`` hold
+    member identity keys keeper-first; ``chains`` are the components left split."""
+
+    rows_by_identity: dict[str, list[Holder]]
+    category_of: dict[str, SliceCategory]
+    totals: dict[str, Decimal]
+    edges: dict[frozenset[str], set[str]]
+    cliques: list[list[str]]
+    chains: list[list[str]]
+
+
+def _cofiler_graph(
+    by_category: Mapping[SliceCategory, Sequence[Holder]],
+    cofilers: Mapping[str, frozenset[str]],
+) -> _CofilerGraph:
+    """Nodes, edges and components for :func:`_reconcile_cofiler_groups` (its docstring states the
+    rules). Separate so the full-population A/B measures the pass's own cliques."""
+    rows_by_identity: dict[str, list[Holder]] = {}
+    category_of: dict[str, SliceCategory] = {}
+    for category, holders in by_category.items():
+        for h in holders:
+            key = _identity_key(h.filer_cik, h.filer_name)
+            if category_of.setdefault(key, category) != category:
+                raise ValueError(f"owner-once placed {key!r} in two categories: {category_of[key]!r}, {category!r}")
+            if category in _COFILER_CATEGORIES:
+                rows_by_identity.setdefault(key, []).append(h)
+
+    totals = {k: sum((h.shares for h in rows), Decimal(0)) for k, rows in rows_by_identity.items()}
+    canon = {k: _canonical_cik(rows[0].filer_cik) for k, rows in rows_by_identity.items()}
+    nodes = sorted(
+        k
+        for k, rows in rows_by_identity.items()
+        if totals[k] > 0 and canon[k] is not None and not any(h.winning_source == "def14a" for h in rows)
+    )
+    by_canon: dict[str, list[str]] = {}
+    for k in nodes:
+        by_canon.setdefault(canon[k] or "", []).append(k)
+
+    edges: dict[frozenset[str], set[str]] = {}
+    for k in nodes:
+        for h in rows_by_identity[k]:
+            accession = h.winning_accession.strip()
+            ciks = cofilers.get(accession) if h.shares > 0 and accession else None
+            if not ciks or canon[k] not in ciks:
+                continue
+            for cik in ciks:
+                for other in by_canon.get(cik, ()):
+                    if other != k:
+                        edges.setdefault(frozenset((k, other)), set()).add(accession)
+
+    parent = {k: k for k in nodes}
+
+    def _find(k: str) -> str:
+        while parent[k] != k:
+            parent[k] = parent[parent[k]]
+            k = parent[k]
+        return k
+
+    for pair in edges:
+        a, b = sorted(pair)
+        parent[_find(b)] = _find(a)
+    components: dict[str, list[str]] = {}
+    for k in nodes:
+        components.setdefault(_find(k), []).append(k)
+
+    cliques: list[list[str]] = []
+    chains: list[list[str]] = []
+    for members in components.values():
+        if len(members) < 2:
+            continue
+        if any(frozenset((a, b)) not in edges for i, a in enumerate(members) for b in members[i + 1 :]):
+            chains.append(members)  # left split (spec, Change 2)
+            continue
+        # Canonical CIKs are digit strings without leading zeros: compare them as numbers ("2" < "10").
+        cliques.append(sorted(members, key=lambda k: (-totals[k], category_of[k] != "insiders", int(canon[k] or 0), k)))
+    return _CofilerGraph(rows_by_identity, category_of, totals, edges, cliques, chains)
+
+
+def _reconcile_cofiler_groups(
+    by_category: dict[SliceCategory, list[Holder]],
+    cofilers: Mapping[str, frozenset[str]],
+) -> tuple[dict[SliceCategory, list[Holder]], list[CorrectionApplied]]:
+    """Count each clique of co-filers once, at its largest member (#3227). Pure; runs on
+    :func:`_reconcile_owner_once`'s output.
+
+    Members of a group that files jointly (Form 4 Gen. Instr. 4(b)(v), Rule 13d-1(k)(1)) carry
+    different CIKs, so owner-once keeps each one, and wherever their figures overlap the shared
+    shares are added once per member (TMUS: Deutsche Telekom Holding's Form 4 and Deutsche
+    Telekom AG's 13D, 109% of the shares outstanding together). The group's holding is the
+    Rule 13d-5(b)(1)(i) union of the members' holdings, somewhere between the largest member
+    (MAX) and the SUM. Nothing we extract states it, so this is a declared lower-bound
+    policy: MAX never counts the same shares twice. The spec records why it is chosen over
+    today's SUM, and the accepted undercount when members hold apart.
+
+    * Nodes: identities in ``_COFILER_CATEGORIES`` whose owner total (the sum of their kept rows,
+      what the pie adds) is > 0 and none of whose rows is a matched DEF 14A figure.
+    * Edges: node A links to node B when a row of A with ``shares > 0`` sits on an accession
+      whose co-filers include both A's and B's canonical CIK. A NAME-keyed identity never links.
+    * Only a clique collapses: every pair must share an edge, so a member that co-filed with two
+      others who never co-filed does not join them.
+    * The keeper is the largest owner total (ties: an ``insiders`` member, then the lowest
+      canonical CIK). Its rows and category are unchanged; no role moves between identities.
+      Every other member's rows leave the pie and become ``DroppedSource`` entries on the
+      keeper's largest row, one per row, followed by their own dropped entries.
+
+    Returns the new per-category lists (input order kept) and one ``cofiler_group_collapse``
+    correction per clique."""
+    graph = _cofiler_graph(by_category, cofilers)
+    rows_by_identity, totals, edges = graph.rows_by_identity, graph.totals, graph.edges
+    removed: set[str] = set()
+    replacements: dict[int, Holder] = {}
+    corrections: list[CorrectionApplied] = []
+    for members in graph.cliques:
+        keeper, losers = members[0], members[1:]
+        keeper_rows = rows_by_identity[keeper]
+        primary = max(keeper_rows, key=lambda h: h.shares)
+        dropped = list(primary.dropped_sources)
+        seen = {(d.filer_cik, d.filer_name, d.source, d.accession_number, d.shares) for d in dropped}
+        folded: list[str] = []
+        for k in losers:
+            for h in rows_by_identity[k]:
+                own = DroppedSource(
+                    source=h.winning_source,
+                    accession_number=h.winning_accession,
+                    shares=h.shares,
+                    as_of_date=h.as_of_date,
+                    edgar_url=h.winning_edgar_url,
+                    filer_cik=h.filer_cik,
+                    filer_name=h.filer_name,
+                )
+                for d in (own, *h.dropped_sources):
+                    key = (d.filer_cik, d.filer_name, d.source, d.accession_number, d.shares)
+                    if key not in seen:
+                        seen.add(key)
+                        dropped.append(d)
+            folded.append(f"{rows_by_identity[k][0].filer_name} ({rows_by_identity[k][0].filer_cik}) {totals[k]}")
+            removed.add(k)
+        replacements[id(primary)] = replace(primary, dropped_sources=tuple(dropped))
+        group_sum = sum((totals[k] for k in members), Decimal(0))
+        links = "; ".join(
+            f"{rows_by_identity[a][0].filer_name} ↔ {rows_by_identity[b][0].filer_name} via {', '.join(sorted(accs))}"
+            for pair, accs in sorted(edges.items(), key=lambda e: sorted(e[0]))
+            if pair <= set(members)
+            for a, b in [sorted(pair)]
+        )
+        largest_loser = max((h for k in losers for h in rows_by_identity[k]), key=lambda h: h.shares)
+        corrections.append(
+            CorrectionApplied(
+                kind="cofiler_group_collapse",
+                filer_name=primary.filer_name,
+                shares_removed=group_sum - totals[keeper],
+                filer_cik=primary.filer_cik,
+                source_channel=largest_loser.winning_source,
+                winning_source=primary.winning_source,
+                winning_accession=primary.winning_accession,
+                detail=(
+                    f"Co-filers counted once at the largest member, {primary.filer_name} {totals[keeper]} "
+                    f"(#3227 co-filer groups). The group's holding is the Rule 13d-5(b)(1)(i) union: at least "
+                    f"{totals[keeper]}, at most the SUM {group_sum}. MAX treatment selected; overlap unverified. "
+                    f"Links: {links}. Folded: {'; '.join(folded)}"
+                ),
+            )
+        )
+
+    if not removed:
+        return by_category, corrections
+    out: dict[SliceCategory, list[Holder]] = {}
+    for category, holders in by_category.items():
+        out[category] = [
+            replacements.get(id(h), h)
+            for h in holders
+            if category not in _COFILER_CATEGORIES or _identity_key(h.filer_cik, h.filer_name) not in removed
+        ]
+    return out, corrections
+
+
 def _bucket_into_slices(
     by_category: dict[SliceCategory, list[Holder]],
     unmatched_def14a: list[_Candidate],
@@ -6262,6 +6489,14 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
     survivor_keys = frozenset(_identity_key(h.filer_cik, h.filer_name) for h in survivors)
     blockholders, group_corrections = _reconcile_13d_groups(blockholders, survivor_keys)
     by_category = _reconcile_owner_once(survivors + blockholders)
+    # #3227 co-filer groups: a joint filing's reporting owners are distinct CIKs, so owner-once
+    # keeps each; count a clique of them once, at its largest member. Before the family holders
+    # are appended — those never join.
+    cofilers = _read_cofilers(
+        conn,
+        [h.winning_accession for c in _COFILER_CATEGORIES for h in by_category.get(c, []) if h.shares > 0],
+    )
+    by_category, cofiler_corrections = _reconcile_cofiler_groups(by_category, cofilers)
     for _cat, _fam_holders in family_by_category.items():
         by_category.setdefault(_cat, []).extend(_fam_holders)
     # Per-class denominator swap (#788): when a VERIFIED FSDS per-class share count
@@ -6411,6 +6646,7 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
         *insider_group_corrections,
         *line_group_corrections,
         *group_corrections,
+        *cofiler_corrections,
     )
     return OwnershipRollup(
         symbol=symbol,
@@ -6720,14 +6956,16 @@ def build_rollup_csv(rollup: OwnershipRollup) -> str:
     # in the insiders wedge, the others folded. Emit one ``__insider_group_collapse:<rep_cik>__``
     # memo row per correction (folded member CIK+name+shares are in ``detail``). Excluded
     # from any SUM(shares) reconciliation (the folded shares were never real).
+    # #3227 co-filer groups share the shape: one ``__cofiler_group_collapse:<rep_cik>__`` row.
     for corr in rollup.corrections_applied:
-        if corr.kind != "insider_control_group_collapse":
+        if corr.kind not in ("insider_control_group_collapse", "cofiler_group_collapse"):
             continue
+        tag = "insider_group_collapse" if corr.kind == "insider_control_group_collapse" else "cofiler_group_collapse"
         writer.writerow(
             [
                 _csv_safe(corr.filer_cik or ""),
                 _csv_safe(corr.filer_name),
-                f"__insider_group_collapse:{corr.filer_cik or 'unknown'}__",
+                f"__{tag}:{corr.filer_cik or 'unknown'}__",
                 str(corr.shares_removed),
                 "",
                 _csv_safe(corr.source_channel or ""),
