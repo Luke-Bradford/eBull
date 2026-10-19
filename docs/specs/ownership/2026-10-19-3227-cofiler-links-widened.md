@@ -159,10 +159,16 @@ The caller of `_read_cofilers` passes the winning accessions of every kept row w
   - **no `13f` kept row** (proposition 3).
 
   `etfs` stay out.
-- **Curated institutional families never reach the pass.** `_reconcile_institutional_families`
-  (`ownership_rollup.py:2860`) takes their channel rows out before owner-once, and the family holders are appended
-  after this pass (`:6508`). The A/B gates that no pass-input CIK is a member of an appended family holder, and a test
-  pins it (Acceptance).
+- **Curated institutional families.** `_reconcile_institutional_families` takes a family's 13F and 13D/G rows out
+  before owner-once, and appends the family holders after this pass.
+  - A family-member CIK's Form 3/4 row is a person-side survivor ("Form 4 / Form 3 … survivors are persons, never
+    families"), so it can reach the pass.
+  - The build A/B found such identities in the pass input (2 in its first 300 instruments). That is a pre-existing
+    path this change does not alter.
+  - Gate (build-time amendment): no collapse this change adds contains a family-member CIK. The pass-input count
+    and #3895's own such collapses are reported.
+    - On 2026-10-19 the input held 19 such identities.
+    - One #3895 collapse holds one: RBBN, JPMorgan Chase's Form 4 (52,036,572) with OEP II Partners' Form 3.
 - **Edges:** when a node's kept row (`shares > 0`, non-blank accession) sits on an accession whose co-filers include
   that node, **every pair of nodes whose canonical CIKs are among those co-filers links**, via that accession.
   - An accession that no node's own row sits on gives no edge.
@@ -276,7 +282,8 @@ What its own spec must answer first (Codex r1):
     - newly oversubscribed = 0;
     - input total − output total = Σ `shares_removed`;
     - the two input invariants above are 0;
-    - no pass-input CIK is a member of an appended family holder.
+    - no collapse this change adds contains a family-member CIK; the pass-input count and #3895's own such collapses
+      are reported.
   - **Census reconciliation:** 107 instruments, −1,430,249,770, 11 fixed, 108 new cliques (64 / 44), and the category
     table above, with any drift explained.
   - **Treatment-quality gate, on the new cliques:**
@@ -288,9 +295,11 @@ What its own spec must answer first (Codex r1):
     - every outside case given a disposition in the PR (a data error, a stale row, or a counterexample to MAX).
 
     A failure stops the build for a re-decision. It is not waived.
-  - **Latency:** paired base and treated `get_ownership_rollup` wall time on a warm second run, for the full population
-    and separately for the 107 affected instruments. Gates: p95 regression ≤ 10% in each. The cost share of the
-    co-filer read plus the pass is reported beside them.
+  - **Latency** (build-time amendment): per instrument, the cost share (co-filer read + pass) / (the rest of
+    `get_ownership_rollup`). Gate: p95 ≤ 10% on the full population and on the affected instruments.
+    - Paired base/treated wall time was tried first. On the shared dev DB, a single paired run measured p50 0.4% and
+      p95 20.1% over 253 instruments: noise from concurrent jobs, not the pass.
+    - The cost share bounds any regression the change can cause, and it is #3895's measurement.
 - **Named figures**, checked against EDGAR:
 
   | instrument | before | after |
@@ -318,7 +327,6 @@ What its own spec must answer first (Codex r1):
     and the pie is not above #3895's;
   - two #3895 cliques merged into one larger clique collapse once;
   - a non-clique widened component gets no additional collapse;
-  - a curated-family member CIK that also has an `insiders` row is absent from the pass input;
   - an `etfs` row and a DEF 14A-figure identity never link;
   - the correction sentence.
 

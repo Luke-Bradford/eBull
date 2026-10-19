@@ -1,8 +1,9 @@
-"""Pure-logic tests for the co-filer group pass (#3227).
+"""Pure-logic tests for the co-filer group pass (#3227, #3895 and the widened links).
 
 Co-filers of a joint accession are distinct CIKs, so owner-once keeps each; ``_reconcile_cofiler_groups``
 counts a clique of them once, at its largest member. No DB — hand-built ``Holder`` objects and a
-co-filer map. See docs/specs/ownership/2026-10-19-3227-cofiler-group-identity.md.
+co-filer map. See docs/specs/ownership/2026-10-19-3227-cofiler-group-identity.md and
+docs/specs/ownership/2026-10-19-3227-cofiler-links-widened.md.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from app.services.ownership_rollup import (
     SliceCategory,
     SourceTag,
     _canonical_cik,
+    _cofiler_graph,
     _reconcile_cofiler_groups,
 )
 
@@ -77,7 +79,8 @@ def test_cross_channel_clique_counts_once_at_the_largest_member() -> None:
     (c,) = corrections
     assert c.kind == "cofiler_group_collapse"
     assert c.shares_removed == Decimal(582_065_875)
-    assert "SUM 1174131750" in c.detail and "overlap unverified" in c.detail
+    assert "figures sum to 1174131750" in c.detail and "Overlap, dates and class scope unverified" in c.detail
+    assert "13d-5" not in c.detail
 
 
 def test_origin_must_itself_be_on_the_accession() -> None:
@@ -221,3 +224,133 @@ def test_a_name_keyed_identity_never_links() -> None:
     )
     out, corrections = _reconcile_cofiler_groups(cats, {"J": frozenset({"7", "8"})})
     assert corrections == [] and _pie(out) == Decimal(900)
+
+
+# --- Widened links (docs/specs/ownership/2026-10-19-3227-cofiler-links-widened.md) ---
+
+
+def test_owners_a_third_members_filing_names_link_without_a_row_of_their_own_there() -> None:
+    # A's Form 4 names A, B and C; B and C each report on their own accessions. #3895 linked A-B and
+    # A-C only (a star, so a chain); the filing names all three, so they are one clique.
+    cats = _cats(
+        insiders=[
+            _h("0000000001", "A", 82, accession="J"),
+            _h("0000000002", "B", 73, accession="K"),
+            _h("0000000003", "C", 68, accession="L"),
+        ]
+    )
+    out, (c,) = _reconcile_cofiler_groups(cats, {"J": frozenset({"1", "2", "3"})})
+    assert [h.filer_name for h in out["insiders"]] == ["A"]
+    assert c.shares_removed == Decimal(141)
+
+
+def test_an_accession_no_nodes_own_row_sits_on_gives_no_edge() -> None:
+    cats = _cats(insiders=[_h("0000000002", "B", 73, accession="K"), _h("0000000003", "C", 68, accession="L")])
+    out, corrections = _reconcile_cofiler_groups(cats, {"M": frozenset({"2", "3"})})
+    assert corrections == [] and _pie(out) == Decimal(141)
+
+
+def test_an_institutions_identity_with_a_13dg_figure_links_and_keeps_its_category() -> None:
+    cats = _cats(
+        insiders=[_h("0000000001", "Fund", 75, accession="F4")],
+        institutions=[_h("0000000005", "Sponsor", 113, source="13d", accession="D13")],
+    )
+    out, (c,) = _reconcile_cofiler_groups(cats, {"D13": frozenset({"1", "5"})})
+    # An institution-only origin: the only joint accession is the institutions row's own.
+    assert out["insiders"] == [] and [h.filer_name for h in out["institutions"]] == ["Sponsor"]
+    assert c.shares_removed == Decimal(75)
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [_h("0000000005", "Manager", 129, source="13f", accession="D13")],
+        [
+            _h("0000000005", "Manager", 100, source="13g", accession="D13"),
+            _h("0000000005", "Manager", 29, source="13f", accession="Q"),
+        ],
+    ],
+    ids=["13f-only", "13f-and-13g"],
+)
+def test_an_identity_with_a_13f_row_never_links(rows: list[Holder]) -> None:
+    # Spec, proposition 3: a 13F row is a discretion count, not comparable with a co-filer's figure.
+    cats = _cats(insiders=[_h("0000000001", "Fund", 129, accession="F4")], institutions=rows)
+    out, corrections = _reconcile_cofiler_groups(cats, {"D13": frozenset({"1", "5"}), "F4": frozenset({"1", "5"})})
+    assert corrections == [] and _pie(out) == _pie(cats)
+
+
+def test_guard_a_3895_clique_grown_into_a_non_clique_still_collapses() -> None:
+    # #3895: A and B co-file J. The widened node I (13D figure) co-files K with A only, so {A, B, I}
+    # is not a clique. Without the guard it would stay split and the pie would rise to 100 + 90 + 50.
+    cats = _cats(
+        insiders=[_h("0000000001", "A", 100, accession="J"), _h("0000000002", "B", 90, accession="J")],
+        institutions=[_h("0000000009", "I", 50, source="13d", accession="K")],
+    )
+    cofilers = {"J": frozenset({"1", "2"}), "K": frozenset({"1", "9"})}
+    out, (c,) = _reconcile_cofiler_groups(cats, cofilers)
+    assert c.shares_removed == Decimal(90)
+    assert _pie(out) == Decimal(150)
+    base, _ = _reconcile_cofiler_groups(cats, {"J": frozenset({"1", "2"})})
+    assert _pie(out) <= _pie(base)
+
+
+def test_two_3895_cliques_merged_into_one_clique_collapse_once() -> None:
+    cats = _cats(
+        insiders=[
+            _h("0000000001", "A", 100, accession="J"),
+            _h("0000000001", "A", 1, source="form3", accession="L"),
+            _h("0000000002", "B", 90, accession="J"),
+            _h("0000000003", "C", 80, accession="K"),
+            _h("0000000004", "D", 70, accession="K"),
+        ]
+    )
+    cofilers = {"J": frozenset({"1", "2"}), "K": frozenset({"3", "4"}), "L": frozenset({"1", "2", "3", "4"})}
+    out, corrections = _reconcile_cofiler_groups(cats, cofilers)
+    assert len(corrections) == 1 and corrections[0].shares_removed == Decimal(240)
+    assert _pie(out) == Decimal(101)
+
+
+def test_a_widened_non_clique_component_gets_no_collapse_of_its_own() -> None:
+    # A's filing names A and B; C's filing names B and C; no #3895 clique and no widened clique.
+    cats = _cats(
+        insiders=[
+            _h("0000000001", "A", 100, accession="X"),
+            _h("0000000002", "B", 10, accession="Q"),
+            _h("0000000003", "C", 200, accession="Z"),
+        ]
+    )
+    out, corrections = _reconcile_cofiler_groups(cats, {"X": frozenset({"1", "2"}), "Z": frozenset({"2", "3"})})
+    assert corrections == [] and _pie(out) == Decimal(310)
+
+
+def test_guard_invariant_breach_falls_back_to_the_3895_result() -> None:
+    # An insiders identity carrying a 13F row is a #3895 node but not a widened one. The pass then
+    # returns #3895's cliques for the rollup, with B's link resolved against #3895's own nodes.
+    cats = _cats(
+        insiders=[
+            _h("0000000001", "A", 100, accession="J"),
+            _h("0000000002", "B", 60, accession="K"),
+            _h("0000000002", "B", 30, source="13f", accession="Q"),
+        ]
+    )
+    out, (c,) = _reconcile_cofiler_groups(cats, {"J": frozenset({"1", "2"})})
+    assert c.shares_removed == Decimal(90)
+    assert [h.filer_name for h in out["insiders"]] == ["A"]
+
+
+def test_every_3895_clique_lies_inside_one_widened_component() -> None:
+    # The guard's premise: #3895's edges are a subset of the widened ones, so each #3895 clique is
+    # connected, and collapsed whole, inside one widened component. Here {A, B} is #3895's clique and
+    # the widened graph adds I-B and C-I links, so {A, B, I, C} is one non-clique component.
+    cats = _cats(
+        insiders=[
+            _h("0000000001", "A", 100, accession="J"),
+            _h("0000000002", "B", 90, accession="J"),
+            _h("0000000003", "C", 20, accession="L"),
+        ],
+        institutions=[_h("0000000009", "I", 50, source="13d", accession="K")],
+    )
+    graph = _cofiler_graph(cats, {"J": frozenset({"1", "2"}), "K": frozenset({"2", "9"}), "L": frozenset({"3", "9"})})
+    component = ["CIK:0000000001", "CIK:0000000002", "CIK:0000000003", "CIK:0000000009"]
+    assert [sorted(m) for m in graph.chains] == [component]
+    assert graph.cliques == [["CIK:0000000001", "CIK:0000000002"]]
