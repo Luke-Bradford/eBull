@@ -68,7 +68,7 @@ _CHANGED: Final[LiteralString] = """
 _FACT_FILED: Final[LiteralString] = """
     SELECT accession_number, min(filed_date), max(filed_date)
     FROM financial_facts_raw
-    WHERE accession_number = ANY(%(accessions)s) AND form_type IN ('10-Q', '10-K')
+    WHERE accession_number = ANY(%(accessions)s) AND form_type = ANY(%(forms)s)
     GROUP BY accession_number
 """
 
@@ -117,7 +117,10 @@ def shock_decision(row: ChangedInput) -> dict[str, object] | None:
     return {"before": before, "after": after, "changed": before != after, "delta_s": (after - before).total_seconds()}
 
 
-def pead_decision(row: ChangedInput, fact_filed: date | None) -> dict[str, object] | None:
+def pead_decision(
+    row: ChangedInput, fact_filed: date | None, *, fact_ambiguous: bool = False
+) -> dict[str, object] | None:
+    """``fact_ambiguous``: fact rows disagree on ``filed_date``, so the manifest date stands in and the row says why."""
     if row.instrument_id is None or row.form not in PEAD_FORMS:
         return None
     filed_date = fact_filed if fact_filed is not None else utc_date(row.filed_at)
@@ -128,7 +131,13 @@ def pead_decision(row: ChangedInput, fact_filed: date | None) -> dict[str, objec
         "after": after,
         "changed": before != after,
         "delta_days": (after - before).days,
-        "filed_date_source": "financial_facts_raw" if fact_filed is not None else "manifest_filed_at",
+        "filed_date_source": (
+            "financial_facts_raw"
+            if fact_filed is not None
+            else "manifest_filed_at_fact_ambiguous"
+            if fact_ambiguous
+            else "manifest_filed_at"
+        ),
     }
 
 
@@ -152,9 +161,10 @@ def main() -> None:
         missing = (conn.execute(_MISSING_FROM_MANIFEST, params).fetchone() or (0,))[0]
         raw = conn.execute(_CHANGED, params).fetchall()
         pead_accessions = [str(r[0]) for r in raw if r[2] in PEAD_FORMS and r[4] is not None]
-        fact_rows = conn.execute(_FACT_FILED, {"accessions": pead_accessions}).fetchall()
+        fact_rows = conn.execute(_FACT_FILED, {"accessions": pead_accessions, "forms": sorted(PEAD_FORMS)}).fetchall()
     fact_filed = {str(acc): lo for acc, lo, hi in fact_rows if lo == hi}
     ambiguous = sorted(str(acc) for acc, lo, hi in fact_rows if lo != hi)
+    ambiguous_set = frozenset(ambiguous)
     print(f"cohort={args.cohort} changed_inputs={len(raw)} baseline_rows_missing_from_manifest={missing}")
     print(f"pead_fact_filed_date_ambiguous={len(ambiguous)}")
     lines.extend({"kind": "pead_filed_date_ambiguous", "accession_number": acc} for acc in ambiguous)
@@ -170,7 +180,9 @@ def main() -> None:
         row = ChangedInput(str(acc), str(form), filed_at, instrument_id, before, after, bool(material))
         decisions = {
             "shock": shock_decision(row),
-            "pead": pead_decision(row, fact_filed.get(row.accession_number)),
+            "pead": pead_decision(
+                row, fact_filed.get(row.accession_number), fact_ambiguous=row.accession_number in ambiguous_set
+            ),
             "insider": insider_decision(row),
         }
         for reader, decision in decisions.items():

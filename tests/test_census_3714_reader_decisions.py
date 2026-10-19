@@ -70,6 +70,8 @@ def test_pead_entry_date_falls_back_to_filed_plus_one_and_needs_an_instrument() 
     assert decision["filed_date_source"] == "financial_facts_raw"
     no_fact = pead_decision(_row("10-Q", before, None), None)
     assert no_fact is not None and no_fact["filed_date_source"] == "manifest_filed_at"
+    ambiguous = pead_decision(_row("10-Q", before, None), None, fact_ambiguous=True)
+    assert ambiguous is not None and ambiguous["filed_date_source"] == "manifest_filed_at_fact_ambiguous"
     assert pead_decision(_row("10-Q", before, None, instrument_id=None), None) is None
     assert pead_decision(_row("10-Q/A", before, None), None) is None
 
