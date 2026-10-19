@@ -136,7 +136,7 @@ Cliques only (the treated cohort):
 | = SUM (±1%) | 0 | |
 | outside, excluded | 14 | |
 
-The 606 other cliques fail a condition. Counted by first failure:
+The 606 other cliques are the 14 outside rows above and 592 that fail a condition. The 592, counted by first failure:
 
 - 316: every minor member at ≤ 5%;
 - 96: dates not aligned;

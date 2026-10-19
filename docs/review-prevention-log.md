@@ -13321,3 +13321,30 @@ neighbouring container and match it.**
   and says why raising beats log-and-skip. For a pass, skipping means serving a figure the invariant cannot vouch
   for. Without such a citation, log-and-skip is the right default.
 - Enforced in: `app/services/ownership_rollup.py::_cofiler_graph` (the comment at the raise).
+
+### A census of a widened rule must re-gather its own inputs, not reuse the production read (#3227 co-filer links, 2026-10-19)
+
+- Symptom: the first census of "`institutions` identities join co-filer cliques" wrapped the production pass and reused
+  the co-filer map the production caller had read. That caller reads co-filers only for `insiders`/`blockholders`
+  accessions, so no edge that starts on an `institutions` row's accession could appear. The census reported
+  −3,390,940,159 on 285 instruments. Re-gathering co-filers over all three categories moved it to −3,397,879,043 on 289
+  (Codex checkpoint 1, round 1, finding 15).
+- Prevention: when a census measures a rule that widens WHAT is read (a new category, a new key, a new source), list
+  every input the production path gathers *for the old rule*, and re-gather each one under the new rule inside the
+  census. A projection fed the old rule's inputs measures the old rule's reach. The build's independent oracle must
+  re-gather them too, or it agrees with a caller that was never widened.
+- Enforced in: `docs/specs/ownership/2026-10-19-3227-cofiler-links-widened.md` (Change 1; the A/B oracle re-reads all
+  categories' accessions; the institution-only-origin test).
+
+### A value agreement between two figures of different legal bases is not evidence that they are one block (#3227 co-filer links, 2026-10-19)
+
+- Symptom: revision 3 of the co-filer links spec admitted a 13F figure into a co-filer clique when it agreed within 1%
+  with a co-filer's Form 4 or 13D figure (RXT: 129,609,000 in both channels). Codex checkpoint 1 rejected it as the
+  P1. A 13F row is investment discretion (Rule 13f-1) and a Section 16 or 13D/G row is beneficial ownership. Two equal
+  counts of different things do not identify the same shares, so the 1% band does not bound the error to 1%: two
+  disjoint 100-share positions become 100.
+- Prevention: before using equality as a same-block signal, check that both figures measure the same quantity under
+  the same rule (#1652's cross-channel fold compares beneficial-ownership figures only). Where the bases differ,
+  equality is a candidate for adjudication, not a fold key. The 13F stratum (53 cliques, 52 instruments) was deferred
+  rather than folded.
+- Enforced in: `docs/specs/ownership/2026-10-19-3227-cofiler-links-widened.md` (proposition 3; deferred 13F stratum).
