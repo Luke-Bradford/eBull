@@ -4358,12 +4358,22 @@ def _reconcile_insider_line_components(
 
 # ---------------------------------------------------------------------------
 # Co-filer groups — a joint filing's reporting owners counted once (#3227)
-# See docs/specs/ownership/2026-10-19-3227-cofiler-group-identity.md
+# See docs/specs/ownership/2026-10-19-3227-cofiler-group-identity.md (#3895) and
+# docs/specs/ownership/2026-10-19-3227-cofiler-links-widened.md (this revision)
 # ---------------------------------------------------------------------------
 
-# The categories whose identities can join a co-filer group. ``institutions`` / ``etfs`` hold
-# a 13F or curated-family figure (and a 13F filer's 13D/G winner), which I14 keeps apart.
-_COFILER_CATEGORIES: Final[tuple[SliceCategory, ...]] = ("insiders", "blockholders")
+# The categories whose identities can join a co-filer group, and whose winning accessions the
+# caller reads co-filers for. An ``institutions`` identity joins only when none of its kept rows is
+# a 13F figure (``_COFILER_EXCLUDED_SOURCES``): a 13F row is investment discretion (Rule 13f-1), not
+# beneficial ownership, so it is not comparable with a co-filer's figure. ``etfs`` hold curated
+# family figures and never join.
+_COFILER_CATEGORIES: Final[tuple[SliceCategory, ...]] = ("insiders", "blockholders", "institutions")
+# #3895's categories: the guard rebuilds #3895's graph on them (``_cofiler_graph``).
+_COFILER_BASE_CATEGORIES: Final[tuple[SliceCategory, ...]] = ("insiders", "blockholders")
+# An identity with a kept row from one of these sources is never a node: a matched proxy figure can
+# include holdings outside the group and its accession is not a co-filing (#3894); a 13F figure is a
+# discretion count (spec, proposition 3).
+_COFILER_EXCLUDED_SOURCES: Final[frozenset[str]] = frozenset({"def14a", "13f"})
 
 # accession → the canonical CIKs of its reporting owners, for accessions naming ≥2. Indexed on
 # ``accession_number`` in both tables; the caller strips the accessions it passes.
@@ -4403,8 +4413,9 @@ def _read_cofilers(conn: psycopg.Connection[Any], accessions: Iterable[str]) -> 
 
 @dataclass(frozen=True)
 class _CofilerGraph:
-    """The co-filer graph over owner-once's output (:func:`_cofiler_graph`). ``cliques`` hold
-    member identity keys keeper-first; ``chains`` are the components left split."""
+    """The co-filer graph over owner-once's output (:func:`_cofiler_graph`). ``cliques`` are the
+    collapses the pass makes, member identity keys keeper-first; ``chains`` are the widened
+    components that got no collapse of their own (#3895 cliques inside them are in ``cliques``)."""
 
     rows_by_identity: dict[str, list[Holder]]
     category_of: dict[str, SliceCategory]
@@ -4414,12 +4425,35 @@ class _CofilerGraph:
     chains: list[list[str]]
 
 
+def _cofiler_components(nodes: Sequence[str], edges: Mapping[frozenset[str], set[str]]) -> list[list[str]]:
+    """Connected components of ``nodes`` under ``edges``, each in ``nodes`` order."""
+    parent = {k: k for k in nodes}
+
+    def _find(k: str) -> str:
+        while parent[k] != k:
+            parent[k] = parent[parent[k]]
+            k = parent[k]
+        return k
+
+    for pair in edges:
+        a, b = sorted(pair)
+        parent[_find(b)] = _find(a)
+    components: dict[str, list[str]] = {}
+    for k in nodes:
+        components.setdefault(_find(k), []).append(k)
+    return [m for m in components.values() if len(m) >= 2]
+
+
+def _is_clique(members: Sequence[str], edges: Mapping[frozenset[str], set[str]]) -> bool:
+    return all(frozenset((a, b)) in edges for i, a in enumerate(members) for b in members[i + 1 :])
+
+
 def _cofiler_graph(
     by_category: Mapping[SliceCategory, Sequence[Holder]],
     cofilers: Mapping[str, frozenset[str]],
 ) -> _CofilerGraph:
-    """Nodes, edges and components for :func:`_reconcile_cofiler_groups` (its docstring states the
-    rules). Separate so the full-population A/B measures the pass's own cliques."""
+    """Nodes, edges and the collapse list for :func:`_reconcile_cofiler_groups` (its docstring
+    states the rules). Separate so the full-population A/B measures the pass's own cliques."""
     rows_by_identity: dict[str, list[Holder]] = {}
     category_of: dict[str, SliceCategory] = {}
     for category, holders in by_category.items():
@@ -4440,52 +4474,88 @@ def _cofiler_graph(
     # From the identity key itself (``CIK:<stripped filer_cik>``, else ``NAME:``), so every row of
     # one identity shares it by construction.
     canon = {k: _canonical_cik(k[4:]) if k.startswith("CIK:") else None for k in rows_by_identity}
-    nodes = sorted(
-        k
-        for k, rows in rows_by_identity.items()
-        if totals[k] > 0 and canon[k] is not None and not any(h.winning_source == "def14a" for h in rows)
+
+    def _eligible(k: str, excluded: Iterable[str]) -> bool:
+        excluded = frozenset(excluded)
+        return (
+            totals[k] > 0
+            and canon[k] is not None
+            and not any(h.winning_source in excluded for h in rows_by_identity[k])
+        )
+
+    # #3895's graph: its categories, its exclusion (``def14a``), and an edge only between the owner
+    # of a row on the accession and another owner it names.
+    base_nodes = sorted(
+        k for k in rows_by_identity if category_of[k] in _COFILER_BASE_CATEGORIES and _eligible(k, {"def14a"})
     )
+    nodes = sorted(k for k in rows_by_identity if _eligible(k, _COFILER_EXCLUDED_SOURCES))
+    # One canonical-CIK index per node set: #3895's edges must resolve against #3895's own nodes, or a
+    # breach of the guard's invariant (below) would drop a #3895 link and the fallback would not be #3895.
     by_canon: dict[str, list[str]] = {}
     for k in nodes:
         by_canon.setdefault(canon[k] or "", []).append(k)
+    base_by_canon: dict[str, list[str]] = {}
+    for k in base_nodes:
+        base_by_canon.setdefault(canon[k] or "", []).append(k)
 
     edges: dict[frozenset[str], set[str]] = {}
-    for k in nodes:
+    base_edges: dict[frozenset[str], set[str]] = {}
+    for k in base_nodes:
         for h in rows_by_identity[k]:
             accession = h.winning_accession.strip()
             ciks = cofilers.get(accession) if h.shares > 0 and accession else None
             if not ciks or canon[k] not in ciks:
                 continue
             for cik in ciks:
-                for other in by_canon.get(cik, ()):
+                for other in base_by_canon.get(cik, ()):
                     if other != k:
-                        edges.setdefault(frozenset((k, other)), set()).add(accession)
-
-    parent = {k: k for k in nodes}
-
-    def _find(k: str) -> str:
-        while parent[k] != k:
-            parent[k] = parent[parent[k]]
-            k = parent[k]
-        return k
-
-    for pair in edges:
-        a, b = sorted(pair)
-        parent[_find(b)] = _find(a)
-    components: dict[str, list[str]] = {}
+                        base_edges.setdefault(frozenset((k, other)), set()).add(accession)
+    # Widened: a node's own row on a joint accession links every pair of nodes the accession names.
     for k in nodes:
-        components.setdefault(_find(k), []).append(k)
+        for h in rows_by_identity[k]:
+            accession = h.winning_accession.strip()
+            ciks = cofilers.get(accession) if h.shares > 0 and accession else None
+            if not ciks or canon[k] not in ciks:
+                continue
+            named = sorted({other for cik in ciks for other in by_canon.get(cik, ())})
+            for i, a in enumerate(named):
+                for b in named[i + 1 :]:
+                    edges.setdefault(frozenset((a, b)), set()).add(accession)
+
+    def _keeper_first(members: list[str]) -> list[str]:
+        # Canonical CIKs are digit strings without leading zeros: compare them as numbers ("2" < "10").
+        return sorted(members, key=lambda k: (-totals[k], category_of[k] != "insiders", int(canon[k] or 0), k))
+
+    base_cliques = [m for m in _cofiler_components(base_nodes, base_edges) if _is_clique(m, base_edges)]
+    # The guard needs every #3895 node to be a node here. It is, unless a #3895 node carries a 13F row,
+    # which no rollup input has (spec, input invariants: 0 over the full population). Nothing upstream
+    # makes that unreachable, so a breach falls back to #3895's result rather than raising.
+    if not frozenset(base_nodes) <= frozenset(nodes):
+        logger.warning(
+            "ownership_rollup: co-filer guard invariant broken (a #3895 node carries a 13F row); "
+            "using #3895's co-filer cliques for this rollup"
+        )
+        components = _cofiler_components(base_nodes, base_edges)
+        return _CofilerGraph(
+            rows_by_identity,
+            category_of,
+            totals,
+            base_edges,
+            [_keeper_first(m) for m in base_cliques],
+            [m for m in components if not _is_clique(m, base_edges)],
+        )
 
     cliques: list[list[str]] = []
     chains: list[list[str]] = []
-    for members in components.values():
-        if len(members) < 2:
+    for members in _cofiler_components(nodes, edges):
+        if _is_clique(members, edges):
+            cliques.append(_keeper_first(members))
             continue
-        if any(frozenset((a, b)) not in edges for i, a in enumerate(members) for b in members[i + 1 :]):
-            chains.append(members)  # left split (spec, Change 2)
-            continue
-        # Canonical CIKs are digit strings without leading zeros: compare them as numbers ("2" < "10").
-        cliques.append(sorted(members, key=lambda k: (-totals[k], category_of[k] != "insiders", int(canon[k] or 0), k)))
+        # Guard (spec, Change 3): a widened non-clique component gets no collapse of its own, and
+        # #3895's cliques inside it collapse as they do today, so the pie is never above #3895's.
+        chains.append(members)
+        inside = frozenset(members)
+        cliques.extend(_keeper_first(m) for m in base_cliques if m[0] in inside)
     return _CofilerGraph(rows_by_identity, category_of, totals, edges, cliques, chains)
 
 
@@ -4496,21 +4566,23 @@ def _reconcile_cofiler_groups(
     """Count each clique of co-filers once, at its largest member (#3227). Pure; runs on
     :func:`_reconcile_owner_once`'s output.
 
-    Members of a group that files jointly (Form 4 Gen. Instr. 4(b)(v), Rule 13d-1(k)(1)) carry
-    different CIKs, so owner-once keeps each one, and wherever their figures overlap the shared
-    shares are added once per member (TMUS: Deutsche Telekom Holding's Form 4 and Deutsche
-    Telekom AG's 13D, 109% of the shares outstanding together). The group's holding is the
-    Rule 13d-5(b)(1)(i) union of the members' holdings, somewhere between the largest member
-    (MAX) and the SUM. Nothing we extract states it, so this is a declared lower-bound
-    policy: MAX never counts the same shares twice. The spec records why it is chosen over
-    today's SUM, and the accepted undercount when members hold apart.
+    Owners named on one joint filing (Form 4 Gen. Instr. 4(b)(v), Rule 13d-1(k)(1)) reported the
+    same securities together, but carry different CIKs, so owner-once keeps each one, and wherever
+    their figures overlap the shared shares are added once per member (TMUS: Deutsche Telekom
+    Holding's Form 4 and Deutsche Telekom AG's 13D, 109% of the shares outstanding together).
+    Nothing we extract says how their figures overlap, so this is a declared policy: MAX, which
+    never adds one member's reported figure on top of another's. The specs record why it is chosen
+    over today's SUM, and the accepted undercount when members hold apart.
 
-    * Nodes: identities in ``_COFILER_CATEGORIES`` whose owner total (the sum of their kept rows,
-      what the pie adds) is > 0 and none of whose rows is a matched DEF 14A figure.
-    * Edges: node A links to node B when a row of A with ``shares > 0`` sits on an accession
-      whose co-filers include both A's and B's canonical CIK. A NAME-keyed identity never links.
+    * Nodes: identities in ``_COFILER_CATEGORIES`` with a CIK and an owner total (the sum of their
+      kept rows, what the pie adds) > 0, none of whose rows is a matched DEF 14A or a 13F figure.
+    * Edges: when a node's row with ``shares > 0`` sits on an accession whose co-filers include
+      that node's canonical CIK, every pair of nodes the accession names links. A NAME-keyed
+      identity never links.
     * Only a clique collapses: every pair must share an edge, so a member that co-filed with two
-      others who never co-filed does not join them.
+      others who never co-filed does not join them. Guard: a component that is not a clique gets
+      no collapse of its own, and #3895's cliques inside it collapse as before, so the pie is never
+      above #3895's.
     * The keeper is the largest owner total (ties: an ``insiders`` member, then the lowest
       canonical CIK). Its rows and category are unchanged; no role moves between identities.
       Every other member's rows leave the pie and become ``DroppedSource`` entries on the
@@ -4568,8 +4640,8 @@ def _reconcile_cofiler_groups(
                 winning_accession=primary.winning_accession,
                 detail=(
                     f"Co-filers counted once at the largest member, {primary.filer_name} {totals[keeper]} "
-                    f"(#3227 co-filer groups). The group's holding is the Rule 13d-5(b)(1)(i) union: at least "
-                    f"{totals[keeper]}, at most the SUM {group_sum}. MAX treatment selected; overlap unverified. "
+                    f"(#3227 co-filer groups). The members' reported figures sum to {group_sum}; MAX treatment "
+                    f"selected. Overlap, dates and class scope unverified. "
                     f"Links: {links}. Folded: {'; '.join(folded)}"
                 ),
             )
@@ -6498,8 +6570,9 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
     blockholders, group_corrections = _reconcile_13d_groups(blockholders, survivor_keys)
     by_category = _reconcile_owner_once(survivors + blockholders)
     # #3227 co-filer groups: a joint filing's reporting owners are distinct CIKs, so owner-once
-    # keeps each; count a clique of them once, at its largest member. Before the family holders
-    # are appended — those never join.
+    # keeps each; count a clique of them once, at its largest member. Co-filers are read for every
+    # category that can hold a node, ``institutions`` included. Before the family holders are
+    # appended — those never join (``_reconcile_institutional_families`` took their rows out).
     cofilers = _read_cofilers(
         conn,
         [h.winning_accession for c in _COFILER_CATEGORIES for h in by_category.get(c, []) if h.shares > 0],
