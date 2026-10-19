@@ -2,8 +2,9 @@
 
 For a ``coverage.filings_status = 'fpi'`` instrument the view NULLs every
 price-bearing column — a WIDER list than the #1664 dual-class suppression
-(pe_ratio and dividend_yield are per-share-basis consistent across share
-classes but not across the ADS ratio). Price-free columns and the per-ADS
+(dividend_yield and legacy pb_ratio are per-share-basis consistent across
+share classes but not across the ADS ratio; pe_ratio is count-based since
+sql/506, #3903). Price-free columns and the per-ADS
 price itself survive. ``resolve_market_cap_basis`` fails closed FIRST with
 ``fpi_adr_unavailable``. Seeds via the legacy CTE (``fundamentals_snapshot``
 is a base table; ``financial_periods_ttm`` is a view).
@@ -116,8 +117,9 @@ def test_fpi_price_bearing_columns_suppressed(_seed: psycopg.Connection[tuple]) 
 def test_domestic_control_unchanged(_seed: psycopg.Connection[tuple]) -> None:
     row = _val(_seed, 22)
     assert row["market_cap_live"] is not None
-    assert row["pe_ratio"] is not None
     assert row["fcf_yield"] is not None
+    # #3903: the legacy arm has no earnings total, so it publishes no P/E for any instrument.
+    assert row["pe_ratio"] is None
 
 
 @pytest.mark.db
@@ -140,13 +142,13 @@ def test_resolver_fails_closed_fpi_first(_seed: psycopg.Connection[tuple]) -> No
 @pytest.mark.db
 def test_ratio_known_adr_refuses_cap_keeps_per_share(_seed: psycopg.Connection[tuple]) -> None:
     # #2117 divided the per-ADS price by the curated 10:1 ratio. #3850: the cap is refused (`ads_ratio`) because no
-    # ratio history exists, so an ADS re-basing cannot be told from a split; the per-share P/E keeps the divided
-    # price (100 / 10 / 6), and the raw per-ADS price still displays. The resolver reads the view's NULL back.
+    # ratio history exists, so an ADS re-basing cannot be told from a split; the raw per-ADS price still displays.
+    # #3903: P/E is count-based now, so it is refused with the cap. The resolver reads the view's NULL back.
     row = _val(_seed, 24)
     assert row["current_price"] == 100
     assert row["market_cap_live"] is None
     assert row["fcf_yield"] is None
-    assert float(row["pe_ratio"]) == pytest.approx(10 / 6)
+    assert row["pe_ratio"] is None
     res = resolve_market_cap_basis(_seed, instrument_id=24)
     assert res.basis == "fpi_adr_ratio"
     assert res.value is None
@@ -160,9 +162,9 @@ def test_multiclass_dominates_ads_ratio(_seed: psycopg.Connection[tuple]) -> Non
     res = resolve_market_cap_basis(_seed, instrument_id=25)
     assert res.basis in ("total_company", "multiclass_unavailable")
     assert res.basis != "fpi_adr_ratio"
-    # In the view, ratio_known EXCLUDES dual_class, so metric_price = raw price:
-    # pe = 100 / 6 (undivided), NOT 100/5/6. market_cap is dual-class suppressed
-    # (#1664), proving the ratio path did not touch it.
+    # market_cap is dual-class suppressed (#1664), proving the ratio path did not touch it. #3903 made P/E
+    # count-based, so it is refused with the cap; no per-share column of this row is published to show the
+    # undivided price any more, and the resolver assertion above carries the dominance check.
     row = _val(_seed, 25)
-    assert float(row["pe_ratio"]) == pytest.approx(100 / 6)
+    assert row["pe_ratio"] is None
     assert row["market_cap_live"] is None
