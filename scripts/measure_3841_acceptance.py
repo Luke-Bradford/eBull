@@ -40,11 +40,12 @@ import psycopg
 from app.config import settings
 from app.security.master_key import resolve_data_dir
 from app.services.factor_panel import MAX_SHARES_AGE_MONTHS, add_months
-from app.services.pit_fundamentals import form_family, submissions_reader
+from app.services.pit_fundamentals import form_family
 from app.services.pit_market_cap import IN_SCOPE_FAMILIES, GateOutcome, ShareFact
 from app.services.pit_market_cap_build import (
     FIRST_SESSION,
     InstrumentBuild,
+    instrument_submissions_reader,
     iter_instrument_builds,
     load_scope,
     nyse_sessions,
@@ -149,7 +150,7 @@ def main() -> int:
         conn.read_only = True
         conn.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
         with conn.transaction(), submissions_path.open("rb") as handle, zipfile.ZipFile(handle) as archive:
-            return _report(conn, submissions_reader(archive), args.per_instrument)
+            return _report(conn, instrument_submissions_reader(archive), args.per_instrument)
 
 
 def _report(conn: psycopg.Connection[Any], index_of: Any, per_instrument: Path | None) -> int:

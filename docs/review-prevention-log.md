@@ -13378,3 +13378,20 @@ neighbouring container and match it.**
   use the session close, per-share multiples use the quote. Acceptance carries a synthetic quote-after-session case.
 - Enforced in: `docs/specs/fundamentals/2026-10-19-3850-live-cap-share-basis.md` (construction item 5, acceptance
   item 5). The build PR adds the DB test. Skill text for `.claude/skills/metrics-analyst` is posted on #2403.
+
+### One accession can carry two acceptance times an exact New York offset apart (#3902, 2026-10-19)
+
+- Symptom: the #3841 build refused AMZN, MORN, XPO and five more CIKs whole as `submissions_accession_conflict`, and
+  XOM and 11 more as `untimed_accession`. In every conflict, `submissions.zip` listed one accession twice with the same
+  form and acceptance times exactly 4 or 5 hours apart (AMZN's year-2000 424B3s, `05:00Z` and `10:00Z`). The same
+  shape recurs across CIKs: XOM's latest 10-Q is listed by the holding company at `22:55:38Z` and by the predecessor
+  at `18:55:38Z`. Rule 5 compared raw records, so an irrelevant 2000 filing refused a 2026 count.
+- Prevention: compare two listings of one accession on what the consumer's clock reads, not on the raw string. For a
+  session clock, that is the New York date of acceptance and the form; same-date copies are one record (keep the
+  later time). A different date or form is a real conflict and untimes that accession only. A count filed under a
+  predecessor CIK is the predecessor registrant's (SEC companyfacts for the successor do not carry it): exclude it
+  rather than pricing it with the successor's quote.
+- Enforced in: `app/services/pit_market_cap_build.py` (`deconflict_submissions`, `merge_indexes`,
+  `timed_share_facts`), `tests/test_pit_market_cap_build_submissions.py`, `scripts/ab_3902_pit_reader.py`; spec
+  `docs/specs/fundamentals/2026-10-16-3841-pit-market-cap.md` Amendment 1. Skill text for
+  `.claude/skills/data-sources/sec-edgar.md` §7.8 is posted on #2403.

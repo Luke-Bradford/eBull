@@ -15,10 +15,11 @@ Readers, each fixed by its source rule:
 * scope -- ``load_validated_universe`` (the US-equity source) with a primary SEC CIK;
 * share facts -- ``financial_facts_raw`` cover (``dei:EntityCommonStockSharesOutstanding``) and balance-sheet
   (``us-gaap:CommonStockSharesOutstanding``) counts, unit ``shares``; ``period_end`` is the context. Form and
-  acceptance come from the CIK's ``submissions.zip`` index (``pit_fundamentals.parse_submissions``), never
-  ``form_type`` or ``filed_date``. A CIK whose index fails integrity, or that holds a share-count fact whose accession
-  the index cannot time, is refused whole (``CikRefusal``) rather than published on the counts it can time: a newer
-  count it cannot time may already have been public;
+  acceptance come from the instrument's ``submissions.zip`` index (``instrument_submissions_reader``, Amendment 1),
+  never ``form_type`` or ``filed_date``. An instrument whose primary CIK's index fails integrity, or that holds a
+  share-count fact whose accession the index cannot time, is refused whole (``CikRefusal``) rather than published on
+  the counts it can time: a newer count it cannot time may already have been public. A fact whose accession only a
+  non-primary CIK lists is a predecessor registrant's own filing and is dropped before selection;
 * 13F unit values -- per (instrument, quarter, filer): the filer's latest-filed report for the quarter that holds the
   instrument (an amendment replaces it), the median value / shares over rows with finite shares > 0, value > 0 and no
   put/call. The latest report is chosen per instrument, not per filer and quarter, because a 13F-HR/A is either a
@@ -27,7 +28,10 @@ Readers, each fixed by its source rule:
   per instrument keeps a restated-away holding's original row as that filer's value (an accepted limit: one filer
   among the >= 20 in the median);
 * dollar volume -- the mean close x volume over the 21 stored bars ending at the session, only when all 21 carry one;
-* multi-class -- every CIK with a row in ``instrument_class_shares_outstanding`` (by instrument or ``source_cik``);
+* multi-class -- every CIK with a row in ``instrument_class_shares_outstanding`` (by instrument or ``source_cik``),
+  matched against any of the instrument's SEC CIKs;
+* FPI / ADS -- an ``ads_ratio`` row, ``coverage.filings_status = 'fpi'`` or the ADR/ADS name marker refuses the
+  instrument (``fpi_adr``); the detection of ``xbrl_derived_stats`` and sql/241's ``fpi_adr`` CTE, kept in sync;
 * Form 4 trades (Gate 1) -- non-derivative P or S rows with a price > 0 on a title naming common stock, from Form 4
   and 4/A, ``txn_date_invalid`` excluded, qualified only after an amendment has replaced its original
   (``resolve_amendments``). The filing's issuer (Box 2, ``insider_filings.issuer_cik``) must be one of the
@@ -53,18 +57,26 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from enum import StrEnum
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, cast
 
 import psycopg
 
 from app.services.factor_panel import MAX_SHARES_AGE_MONTHS, add_months
 from app.services.market_calendar import us_market_status
-from app.services.pit_fundamentals import SubmissionsIndex, form_family, submissions_reader
+from app.services.pit_fundamentals import (
+    REQUIRED_SUBMISSION_COLUMNS,
+    Filing,
+    SubmissionsIndex,
+    acceptance_ny_date,
+    form_family,
+    normalise_acceptance,
+    parse_submissions,
+)
 from app.services.pit_market_cap import (
     FIRST_QUARTER,
     Anchor,
+    CikRefusal,
     Concept,
     FloatFact,
     Gate1Quarter,
@@ -98,12 +110,6 @@ BATCH_SIZE: Final = 400
 COVER: Final = ("dei", "EntityCommonStockSharesOutstanding")
 BALANCE_SHEET: Final = ("us-gaap", "CommonStockSharesOutstanding")
 PUBLIC_FLOAT: Final = ("dei", "EntityPublicFloat")
-
-
-class CikRefusal(StrEnum):
-    """Why a CIK has no steps at all (counted in the build summary)."""
-
-    UNTIMED_ACCESSION = "untimed_accession"  # a share-count fact whose accession the submissions index cannot time
 
 
 @dataclass(frozen=True)
@@ -159,6 +165,167 @@ class BuildReport:
     summary: dict[str, Any] = field(default_factory=dict)
 
 
+# --------------------------------------------------------------------------- submissions (spec Amendment 1)
+
+
+@dataclass(frozen=True)
+class InstrumentIndex(SubmissionsIndex):
+    """The primary CIK's de-conflicted index, with what Amendment 1 needs beside it.
+
+    ``listed``: every accession the primary CIK's submissions list, before de-confliction. ``conflicted``: accessions
+    dropped under rules 1 and 3 (untimed, never resolved). ``predecessor``: accessions a non-primary CIK's index lists
+    and the primary never does (rule 2: excluded before selection).
+    """
+
+    listed: frozenset[str] = frozenset()
+    conflicted: frozenset[str] = frozenset()
+    predecessor: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True)
+class _CikIndex:
+    index: SubmissionsIndex | str
+    listed: frozenset[str]
+    conflicted: frozenset[str]
+
+
+def _rows(block: object) -> list[list[Any]] | None:
+    """The block's required columns when they are lists of equal length; else None (left for the frozen parser)."""
+    if not isinstance(block, dict):
+        return None
+    columns = [cast(dict[str, Any], block).get(name) for name in REQUIRED_SUBMISSION_COLUMNS]
+    if not all(isinstance(column, list) for column in columns):
+        return None
+    lists = cast(list[list[Any]], columns)
+    return lists if len({len(column) for column in lists}) == 1 else None
+
+
+def _clock(acceptance: str | None, form: str) -> tuple[date | None, str]:
+    """What the build's clock reads of a record: the New York date of acceptance (source rule "when public") and the
+    form. Two records agreeing on it admit the filing on the same session."""
+    return (acceptance_ny_date(acceptance) if acceptance else None), form
+
+
+def deconflict_submissions(
+    cik10: str, main: object, read_page: Callable[[str], object | None]
+) -> tuple[SubmissionsIndex | str, frozenset[str], frozenset[str]]:
+    """Rule 1: drop each accession whose copies disagree on the clock (``_clock``), collapse agreeing copies to one
+    carrying the latest acceptance, then run the frozen ``parse_submissions`` on what remains. Returns (index or
+    failure, listed, conflicted).
+
+    Only rows of a well-formed block whose accession and form are strings are filtered or compared; anything else
+    reaches the frozen parser unchanged, so rule 5's other integrity failures still fire.
+    """
+    blocks: dict[str | None, object] = {}
+    filings = cast(dict[str, Any], main).get("filings") if isinstance(main, dict) else None
+    if isinstance(filings, dict):
+        blocks[None] = cast(dict[str, Any], filings).get("recent")
+        pages = cast(dict[str, Any], filings).get("files")
+        for page in cast(list[Any], pages) if isinstance(pages, list) else []:
+            name = page.get("name") if isinstance(page, dict) else None
+            if isinstance(name, str) and name not in blocks:
+                blocks[name] = read_page(name)
+    records: dict[str, set[tuple[date | None, str]]] = defaultdict(set)
+    latest: dict[str, str | None] = {}
+    for block in blocks.values():
+        lists = _rows(block)
+        for accn, accepted, form, _ in zip(*lists, strict=True) if lists else ():
+            if isinstance(accn, str) and isinstance(form, str):
+                acceptance = normalise_acceptance(accepted)
+                records[accn].add(_clock(acceptance, form))
+                if acceptance is not None and (latest.get(accn) or "") < acceptance:
+                    latest[accn] = acceptance
+                latest.setdefault(accn, None)
+    listed = frozenset(records)
+    conflicted = frozenset(accn for accn, recs in records.items() if len(recs) > 1)
+    seen: set[str] = set()
+
+    def filtered(block: object) -> object:
+        lists = _rows(block)
+        if lists is None:
+            return block
+        keep: list[int] = []
+        for i, (accn, _, form, _) in enumerate(zip(*lists, strict=True)):
+            if isinstance(accn, str) and isinstance(form, str):
+                if accn in conflicted or accn in seen:
+                    continue
+                seen.add(accn)
+            keep.append(i)
+        rows = dict(zip(REQUIRED_SUBMISSION_COLUMNS, ([column[i] for i in keep] for column in lists), strict=True))
+        # An agreeing copy set carries its latest acceptance (normalised strings order as instants).
+        rows["acceptanceDateTime"] = [
+            latest.get(accn) or accepted if isinstance(accn, str) else accepted
+            for accn, accepted in zip(rows["accessionNumber"], rows["acceptanceDateTime"], strict=True)
+        ]
+        return {**cast(dict[str, Any], block), **rows}
+
+    if not isinstance(filings, dict):
+        return parse_submissions(cik10, main, read_page), listed, conflicted
+    pages_out = {name: filtered(body) for name, body in blocks.items() if name is not None and body is not None}
+    main_out = {
+        **cast(dict[str, Any], main),
+        "filings": {**cast(dict[str, Any], filings), "recent": filtered(blocks[None])},
+    }
+    index = parse_submissions(cik10, main_out, lambda name: pages_out[name] if name in pages_out else read_page(name))
+    return index, listed, conflicted
+
+
+def instrument_submissions_reader(archive: zipfile.ZipFile) -> Callable[[str, Sequence[str]], InstrumentIndex | str]:
+    """``index_of(primary, others)``: the instrument's index under Amendment 1, or the primary CIK's integrity-failure
+    reason (``no_submissions_entry`` when the archive holds no file for it). Each CIK is parsed once per reader."""
+    names = set(archive.namelist())
+    cache: dict[str, _CikIndex] = {}
+
+    def cik_index(cik: str) -> _CikIndex:
+        if cik not in cache:
+            member = f"CIK{cik}.json"
+            if member not in names:
+                cache[cik] = _CikIndex("no_submissions_entry", frozenset(), frozenset())
+            else:
+
+                def read_page(page: str) -> object | None:
+                    return json.loads(archive.read(page)) if page in names else None
+
+                cache[cik] = _CikIndex(*deconflict_submissions(cik, json.loads(archive.read(member)), read_page))
+        return cache[cik]
+
+    def index_of(primary: str, others: Sequence[str]) -> InstrumentIndex | str:
+        own = cik_index(primary)
+        if isinstance(own.index, str):
+            return own.index
+        return merge_indexes(own.index, own.listed, own.conflicted, [cik_index(c).index for c in others])
+
+    return index_of
+
+
+def merge_indexes(
+    primary: SubmissionsIndex,
+    listed: frozenset[str],
+    conflicted: frozenset[str],
+    others: Iterable[SubmissionsIndex | str],
+) -> InstrumentIndex:
+    """Rules 2 and 3: a non-primary index's accession the primary never lists is a predecessor's; one the primary
+    times on a different clock (``_clock``) is a conflict, and an agreeing one keeps the later acceptance. A failed
+    non-primary index contributes nothing."""
+    filings: dict[str, Filing] = dict(primary.filings)
+    dropped = set(conflicted)
+    predecessor: set[str] = set()
+    for other in others:
+        if isinstance(other, str):
+            continue
+        for accn, filing in other.filings.items():
+            if accn not in listed:
+                predecessor.add(accn)
+            elif accn in filings:
+                mine = filings[accn]
+                if _clock(mine.acceptance, mine.form) != _clock(filing.acceptance, filing.form):
+                    del filings[accn]
+                    dropped.add(accn)
+                elif (filing.acceptance or "") > (mine.acceptance or ""):
+                    filings[accn] = filing
+    return InstrumentIndex(filings, listed, frozenset(dropped), frozenset(predecessor))
+
+
 # --------------------------------------------------------------------------- pure helpers
 
 
@@ -176,13 +343,21 @@ def nyse_sessions(first: date, through: date) -> tuple[date, ...]:
 def timed_share_facts(
     rows: Iterable[FactRow], index: SubmissionsIndex
 ) -> tuple[tuple[ShareFact, ...], CikRefusal | None]:
-    """Share-count facts timed by the CIK's submissions index; refused whole when any accession cannot be timed.
+    """Share-count facts timed by the instrument's submissions index; refused whole when any accession cannot be timed.
 
     Form is the index's (authoritative for the accession), so an FPI form drops here by ``form_family`` downstream.
+    Amendment 1: a predecessor's accession is skipped (rule 2), and a public-float fact on a dropped conflict refuses
+    like a share-count fact (rule 4).
     """
     concepts = {COVER: Concept.COVER, BALANCE_SHEET: Concept.BALANCE_SHEET}
+    predecessor = index.predecessor if isinstance(index, InstrumentIndex) else frozenset()
+    conflicted = index.conflicted if isinstance(index, InstrumentIndex) else frozenset()
     out: list[ShareFact] = []
     for row in rows:
+        if row.accession in predecessor:
+            continue
+        if (row.taxonomy, row.concept) == PUBLIC_FLOAT and row.accession in conflicted:
+            return (), CikRefusal.UNTIMED_ACCESSION
         concept = concepts.get((row.taxonomy, row.concept))
         if concept is None:
             continue
@@ -300,6 +475,24 @@ _MULTICLASS_SQL = """
       ON x.instrument_id = s.instrument_id AND x.provider = 'sec' AND x.identifier_type = 'cik' AND x.is_primary
     UNION
     SELECT source_cik FROM instrument_class_shares_outstanding WHERE source_cik IS NOT NULL
+"""
+
+_OTHER_CIKS_SQL = """
+    SELECT x.instrument_id, x.identifier_value
+    FROM external_identifiers x
+    WHERE x.provider = 'sec' AND x.identifier_type = 'cik' AND NOT x.is_primary
+      AND x.instrument_id = ANY(%(ids)s::bigint[])
+"""
+
+# Amendment 1 rule 6: the detection of ``xbrl_derived_stats`` and sql/241's ``fpi_adr`` CTE plus ``ads_ratio``
+# membership. Keep the three in sync.
+_FPI_ADR_SQL = """
+    SELECT instrument_id FROM ads_ratio WHERE instrument_id = ANY(%(ids)s::bigint[])
+    UNION
+    SELECT instrument_id FROM coverage WHERE filings_status = 'fpi' AND instrument_id = ANY(%(ids)s::bigint[])
+    UNION
+    SELECT instrument_id FROM instruments
+    WHERE company_name ~* '\\y(ADR|ADS)\\y' AND instrument_id = ANY(%(ids)s::bigint[])
 """
 
 _FACTS_SQL = """
@@ -442,7 +635,7 @@ def run_market_cap_pit_rebuild(
     with submissions_path.open("rb") as handle:
         submissions_sha256 = _sha256_file(handle)
         with zipfile.ZipFile(handle) as archive:
-            index_of = submissions_reader(archive)
+            index_of = instrument_submissions_reader(archive)
             conn.execute("SELECT pg_advisory_lock(%s)", (BUILD_LOCK_KEY,))
             try:
                 with conn.transaction():
@@ -489,7 +682,7 @@ def iter_instrument_builds(
     conn: psycopg.Connection[Any],
     *,
     scope: Sequence[tuple[int, str]],
-    index_of: Callable[[str], SubmissionsIndex | str],
+    index_of: Callable[[str, Sequence[str]], SubmissionsIndex | str],
     build_date: date,
 ) -> Iterator[BatchBuild]:
     """Read and build every instrument in ``scope`` for ``build_date``, one batch at a time; writes nothing.
@@ -505,7 +698,6 @@ def iter_instrument_builds(
     first_bar = sessions[0] - timedelta(days=45)  # room for the 21-bar window behind the first session
     min_context = add_months(FIRST_SESSION, -MAX_SHARES_AGE_MONTHS)
     multiclass_ciks = load_multiclass_ciks(conn)
-    indexes: dict[str, SubmissionsIndex | str] = {}
 
     for offset in range(0, len(scope), BATCH_SIZE):
         batch = scope[offset : offset + BATCH_SIZE]
@@ -547,21 +739,39 @@ def iter_instrument_builds(
         for iid, *fields in conn.execute(_TRADES_SQL, trade_params):
             trades_by[iid].append(InsiderRow(*fields))
 
+        others: dict[int, list[str]] = defaultdict(list)
+        for iid, other in conn.execute(_OTHER_CIKS_SQL, params):
+            others[iid].append(_cik10(other))
+        fpi_adr = {int(row[0]) for row in conn.execute(_FPI_ADR_SQL, params)}
+
         revisions = dict(conn.execute(_REVISIONS_SQL, params).fetchall())
         backdated = dict(conn.execute(_BACKDATED_SQL, params).fetchall())
 
         results: list[InstrumentBuild] = []
         for iid, cik in batch:
             stamp = BasisStamp(int(revisions.get(iid, 0)), int(backdated.get(iid, 0)), bars_through.get(iid))
-            if cik not in indexes:
-                indexes[cik] = index_of(cik)
-            index = indexes[cik]
+            if iid in fpi_adr:
+                results.append(InstrumentBuild(iid, cik, str(CikRefusal.FPI_ADR), (), (), Counter(), {}, stamp))
+                continue
+            ciks = sorted(others.get(iid, ()))
+            index = index_of(cik, ciks)
             if isinstance(index, str):
                 results.append(InstrumentBuild(iid, cik, index, (), (), Counter(), {}, stamp))
                 continue
+            submissions: dict[str, Counter[str]] = {}
+            if isinstance(index, InstrumentIndex):
+                # Counted before any refusal, so the summary also sees the conflicts and exclusions that refuse.
+                submissions["submissions"] = Counter(
+                    {
+                        "conflicts_dropped": len(index.conflicted),
+                        "predecessor_facts_excluded": sum(
+                            row.accession in index.predecessor for row in facts_by.get(iid, ())
+                        ),
+                    }
+                )
             facts, refused = timed_share_facts(facts_by.get(iid, ()), index)
             if refused is not None:
-                results.append(InstrumentBuild(iid, cik, str(refused), (), (), Counter(), {}, stamp))
+                results.append(InstrumentBuild(iid, cik, str(refused), (), (), Counter(), submissions, stamp))
                 continue
             closes = closes_by.get(iid, {})
             anchors = []
@@ -587,10 +797,11 @@ def iter_instrument_builds(
                 step_sessions=step_sessions,
                 closes=closes,
                 dollar_volume=volume_by.get(iid, {}),
-                multiclass=cik in multiclass_ciks,
+                multiclass=any(c in multiclass_ciks for c in (cik, *ciks)),
                 trades=resolve_amendments(trades_by.get(iid, ()), sessions[0]),
                 floats=public_floats(facts_by.get(iid, ()), index),
             )
+            tallies.update(submissions)
             results.append(
                 InstrumentBuild(
                     iid, cik, None, facts, steps, anchor_status, tallies, stamp, gate1_quarters, gate2_results
@@ -602,7 +813,7 @@ def iter_instrument_builds(
 def _build(
     conn: psycopg.Connection[Any],
     *,
-    index_of: Callable[[str], SubmissionsIndex | str],
+    index_of: Callable[[str, Sequence[str]], SubmissionsIndex | str],
     build_date: date,
     started_at: datetime,
     submissions_sha256: str,
@@ -629,6 +840,8 @@ def _build(
         for result in batch.instruments:
             if result.refused is not None:
                 summary["cik_refused"][result.refused] += 1
+                for name, tally in result.tallies.items():
+                    summary[name].update(tally)
                 continue
             summary["anchor_status"].update(result.anchor_status)
             for name, tally in result.tallies.items():

@@ -40,8 +40,7 @@ from psycopg.rows import dict_row
 
 from app.config import settings
 from app.security.master_key import resolve_data_dir
-from app.services.pit_fundamentals import submissions_reader
-from app.services.pit_market_cap_build import iter_instrument_builds
+from app.services.pit_market_cap_build import instrument_submissions_reader, iter_instrument_builds
 from app.services.strategies.validated_universe import load_validated_universe
 
 _ROWS = """
@@ -276,7 +275,7 @@ def main() -> None:
                     raise RuntimeError(f"market_cap_pit_builds.build_date is not a date: {build_date!r}")
                 with zipfile.ZipFile(archive) as z:
                     for batch in iter_instrument_builds(
-                        conn, scope=scope, index_of=submissions_reader(z), build_date=build_date
+                        conn, scope=scope, index_of=instrument_submissions_reader(z), build_date=build_date
                     ):
                         for res in batch.instruments:
                             if res.refused:
