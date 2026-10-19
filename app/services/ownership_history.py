@@ -56,6 +56,7 @@ from app.services.ownership_observations import (
     INSIDER_HOLDING_LINE_SUM_LATERAL,
     INSIDER_SUPERSEDED_BY_AMENDMENT_FILTER,
     INSIDER_WINNER_ORDER_TAIL,
+    insider_ndh_title_class_params,
 )
 
 HistoryCategory = Literal["insiders", "blockholders", "institutions", "treasury", "def14a"]
@@ -205,6 +206,7 @@ def _insiders_history(
     # #3227 — the bucket winner's ``shares`` goes through the same holding-line sum as the
     # ``_current`` projection (``INSIDER_HOLDING_LINE_SUM_LATERAL``), for the same reason #3232
     # shares the order tail: a second rule here is how the chart and the pie drift apart.
+    params.update(insider_ndh_title_class_params(conn, [instrument_id]))
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute(
             f"""

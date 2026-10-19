@@ -326,9 +326,13 @@ def test_holding_group_refuses_a_transaction_balance_of_the_class() -> None:
 def test_rollup_scope_takes_each_writers_title_test() -> None:
     one_class = ["Common Stock", "Restricted Stock"]
     assert _summable_scope(True, one_class, form3=False, holdings=False)
-    # Form 3 writers keep exact titles.
-    assert not _summable_scope(True, one_class, form3=True, holdings=False)
+    # Form 3 writers take the class test too (#3227 Form 3 multi-title), over raw titles.
+    assert _summable_scope(True, one_class, form3=True, holdings=True)
     assert _summable_scope(True, ["Common Stock"], form3=True, holdings=True)
+    assert not _summable_scope(True, ["Class A Common Stock", "Class B Common Stock"], form3=True, holdings=True)
+    assert not _summable_scope(
+        True, ["Limited Partnership Units", " Limited Partnership Units "], form3=True, holdings=True
+    )
     # A holding group's titles are stripped, as form4_holding_observations strips them.
     assert _summable_scope(
         True, ["Limited Partnership Units", " Limited Partnership Units "], form3=False, holdings=True

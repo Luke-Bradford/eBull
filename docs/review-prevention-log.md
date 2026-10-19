@@ -13249,3 +13249,40 @@ neighbouring container and match it.**
 - Repaired by replaying the one accession through `rewash_filings._apply_form4`. The full-population count of
   non-`E`, unflagged `txn_date >` chokepoint-anchor rows is 3: this one, plus 2 form-type-5 lines that #2790
   exempts.
+
+### A rule read from a form instruction applies to every writer of that instruction, and a SQL reader binds the Python rule's output instead of porting it (#3227 Form 3 multi-title, 2026-10-19)
+
+- Symptom: #3889 read Form 4 Instr. 3(b) ("The title of the security should clearly identify the class") into
+  `form4_title_class` and changed the three Form 4 helpers. Form 3 Instr. 4(b) is the same sentence, but the XML Form 3
+  writer (`_line_sum_if_distinct`) and the DERA `:NDH:` line sum (`INSIDER_HOLDING_LINE_SUM_LATERAL`, which also reads
+  Form 4/5 holding lines) kept exact-title matching. Full population: 97 XML groups and 1,147 DERA accession groups
+  stayed on one line. JBHT's Johnelle Hunt read 607,352 of the 18,326,528 her Form 5 and the DEF 14A both state,
+  because "Common Stock" and "Common Stock 401(k)" were two titles.
+- Prevention: when a rule is read from a form instruction, grep for every writer and reader that applies the same
+  instruction on any form, including the read-time SQL fragments, before scoping the change to one form.
+- ⚠ When a SQL fragment needs a Python classifier, compute the classifier's output for the titles in scope and bind
+  it as parallel arrays (`unnest(%(ndh_title)s::text[], %(ndh_class)s::text[])`). Porting it to SQL makes a second
+  copy of a frozen rule. A title missing from the map must refuse, never pass.
+- ⚠ The read path's line population must equal the writer's. `_INSIDER_LINE_COMPONENTS_SQL` collected titles from
+  shareless Form 3 lines that `form3_observation_lines` drops, so a scope the writer summed could still refuse there.
+- Enforced in: `app/services/ownership_observations.py` (`insider_ndh_title_class_params`,
+  `INSIDER_HOLDING_LINE_SUM_LATERAL`); `app/services/insider_form3_ingest.py` (`_line_sum_if_distinct`);
+  `app/services/ownership_rollup.py` (`_summable_scope`, the Form 3 `hold` branch);
+  `tests/test_3227_holding_line_sum.py`, `tests/test_3227_form3_line_sum.py`;
+  `scripts/ab_3227_form3_multi_title.py`.
+
+### A "rolled-back" A/B arm commits if the refresher's `conn.transaction()` is the first statement (#3227 Form 3 multi-title, 2026-10-19)
+
+- Symptom: `scripts/ab_3227_form3_multi_title.py` ran each arm as write → `refresh_insiders_current` → read →
+  `conn.rollback()`. For an instrument with no observation write in the arm, the refresher's `with
+  conn.transaction():` was the first statement on an idle connection. psycopg then opens an OUTER transaction and
+  COMMITS it at block exit; the later rollback undoes nothing. The A/B committed both arms' `_current` projections
+  (treatment last) on its cohort's DERA-only instruments, on the dev DB, before review. Caught because a `--verify`
+  run found those instruments already at the treatment value (RTX `refreshed_at` inside the A/B's run). Repaired by
+  re-projecting 4,936 instruments with the base commit's refresher; observations were never touched.
+- Verified on psycopg 3.3.3: a `transaction()` block started on an idle connection survives a later `rollback()`;
+  after `conn.execute("SELECT 1")` it is a savepoint and does not.
+- Prevention: in any script that relies on rolling back, issue a statement before calling code that opens
+  `conn.transaction()` (the older `ab_3227_form3_line_sum.py` did, uncommented, which is why the copy lost it), and
+  comment why. After a dry run, check one row the arms touched for a `refreshed_at` inside the run.
+- Enforced in: `scripts/ab_3227_form3_multi_title.py` (the arm loop, the batch pass and `--verify`).

@@ -55,7 +55,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -662,8 +662,9 @@ _INSIDER_SUPERSEDED_KEY_DROP: Final[LiteralString] = """
 """
 
 # #3227 item 3a — a winning ``:NDH:`` (holdings) line is replaced by the SUM of its
-# accession's Table I lines for that owner, when those lines are provably distinct holdings of
-# ONE class. ``LEFT JOIN LATERAL`` fragment; the caller aliases the winner row ``w`` (exposing
+# accession's Table I lines for that owner, when those lines are separate Table I lines of ONE
+# class (not proof they never nest: an unequal line that includes another still sums, the
+# accepted #3889 residual). ``LEFT JOIN LATERAL`` fragment; the caller aliases the winner row ``w`` (exposing
 # ``instrument_id, holder_identity_key, ownership_nature, source, period_end,
 # source_document_id``) and selects ``COALESCE(ls.line_sum, w.shares)``.
 #
@@ -684,14 +685,21 @@ _INSIDER_SUPERSEDED_KEY_DROP: Final[LiteralString] = """
 #   * >1 line — otherwise there is nothing to sum;
 #   * every line carries non-negative shares, a non-blank title and a D/I — an unknown line
 #     cannot be proved distinct;
-#   * ONE ``security_title`` — lines of different classes never sum (CNH's common + special
-#     voting shares; ADS vs ordinary). Exact string match, so a re-spelled title refuses;
+#   * ONE ``security_title``, or several naming one class — lines of different classes never sum
+#     (CNH's common + special voting shares; ADS vs ordinary). Form 3 Instr. 4(b) / Form 4
+#     Instr. 3(b): "The title of the security should clearly identify the class". The class is
+#     ``form4_title_class`` (#3889's frozen whitelist), computed in Python and joined in from
+#     ``%(ndh_title)s`` / ``%(ndh_class)s`` (:func:`insider_ndh_title_class_params`) so the rule
+#     has ONE copy; a title with no class has no row there and refuses. This is
+#     ``form4_title_match``: one distinct title is equality, otherwise every line has a class and
+#     all share it (#3227 Form 3 multi-title, spec ``2026-10-19-3227-form3-multi-title.md``);
 #   * no two lines carry the same amount. Form 3 Instr. 5(b)(iv) lets an indirect line report
 #     the entity's ENTIRE holding, so one block can legitimately appear twice — YPF's
 #     ``0000903423-08-000197`` reports the same 58,603,606 ADSs once ``D`` and once ``I``
 #     ("indirectly owned by shareholders of Petersen Energia"), and a sum would double it.
-#     Equal amounts are the one shape where a restatement and two genuinely equal holdings
-#     cannot be told apart from the table alone, so they refuse, fixed BY CONSTRUCTION — no
+#     Equal amounts are the restatement shape the table alone cannot tell from two genuinely
+#     equal holdings, so they refuse (a nested unequal line is not detected: the accepted
+#     #3889 residual), fixed BY CONSTRUCTION — no
 #     published rule separates them. The cost is real and accepted: LYEL's two ARCH funds
 #     hold equal blocks and stay on today's single-line value;
 #   * ONE reporting owner among the accession's ``:NDH:`` rows on this instrument — on a joint
@@ -713,9 +721,9 @@ _INSIDER_SUPERSEDED_KEY_DROP: Final[LiteralString] = """
 #     different forms; nothing in it limits a form to one line, and Form 4 Instr. 4(a)(i) asks for
 #     "total beneficial ownership ... for each class", which is every line of the class. Two
 #     unequal ``D`` lines (ASTE ``0001140361-18-001899``: 1,409 + 2,429) or two "By Trust" lines
-#     (``0001209191-22-029116``: 350 + 50, by EDGAR) are two holdings. The restatement shape the
-#     test was guarding is an EQUAL block (Instr. 4(b)(iv)), which the amount test refuses;
-#   * on these rows the DERA column is not the filing's. ``NONDERIV_HOLDING.NATURE_OF_OWNERSHIP``
+#     (``0001209191-22-029116``: 350 + 50, by EDGAR) are read as two holdings. The restatement
+#     shape the test was guarding is an EQUAL block (Instr. 4(b)(iv)), which the amount test refuses;
+#   * on these rows the DERA column is not reliably the filing's. ``NONDERIV_HOLDING.NATURE_OF_OWNERSHIP``
 #     is positionally COMPACTED: when a line has no ``<natureOfOwnership>`` element, the next
 #     line's nature moves up onto it and the last line goes blank. MSBI ``0001466026-26-000008``
 #     on EDGAR is ``D`` (none), ``I`` Red Bird, ``I`` Summit, ``I`` J.M. Schultz; DERA has ``D`` Red
@@ -735,6 +743,8 @@ INSIDER_HOLDING_LINE_SUM_LATERAL: Final[LiteralString] = """
                 LEFT JOIN LATERAL (
                     SELECT sum(o.shares) AS line_sum
                       FROM ownership_insiders_observations o
+                      LEFT JOIN unnest(%(ndh_title)s::text[], %(ndh_class)s::text[]) AS tc(title, class_key)
+                        ON tc.title = o.security_title
                      WHERE w.source_document_id ~ ':NDH:[0-9]+$'
                        AND o.instrument_id       = w.instrument_id
                        AND o.holder_identity_key = w.holder_identity_key
@@ -749,7 +759,8 @@ INSIDER_HOLDING_LINE_SUM_LATERAL: Final[LiteralString] = """
                        AND count(o.direct_indirect) = count(*)
                        AND min(o.shares) >= 0
                        AND min(length(btrim(o.security_title))) > 0
-                       AND count(DISTINCT o.security_title) = 1
+                       AND (count(DISTINCT o.security_title) = 1
+                            OR (count(tc.class_key) = count(*) AND count(DISTINCT tc.class_key) = 1))
                        AND count(DISTINCT o.shares) = count(*)
                        AND NOT EXISTS (
                            SELECT 1
@@ -772,6 +783,35 @@ INSIDER_HOLDING_LINE_SUM_LATERAL: Final[LiteralString] = """
                        )
                 ) ls ON TRUE
 """
+
+
+def insider_ndh_title_class_params(
+    conn: psycopg.Connection[Any], instrument_ids: Sequence[int]
+) -> dict[str, list[str]]:
+    """``INSIDER_HOLDING_LINE_SUM_LATERAL``'s ``ndh_title`` / ``ndh_class`` parameters.
+
+    Every distinct live ``:NDH:`` title on ``instrument_ids`` that has a ``form4_title_class``,
+    paired with that class's words joined by a space (no class word contains one, so two classes
+    never join to the same string). Titles are distinct, so the lateral's join cannot fan out."""
+    # Deferred: ``insider_transactions`` imports this module.
+    from app.services.insider_transactions import form4_title_class
+
+    with conn.cursor(row_factory=psycopg.rows.tuple_row) as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT security_title
+              FROM ownership_insiders_observations
+             WHERE instrument_id = ANY(%(ids)s::bigint[])
+               AND known_to IS NULL
+               AND source_document_id ~ ':NDH:'
+               AND security_title IS NOT NULL
+            """,
+            {"ids": list(instrument_ids)},
+        )
+        titles = [str(t) for (t,) in cur.fetchall()]
+    pairs = [(t, " ".join(k)) for t in titles if (k := form4_title_class(t)) is not None]
+    return {"ndh_title": [t for t, _ in pairs], "ndh_class": [c for _, c in pairs]}
+
 
 # Column list of the winner row with ``shares`` replaced by the #3227 line sum. Shared by both
 # ``_current`` refreshers so the MERGE source shape cannot drift between them.
@@ -901,7 +941,7 @@ def refresh_insiders_current(
             )
             WHEN NOT MATCHED BY SOURCE AND tgt.instrument_id = %(iid)s THEN DELETE
             """,
-            {"iid": instrument_id},
+            {"iid": instrument_id, **insider_ndh_title_class_params(conn, [instrument_id])},
         )
         cur.execute(
             """
@@ -2631,7 +2671,7 @@ def refresh_insiders_current_batch(
             )
             WHEN NOT MATCHED BY SOURCE AND tgt.instrument_id = ANY(%(ids)s::bigint[]) THEN DELETE
             """,
-            {"ids": ids},
+            {"ids": ids, **insider_ndh_title_class_params(conn, ids)},
         )
         # Batched UPSERT of ownership_refresh_state — one round-trip for
         # the whole batch. Watermarks come from the pre-MERGE snapshot:

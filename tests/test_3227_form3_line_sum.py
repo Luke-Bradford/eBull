@@ -120,3 +120,41 @@ def test_unknown_direct_indirect_refuses() -> None:
     # Codex ckpt-2: the caller labels a None D/I ``direct``; never sum lines of unknown form.
     lines = _lines((10, None, "By A", "Common"), (20, None, "By B", "Common"))
     assert form3_observation_shares(lines, owner_count=1) == {("0001", None): Decimal(20)}
+
+
+# #3227 Form 3 multi-title — Form 3 Instr. 4(b) is Form 4 Instr. 3(b) word for word, so a group's
+# titles are read by the frozen ``form4_title_class`` rule.
+
+
+def test_titles_naming_one_class_sum() -> None:
+    # 0001127602-23-026125 shape: common beside its restricted shares, one D group.
+    lines = _lines((14_977, "D", None, "Common Stock"), (53_580, "D", None, "Common Stock (Restricted)"))
+    assert form3_observation_shares(lines, owner_count=1) == {("0001", "D"): Decimal(68_557)}
+
+
+def test_titles_naming_two_classes_keep_the_last_line() -> None:
+    lines = _lines((10, "D", None, "Class A Common Stock"), (20, "D", None, "Class B Common Stock"))
+    assert form3_observation_shares(lines, owner_count=1) == {("0001", "D"): Decimal(20)}
+
+
+def test_a_classless_title_keeps_the_last_line() -> None:
+    lines = _lines((10, "D", None, "Common Stock"), (20, "D", None, "Warrants"))
+    assert form3_observation_shares(lines, owner_count=1) == {("0001", "D"): Decimal(20)}
+
+
+def test_multi_title_equal_amount_check_spans_the_class() -> None:
+    # An equal amount on another spelling of the class, under the other D/I, refuses the group.
+    lines = _lines(
+        (10, "I", "By A", "Common Stock"),
+        (20, "I", "By B", "Common Stock 401(k)"),
+        (10, "D", None, "Common Shares"),
+    )
+    assert form3_observation_shares(lines, owner_count=1)[("0001", "I")] == Decimal(20)
+
+
+def test_single_title_equal_amount_check_stays_exact() -> None:
+    # A single-title group's verdict cannot change: another spelling is not compared.
+    lines = _lines(
+        (10, "I", "By A", "Common Stock"), (20, "I", "By B", "Common Stock"), (10, "D", None, "Common Shares")
+    )
+    assert form3_observation_shares(lines, owner_count=1)[("0001", "I")] == Decimal(30)
