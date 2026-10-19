@@ -10,9 +10,13 @@ survives for the dual-class rows. Seeds via the legacy CTE
 
 from __future__ import annotations
 
+from datetime import date
+
 import psycopg
 import psycopg.rows
 import pytest
+
+from tests.fixtures.pit_market_cap import seed_pit_step
 
 
 @pytest.fixture
@@ -53,6 +57,8 @@ def _seed(ebull_test_conn: psycopg.Connection[tuple]) -> psycopg.Connection[tupl
             "VALUES (%s, '2025-01-01', 1e11, 0.5, 0.3, 5e10, 1e10, 2e10, 1e10, 1e10, 30, 6)",
             (iid,),
         )
+    # #3850: the control's cap is the #3841 PIT cap at its session.
+    seed_pit_step(conn, 3, session=date(2026, 10, 16), close=150, shares=1e10)
     conn.commit()
     return conn
 

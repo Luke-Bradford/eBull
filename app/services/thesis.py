@@ -249,7 +249,12 @@ _MAX_TOKENS_CRITIC = 2048
 # vector, feeding a wrong-company memo back in as the instrument's own prior
 # so the writer continued it. Bumped because the context shape changed —
 # memos from v6 and v7 are not comparable.
-_PROMPT_VERSION = "v7"
+# v8 (#3850): the CONTEXT SHAPE changes. `valuation` gains `session` and
+# `valuation_price`: the view's market-cap multiples are now priced at the
+# session close on the #3841 point-in-time market cap, while P/E and dividend
+# yield stay on `current_price`. _WRITER_SYSTEM names the price base per
+# multiple for re-rating arithmetic.
+_PROMPT_VERSION = "v8"
 
 # thesis_runs.trigger — matches the table CHECK in sql/218.
 RunTrigger = Literal["manual", "cascade", "scheduled"]
@@ -842,11 +847,14 @@ def _shape_price_anchor(
     }
 
 
-# Column order of the instrument_valuation SELECT (18 cols):
+# Column order of the instrument_valuation SELECT (20 cols):
 #   0 current_price, 1 price_as_of, 2 market_cap_live, 3 enterprise_value,
 #   4 pe_ratio, 5 pb_ratio, 6 p_fcf_ratio, 7 fcf_yield, 8 ev_revenue,
 #   9 ev_ebitda, 10 debt_equity_ratio, 11 net_margin, 12 gross_margin,
-#   13 operating_margin, 14 roa, 15 roe, 16 dividend_yield, 17 is_complete_ttm
+#   13 operating_margin, 14 roa, 15 roe, 16 dividend_yield, 17 is_complete_ttm,
+#   18 session, 19 valuation_price
+# #3850: the count-based multiples are priced at valuation_price (the close of
+# `session`), the per-share ones at current_price.
 _VALUATION_FIELDS: tuple[str, ...] = (
     "current_price",
     "price_as_of",
@@ -866,6 +874,8 @@ _VALUATION_FIELDS: tuple[str, ...] = (
     "roe",
     "dividend_yield",
     "is_complete_ttm",
+    "session",
+    "valuation_price",
 )
 
 
@@ -882,7 +892,7 @@ def _shape_valuation(row: tuple[object, ...] | None) -> dict[str, object]:
     shaped: dict[str, object] = {"available": True}
     for idx, field_name in enumerate(_VALUATION_FIELDS):
         val = row[idx]
-        if field_name == "price_as_of":
+        if field_name in ("price_as_of", "session"):
             shaped[field_name] = val.isoformat() if isinstance(val, (datetime, date)) else None
         elif field_name == "is_complete_ttm":
             shaped[field_name] = bool(val) if val is not None else None
@@ -1236,7 +1246,8 @@ def _assemble_context(
         SELECT current_price, price_as_of, market_cap_live, enterprise_value,
                pe_ratio, pb_ratio, p_fcf_ratio, fcf_yield, ev_revenue,
                ev_ebitda, debt_equity_ratio, net_margin, gross_margin,
-               operating_margin, roa, roe, dividend_yield, is_complete_ttm
+               operating_margin, roa, roe, dividend_yield, is_complete_ttm,
+               session, valuation_price
         FROM instrument_valuation
         WHERE instrument_id = %(id)s
         """,
@@ -1325,8 +1336,12 @@ You will be given a research context including:
   fractions). Null when no price history exists.
 - `valuation`: fundamentals-derived multiples (P/E, P/B, P/FCF, FCF yield,
   EV/revenue, EV/EBITDA, margins, ROA/ROE, dividend yield) with their own
-  `price_as_of`. `available: false` with a reason means the surface is
-  structurally absent for this instrument — not a data error. Null fields
+  `price_as_of`. The market-cap multiples (P/FCF, FCF yield, EV/revenue,
+  EV/EBITDA, and P/B when `is_complete_ttm` is true) are priced at
+  `valuation_price`, the close of `session`; P/E, dividend yield, and P/B
+  when `is_complete_ttm` is not true are priced at `current_price`.
+  `available: false` with a reason means the surface is structurally
+  absent for this instrument — not a data error. Null fields
   inside an available row are honest gaps (e.g. dual-class suppression) —
   never invent multiples.
 - `analytics_evidence`: quality + positioning evidence — Piotroski F
@@ -1425,9 +1440,12 @@ Rules:
      context actually supplies:
      - a multiple × `fundamentals` `eps` (per-share), or
      - a multiple × `fundamentals` `book_value` (per-share), or
-     - re-rating arithmetic: `valuation.current_price` × (your target
+     - re-rating arithmetic: the multiple's own price × (your target
        multiple / the context's current multiple), using a non-null ratio
        from `valuation` (pe_ratio, pb_ratio, p_fcf_ratio, ev_ebitda, ...).
+       The multiple's own price is `valuation.valuation_price` for a
+       market-cap multiple and `valuation.current_price` for P/E (see the
+       `valuation` bullet above).
      Justify the multiple you chose (own history or peer judgement) and SHOW
      THE ARITHMETIC in the memo's valuation section, in the form
      "base = <your multiple> x EPS <the eps from THIS context> = <product>"

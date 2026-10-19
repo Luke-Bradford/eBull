@@ -1,6 +1,6 @@
 # #3850: the valuation view's count-based columns read the #3841 point-in-time row
 
-**Ticket:** #3850 (refs #3841). **Status:** spec v4. Codex checkpoint 1 ran three rounds, the cap: 36, 26 and 23
+**Ticket:** #3850 (refs #3841). **Status:** spec v4 + Amendment 1 (build). Codex checkpoint 1 ran three rounds, the cap: 36, 26 and 23
 findings, each with an UNSOUND verdict. v4 applies the round-3 dispositions without a fourth round; "Checkpoint
 record" gives every disposition.
 
@@ -114,7 +114,7 @@ No valuation rule is chosen by construction here. The latency bound in acceptanc
      session's own date for 1,485 rows. A Friday session sits against a Monday `price_as_of` for 1,261, and 19 rows
      have other pairs.
    - Of the 2,201 instruments published in both arms, 911 move by more than 0.5% (section 3, by threshold). For 526
-     of them the two counts lie within 0.5% of each other, so the move is mainly the price date.
+     of them the two counts lie within 0.5% of each other, which section 3's threshold rule labels price-date-driven.
 6. **Appended columns** (`CREATE OR REPLACE VIEW` appends only):
    - `session` and `valuation_price` (the PIT `close`);
    - `market_cap_reason` (below);
@@ -294,6 +294,71 @@ A DB test applies the forward migration, then the rollback, and asserts the colu
 The thesis field-map test runs against each schema.
 
 Scores and decisions produced while the change was live stay as recorded.
+
+## Amendment 1 (build, 2026-10-19): the session is the latest close on or before the build's frontier
+
+**Finding.** Construction item 2 reads the PIT row at the latest positive close. #3841's view refuses a bar later than
+its step's `bars_through`, the last bar the build's snapshot held (`basis_stale`, sql/499). The build runs at 08:20Z.
+The candle refresh writes session D's bar after the US close, so until the next build an instrument whose latest
+positive close is D cannot publish a cap. An otherwise publishable covering step reads `basis_stale`; a step refusal
+keeps its own reason (sql/499 checks it first); with no covering step there is no row.
+- Measured on build 7 (2026-10-19 17:41Z): 3,562 instruments have `bars_through` 2026-10-16 and steps valid to
+  2026-10-20. Each that receives a positive 2026-10-19 bar tonight loses its cap until the next build.
+- `daily_candle_refresh` ran 77 times in the 7 days to 2026-10-19. The scheduled scorer (`morning_candidate_review`)
+  ran at 03:01Z on 2026-10-19, after the 03:00Z refresh and before the 08:20Z build. `compute_rankings` has two more
+  callers, `ranking_pot_job` and `ranking_pot_v2_job`, on their own schedules.
+
+**Change.** The instrument's frontier is the `bars_through` its steps in the active build carry. One build writes one
+value per instrument (its last stored bar in the build's snapshot), so the view reads it from the latest step. "The session" is the latest positive-close `price_daily` session on or before the frontier.
+The view then reads the PIT row at exactly that session, as in item 2.
+- **Frontier at or after the latest close:** the session is the latest positive close, as in item 2.
+- **Frontier before it:** the session is the latest positive close dated on or before the frontier.
+- **No frontier** (no steps, or a NULL `bars_through`): the session is the latest positive close. There is no step,
+  or no publishable step, so the reason is `no_pit_row` or PIT's own.
+- **No positive close on or before the frontier:** the session is the latest positive close, which is after the
+  frontier, and PIT refuses it (`basis_stale` on an otherwise publishable step, else the step's refusal or
+  `no_pit_row`).
+- **A session with no covering step:** `no_pit_row`, as before.
+
+**What this does not change.** The selection is by date only. Safety still comes from PIT's own checks at the
+selected session. These are instrument-wide: a revision row, a backdated insert or an unresolved series break
+refuses the earlier session too, as `basis_stale` on an otherwise publishable step. When a positive close exists on
+or before a non-NULL frontier, a bar dated after the frontier is never the session. In the two fallback branches
+above it can be, and PIT refuses it.
+Item 5's argument for the session close over the quote is unchanged.
+
+**Freshness, chosen.** The view imposes no age limit on the session. `session` carries the age to every consumer.
+- The session is the latest positive close within the active build's snapshot frontier.
+- In the ordinary case, a refresh appends one session after the build, and the session is one stored session older
+  than the latest close until the next build. A refresh can append more than one session, or a session with no
+  positive close, so the lag is bounded by the frontier, not fixed at one.
+- After failed builds, it can be older still. #3841 keeps the previous build active, and build failure is a job-health
+  signal (`market_cap_pit_rebuild` in `job_runs`). A correct cap at an older close is preferred to no cap. Every count
+  and basis check still holds at that close.
+
+**Scheduling is not the remedy here.** Ordering refresh → build → scorer would keep the latest close for one caller.
+It would not cover the other two `compute_rankings` callers, the 77 refreshes a week, or a failed build. The fallback
+covers every reader, and a later scheduling change can shorten the window without changing this rule.
+
+**Inherited, not changed:** sql/499 refuses a NULL, NaN or non-positive close, but not a numeric `Infinity`. The dev
+DB holds 0 such closes and 0 such counts (2026-10-19). This is filed against #3841, not handled here.
+
+**Acceptance delta.**
+- Item 1 derives the session the same way, from `instrument_share_count_pit.bars_through`.
+- Item 5 gains these synthetic cases:
+  - with a positive close on or before the frontier, a bar after the frontier is not the session, and the cap
+    publishes at the earlier close;
+  - on an otherwise publishable step, a revision row refuses that earlier session as `basis_stale`;
+  - with no steps, the session is the latest close and the reason is `no_pit_row`;
+  - with no positive close on or before the frontier, the session is the latest close, after the frontier, and PIT
+    refuses it as `basis_stale`.
+
+**Checkpoint record.** Codex checkpoint 1 ran 2 rounds on this amendment.
+- Round 1 (12 findings, UNSOUND) confirmed the mechanism. Scheduling was evaluated and rejected, with the reasons
+  above. The Infinity close is filed against #3841.
+- Round 2 (3 findings, UNSOUND; no critical or high) raised three precision points, applied here without a third
+  round: the fallback branches can select a bar after the frontier, a step refusal outranks `basis_stale`, and the
+  lag is bounded by the frontier rather than fixed at one session.
 
 ## Not in scope
 

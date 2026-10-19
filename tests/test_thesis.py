@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -24,6 +25,7 @@ import pytest
 
 from app.services.llm_client import LLMClientPair, LLMCompletion
 from app.services.thesis import (
+    _VALUATION_FIELDS,
     StaleInstrument,
     ThesisResult,
     _band_exit_fired,
@@ -1293,7 +1295,7 @@ class TestShapePriceAnchor:
         assert out["return_1y"] is None
 
 
-# instrument_valuation row shape (18 cols) — see thesis.py _VALUATION_FIELDS.
+# instrument_valuation row shape (20 cols) — see thesis.py _VALUATION_FIELDS.
 
 
 def _valuation_row(**overrides: object) -> tuple[object, ...]:
@@ -1316,12 +1318,14 @@ def _valuation_row(**overrides: object) -> tuple[object, ...]:
         1.5,
         0.005,
         True,  # is_complete_ttm
+        date(2026, 7, 9),  # session
+        Decimal("211.9"),  # valuation_price
     ]
     row = dict(enumerate(base))
     for name, val in overrides.items():
         idx = {"current_price": 0, "pe_ratio": 4, "fcf_yield": 7, "market_cap_live": 2}[name]
         row[idx] = val
-    return tuple(row[i] for i in range(18))
+    return tuple(row[i] for i in range(len(_VALUATION_FIELDS)))
 
 
 class TestShapeValuation:
@@ -1337,6 +1341,15 @@ class TestShapeValuation:
         assert out["pe_ratio"] == pytest.approx(32.1)
         assert out["price_as_of"] == "2026-07-09T20:00:00+00:00"
         assert out["is_complete_ttm"] is True
+
+    def test_session_and_valuation_price_reach_the_context(self) -> None:
+        # #3850: the count-based multiples' price base reaches the writer, typed for JSON.
+        assert _VALUATION_FIELDS[-2:] == ("session", "valuation_price")
+        out = _shape_valuation(_valuation_row())
+        assert out["session"] == "2026-07-09"
+        assert isinstance(out["valuation_price"], float)
+        assert out["valuation_price"] == pytest.approx(211.9)
+        json.dumps(out)
 
     def test_dual_class_nulls_pass_through(self) -> None:
         # #1664 suppression: NULL shares-distorted columns stay None.

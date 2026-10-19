@@ -13395,3 +13395,18 @@ neighbouring container and match it.**
   `timed_share_facts`), `tests/test_pit_market_cap_build_submissions.py`, `scripts/ab_3902_pit_reader.py`; spec
   `docs/specs/fundamentals/2026-10-16-3841-pit-market-cap.md` Amendment 1. Skill text for
   `.claude/skills/data-sources/sec-edgar.md` §7.8 is posted on #2403.
+
+### A point-in-time view's frontier refuses the newest bar until the next build (#3850, 2026-10-19)
+
+- Symptom (build, after spec v4 passed checkpoint 1): the spec read #3841's PIT row at the latest positive close.
+  #3841 refuses any bar after its step's `bars_through`. The candle refresh lands session D's bar after the US close,
+  and the PIT build runs at 08:20Z. Every instrument receiving that bar therefore loses its cap until the next build.
+  The scheduled scorer runs at about 03:00Z, inside that window. Build 7 held `bars_through` 2026-10-16 with steps
+  valid to 2026-10-20 for 3,562 instruments.
+- Prevention: a consumer of a snapshot-built table that refuses rows past its snapshot frontier reads at the latest
+  date on or before that frontier, not at the latest date in the live source. It then lets the table's own checks
+  refuse that date. Before fixing "the latest date", compare the producer's schedule with every consumer's schedule
+  (`job_runs` gives both), not just one.
+- Enforced in: `sql/505_instrument_valuation_pit_market_cap.sql` (the `fb`/`fc`/`ses` laterals), spec
+  `docs/specs/fundamentals/2026-10-19-3850-live-cap-share-basis.md` Amendment 1,
+  `tests/test_instrument_valuation_pit_cap.py::test_bar_after_the_frontier_is_not_the_session`.
