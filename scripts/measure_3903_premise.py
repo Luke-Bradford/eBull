@@ -83,6 +83,10 @@ _LEGACY = """
           AND fp0.normalization_status = 'normalized'
         ORDER BY fp0.filed_date DESC NULLS LAST LIMIT 1
     ) fp ON TRUE
+    -- The legacy arm is the rows with is_complete_ttm NULL: sql/505's legacy CTE emits `NULL::boolean AS
+    -- is_complete_ttm` (sql/505_instrument_valuation_pit_market_cap.sql:170, commented at :156 "is_complete_ttm is
+    -- NULL here, which the final SELECT reads as the arm"), and the complete-TTM CTE keeps only
+    -- `ttm.is_complete_ttm = TRUE` (:153). No third value reaches the view.
     WHERE v.is_complete_ttm IS NULL
 """
 

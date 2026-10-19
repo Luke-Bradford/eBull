@@ -13418,4 +13418,6 @@ neighbouring container and match it.**
   but nothing showed it: a helper that misplaced an edge would have moved rows between the bands the spec quotes.
 - Prevention: a measurement script whose bucket counts a spec or PR cites writes each bucket as an explicit
   comparison chain, and a pure test pins every edge value on both sides before the counts are quoted.
-- Enforced in: `tests/test_measure_3903_buckets.py`.
+- Prevention (round 2): a measurement script that selects a population by a view's flag value (an arm read as
+  `is_complete_ttm IS NULL`) cites, beside the predicate, the view line that sets that value.
+- Enforced in: `tests/test_measure_3903_buckets.py`; the `_LEGACY` comment in `scripts/measure_3903_premise.py`.
