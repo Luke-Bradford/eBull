@@ -202,6 +202,22 @@ def test_complete_submission_parses_only_the_primary_document() -> None:
     assert p.offer_price_per_unit == Decimal("5.25")
 
 
+def test_complete_submission_slice_survives_a_literal_text_close_in_the_primary() -> None:
+    """The primary's ``<TEXT>`` closes at the last ``</TEXT>`` before its ``</DOCUMENT>``, not the first."""
+    primary = _MINIMAL_BODY.format(
+        extra="see </TEXT> above. offer to purchase all ADSs for $5.25 per ADS, net to the seller in cash."
+    )
+    submission = (
+        "<SEC-DOCUMENT>0000000000-26-000001.txt : 20260101\n"
+        f"{_MINIMAL_HDR}\n"
+        f"<DOCUMENT>\n<TYPE>SC TO-T\n<SEQUENCE>1\n<FILENAME>sctot.htm\n<TEXT>\n{primary}\n</TEXT>\n</DOCUMENT>\n"
+        "</SEC-DOCUMENT>\n"
+    )
+    p = parse_tender_offer(submission, _MINIMAL_HDR, "SC TO-T")
+    assert p is not None
+    assert p.offer_price_per_unit == Decimal("5.25")
+
+
 def test_duplicate_checkbox_label_checked_anywhere_wins() -> None:
     body = _MINIMAL_BODY.format(
         extra=(

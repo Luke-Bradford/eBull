@@ -205,11 +205,14 @@ def _primary_document(body: str) -> str:
     (#3872: 46 of 127 accessions parsed differently from their primary HTML; the first ``<DOCUMENT>`` was the
     primary file on all 127). A container with no ``<DOCUMENT>…<TEXT>…</TEXT>`` is returned unchanged.
     """
+    # EDGAR writes these container tags upper-case and attribute-free. The close is the LAST ``</TEXT>`` before the
+    # first ``</DOCUMENT>``, so a literal ``</TEXT>`` inside the primary document cannot truncate it.
     if not body.lstrip().startswith("<SEC-DOCUMENT>"):
         return body
     doc = body.find("<DOCUMENT>")
     start = body.find("<TEXT>", doc) if doc != -1 else -1
-    end = body.find("</TEXT>", start) if start != -1 else -1
+    doc_end = body.find("</DOCUMENT>", start) if start != -1 else -1
+    end = body.rfind("</TEXT>", start, doc_end) if doc_end != -1 else -1
     if end == -1:
         return body
     return body[start + len("<TEXT>") : end]

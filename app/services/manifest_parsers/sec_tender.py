@@ -136,6 +136,7 @@ def _parse_tender(
     try:
         with SecFilingsProvider(user_agent=settings.sec_user_agent) as provider:
             body = provider.fetch_document_text(url)
+            # ``sec_filing_manifest.cik`` is NOT NULL and ``record_manifest_entry`` refuses an empty one.
             header = provider.fetch_document_text(header_url(row.cik, accession)) if body else None
     except Exception as exc:  # noqa: BLE001 — transient fetch errors retry via worker backoff
         logger.warning(
