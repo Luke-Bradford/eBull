@@ -13,8 +13,9 @@ Prints:
 1. every priced view row, cross-tabbed by today's ``market_cap_live`` and the PIT outcome at the session;
 2. among PIT-published rows, the view's count against PIT's effective count (``shares_reported × split_factor``);
 3. a simulation of the proposed ``market_cap_live`` (the PIT row's ``market_cap``, under the spec's final-reason
-   precedence) against today's: kept, gained, lost by reason, and changed by more than 0.5% split into
-   by threshold: the two counts differ by more than 0.5%, or lie within 0.5% (a mixed change counts as the first);
+   precedence) against today's: kept, gained, lost by reason, and changed by more than 0.5%. The changed rows are
+   split by threshold into: counts differ by more than 0.5%, or counts within 0.5% (a mixed change counts as the
+   first);
 4. named cases with every operand the spec cites, including the view arm, PIT's concept and the anchor window;
 5. today's view caps with no PIT row at the session, each with what the current reader observes;
 6. the whole ``ads_ratio`` table (with today's view cap) and the FPI/ADR set against the PIT outcome;
