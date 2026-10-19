@@ -78,6 +78,13 @@ class Refusal(StrEnum):
     FLOAT_BOUND = "float_bound"
 
 
+class CikRefusal(StrEnum):
+    """Why an instrument has no steps at all (counted in the build summary, never stored as a step)."""
+
+    UNTIMED_ACCESSION = "untimed_accession"  # a fact whose accession the submissions cannot time (Amendment 1 rule 4)
+    FPI_ADR = "fpi_adr"  # an FPI or ADS listing: its quote unit is not the counted share (Amendment 1 rule 6)
+
+
 class Concept(StrEnum):
     COVER = "cover"  # dei:EntityCommonStockSharesOutstanding
     BALANCE_SHEET = "balance_sheet"  # us-gaap:CommonStockSharesOutstanding
@@ -107,6 +114,7 @@ def rule_version() -> str:
         "scale_tolerance": str(SCALE_TOLERANCE),
         "dollar_volume_me_ceiling": DOLLAR_VOLUME_ME_CEILING,
         "refusals": sorted(Refusal),
+        "cik_refusals": sorted(CikRefusal),
         "anchor_statuses": sorted(AnchorStatus),
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
