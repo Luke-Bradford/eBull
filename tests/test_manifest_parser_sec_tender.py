@@ -89,6 +89,7 @@ def _seed_pending_tender(
     instrument_id: int,
     form: str = "SC TO-T",
     cik: str = "0009170001",
+    primary_document_url: str = _BODY_URL,
 ) -> None:
     record_manifest_entry(
         conn,
@@ -100,7 +101,7 @@ def _seed_pending_tender(
         subject_id=str(instrument_id),
         instrument_id=instrument_id,
         filed_at=datetime(2026, 6, 24, tzinfo=UTC),
-        primary_document_url=_BODY_URL,
+        primary_document_url=primary_document_url,
     )
 
 
@@ -195,6 +196,54 @@ def test_happy_path_dual_party_role_rows(
     assert raw is not None
     assert raw[0] is None
     assert raw[1] is not None
+
+
+def test_cik_directory_txt_url_fetches_header_from_the_accession_folder(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3872: an index/Atom-derived row records ``/data/<cik>/<acc>.txt``, which sits in the CIK directory. The
+    header is fetched from the accession folder built from the manifest CIK (SEC answers the CIK-directory
+    ``.hdr.sgml`` with 403), and the complete-submission body parses as its primary document."""
+    import app.services.manifest_parsers  # noqa: F401 — register
+
+    _seed_instrument(ebull_test_conn, iid=9170301, symbol="TXTT", cik="0009170001")
+    _seed_pending_tender(
+        ebull_test_conn,
+        accession="0001000001-26-000301",
+        instrument_id=9170301,
+        primary_document_url="https://www.sec.gov/Archives/edgar/data/9170001/0001000001-26-000301.txt",
+    )
+    ebull_test_conn.commit()
+
+    submission = (
+        "<SEC-DOCUMENT>0001000001-26-000301.txt : 20260624\n"
+        f"{_FAKE_HDR}\n"
+        f"<DOCUMENT>\n<TYPE>SC TO-T\n<SEQUENCE>1\n<FILENAME>sctot.htm\n<TEXT>\n{_FAKE_BODY}\n</TEXT>\n</DOCUMENT>\n"
+        "</SEC-DOCUMENT>\n"
+    )
+    fetched: list[str] = []
+    dispatch = _fetch_dispatch(submission, _FAKE_HDR)
+
+    def fetch(self, url: str) -> str:  # noqa: ANN001
+        fetched.append(url)
+        return dispatch(self, url)
+
+    from app.providers.implementations import sec_edgar
+
+    monkeypatch.setattr(sec_edgar.SecFilingsProvider, "fetch_document_text", fetch)
+
+    stats = run_manifest_worker(ebull_test_conn, source="sec_tender", max_rows=10)
+    ebull_test_conn.commit()
+    assert stats.parsed == 1
+    assert "https://www.sec.gov/Archives/edgar/data/9170001/000100000126000301/0001000001-26-000301.hdr.sgml" in fetched
+
+    with ebull_test_conn.cursor() as cur:
+        cur.execute(
+            "SELECT offer_price_per_unit, is_third_party_tender FROM tender_offer_events"
+            " WHERE accession_number = '0001000001-26-000301' AND instrument_id = 9170301"
+        )
+        assert cur.fetchone() == (Decimal("42.00"), True)
 
 
 def test_share_class_sibling_cik_yields_row_per_instrument(

@@ -184,6 +184,24 @@ def test_price_match_carries_currency_and_unit() -> None:
     assert p.currency == "USD"
 
 
+def test_complete_submission_parses_only_the_primary_document() -> None:
+    """#3872: an index/Atom-derived ``<acc>.txt`` body is the whole submission. Only its first ``<DOCUMENT>`` is the
+    schedule; an exhibit's restated price would otherwise conflict it to NULL."""
+    primary = _MINIMAL_BODY.format(extra="offer to purchase all ADSs for $5.25 per ADS, net to the seller in cash.")
+    exhibit = "<html><body>to purchase all ADSs for $6.00 per ADS, net to the seller in cash.</body></html>"
+    submission = (
+        "<SEC-DOCUMENT>0000000000-26-000001.txt : 20260101\n"
+        f"{_MINIMAL_HDR}\n"
+        f"<DOCUMENT>\n<TYPE>SC TO-T\n<SEQUENCE>1\n<FILENAME>sctot.htm\n<TEXT>\n{primary}\n</TEXT>\n</DOCUMENT>\n"
+        f"<DOCUMENT>\n<TYPE>EX-99.(A)(1)(A)\n<SEQUENCE>2\n<FILENAME>ex.htm\n<TEXT>\n{exhibit}\n</TEXT>\n</DOCUMENT>\n"
+        "</SEC-DOCUMENT>\n"
+    )
+    p = parse_tender_offer(submission, _MINIMAL_HDR, "SC TO-T")
+    assert p is not None
+    assert p == parse_tender_offer(primary, _MINIMAL_HDR, "SC TO-T")
+    assert p.offer_price_per_unit == Decimal("5.25")
+
+
 def test_duplicate_checkbox_label_checked_anywhere_wins() -> None:
     body = _MINIMAL_BODY.format(
         extra=(
