@@ -167,6 +167,31 @@ def test_dividend_yield_is_per_tradable_unit_and_covered_only_where_the_dps_is_k
     assert y("1", "0.5", "210", None) is None and y("1", "0.5", "210", "0") is None
 
 
+@pytest.mark.parametrize("arm", ["sql_506", "sql_507"])
+def test_dividend_yield_reader_under_each_view_arm(arm: str) -> None:
+    """#3903 (spec "Acceptance" item 5): one call per branch, with the view yield each arm publishes for the same name.
+
+    The name: TTM DPS 1.00, cash paid 1e8 over 1e8 shares, ``current_price`` 52, session close 50, close on D 50.
+    sql/506's yield is DPS / ``current_price`` (1 / 52 × 100), so the reader returns DPS / close. sql/507's is cash
+    paid / (session close × count) = 2%, so it returns (cash paid / count) × (``current_price`` / session close) /
+    close: the quote's drift from the session close scales it."""
+    pct = D(1) / 52 * 100 if arm == "sql_506" else D(2)
+
+    def y(dps: str | None, view_pct: Decimal | None, close: str | None = "50") -> Any:
+        f = replace(_name(1, D("0.9"), dps_ttm=None if dps is None else D(dps)), valuation_price=D(52))
+        return ex.dividend_yield(replace(f, valuation_yield_pct=view_pct), None if close is None else D(close))
+
+    assert y(None, pct) is None
+    assert y("NaN", pct) is None
+    assert y("-1", pct) is None
+    assert y("0", pct) == 0 and y("0", None) == 0  # a zero DPS is 0 whatever the view says
+    assert y("1", None) is None  # a refused cap under sql/507, a ratio-unknown ADR under sql/506
+    assert y("1", D(0)) is None and y("1", D("NaN")) is None
+    assert y("1", pct, None) is None and y("1", pct, "0") is None
+    expected = D("0.02") if arm == "sql_506" else D("0.0208")
+    assert abs(y("1", pct) - expected) < TOL
+
+
 def test_div_yield_reaches_the_table_and_its_round_trip(monkeypatch: pytest.MonkeyPatch) -> None:
     inputs = _inputs(monkeypatch)
     facts = tuple(

@@ -1,6 +1,6 @@
 # #3903: the valuation view's dividend yield on the total/ME form
 
-**Ticket:** #3903 (remainder item 1; refs #3850, #3841). **Status:** spec v4. Codex checkpoint 1 ran three rounds,
+**Ticket:** #3903 (remainder item 1; refs #3850, #3841). **Status:** spec v4 + Amendment 1 (build). Codex checkpoint 1 ran three rounds,
 the cap: round 1 raised 30 findings, round 2 re-graded them and added 24, round 3 re-graded all 54 and added 21, each
 UNSOUND. v4 applies round 3 without a fourth round, as #3910 did; "Checkpoint record" gives every disposition.
 
@@ -270,6 +270,125 @@ after the 08:20Z PIT build and before the evening candle refresh.
 7. **Latency.** Per-instrument and bulk reads of both views, both arms; above 2× blocks (#3850's bound).
 8. **Corpus evidence** (CLAUDE.md "Corpus changes"): the smoke panel; item 4 as the cross-source check; backfill
    none (views); live re-check after deploy; the thesis-window listing.
+
+## Amendment 1 (build, 2026-10-19): the control's source, the external E, and the generic concept's unfiled deductions
+
+Figures are from dry runs of `scripts/measure_3903_dividend_acceptance.py` at 2026-10-19 22:40–22:46Z (code
+`03030946` plus this branch's working tree; the run's first line prints both). Those runs fell after the evening candle
+refresh, so outside the acceptance window (the panel's caps were `basis_stale`). They justify the
+change. The timed run after the next 08:20Z build is the acceptance.
+
+**Finding 1: the control cannot be read "as deployed" at the timed run.** The pre-push hook's smoke test applies a new
+`sql/NNN` to the dev database, so once the branch is pushed the deployed views are sql/507's.
+- **Change:** the control is built from files, as two temporary views. They are sql/220's `financial_periods_ttm` body
+  and sql/506's `instrument_valuation` body (`sql/rollback/507_…`, byte for byte), the latter rewritten to read the
+  former by name. The treatment is built the same way from sql/507. `pg_depend` asserts that each valuation arm
+  depends on its own TTM arm and on no other.
+- **Evidence of equivalence:** while the deployed views lack the appended column, the script compares them with the
+  file control on every row and every column. In the 22:40Z dry run, before any push, both views were equal: 4,564 TTM
+  rows and 4,561 valuation rows. This is equality of the two snapshots' rows, not a proof that the SQL definitions are
+  equivalent.
+- After the push the comparison cannot run, and the script says so. The result is then a comparison against the file
+  baseline that the dry run proved equal to the deployment.
+
+**Finding 2: the external page's "Annual Dividend" is forward, not trailing.**
+- stockanalysis shows MSFT's Annual Dividend at $3.92, four times the declared $0.98. Each of the four ex-dates in the
+  trailing year paid $0.91.
+- **Change:** the script stores every dividend-history row the page lists from 2025-09-01, as (ex-date, amount).
+  `external_ttm` derives E from the amounts whose ex-date falls in the 365 days to the external close.
+- Specials stay in E, as JKP's `ret − retx` carries them; FCBC's $1.00 on 2026-01-02 is one.
+- No reference name split in the period, so the page's amounts and the close are on one share basis.
+- This is a comparison convention: JKP sums monthly `div_tot × shares` over 12 observations, and a single count does
+  not reproduce those weights. N_f / N compares two counts only; the difference between Σ(dividend_t × shares_t) and
+  N_f × Σ dividend_t stays in the residual C / (N_f · E), which is never divided out.
+
+**Finding 3: the rebuild cannot see a deduction the filer does not tag.** GM's case:
+- GM's stored members are `PaymentsOfDividends`, $1.169B TTM, and they agree with the filing rule.
+- GM files no `PaymentsOfDividendsCommonStock`, and no preferred or minority-interest payment fact. The rebuild's
+  "generic less filed deductions" branch therefore returns the same $1.169B (D / C = 1.000), and section 3 cannot flag
+  it.
+- GM's filed `DividendsCommonStockCash` (common cash dividends declared) is $602M over the window.
+- Against stockanalysis (P_x 82.75, E 0.69), ours is 1.587% and the external 0.834%, a ratio of 1.903. Today's
+  per-share form is near the external here.
+
+This is the composition that "The numerator is a proxy" names: `PaymentsOfDividends` includes preferred and NCI
+payments. It is the same root cause as XRX, which "Input policy" already classes as an input defect: the normaliser
+stores the generic concept. XRX's case is the concept order; GM's is that no common-paid fact is filed. The view
+cannot tell them apart from a stored scalar, because `financial_periods` records no concept provenance (its columns
+are `source` and `source_ref`, grep 2026-10-19).
+
+**The population.** Of 843 publications, 344 have a member whose rule concept is `PaymentsOfDividends`.
+- 75 of those file a four-quarter `DividendsCommonStockCash` TTM.
+- For 7 of the 75, stored ÷ declared lies outside [0.95, 1.05]: XRX 2.231, GM 1.942, WTFC 1.272, BUSE 1.212 (newly
+  exposed), EFC 1.121, SRBK 1.055 and OGN 0.900.
+- The other 269 cannot be screened this way, so the error of the generic-concept population is not bounded by this
+  evidence.
+- Declared is not paid, so timing alone can move the ratio. The screen produces candidates, not verdicts.
+- `DividendsCommonStock` is not used, because it includes stock and other noncash forms.
+
+**Change:**
+- **Section 3** lists the investigation candidates: stored ÷ declared outside [0.95, 1.05], or a positive amount paid
+  against zero declared. Newly exposed ones are marked.
+  - They are candidates, not confirmed defects. Under "Input policy" they stay published, because the view cannot see
+    the concept.
+  - The normaliser ticket's scope gains them, together with what it would take to give a generic-only filer a
+    common-paid operand: concept provenance per stored member, and deductions the filer does not tag.
+- **Item 4:** a reference miss that the count and composition factors do not account for is classified as a
+  numerator proxy defect when all of the following hold:
+  - all four stored members agree with the rule, and one is on `PaymentsOfDividends`;
+  - stored D ÷ the filed `DividendsCommonStockCash` TTM C_d lies outside [0.95, 1.05];
+  - |D − C_d| exceeds the largest declared amount over the quarter before the window and the window's four.
+    Declared is not paid. With a payment lag of up to one quarter, the window pays the preceding quarter's declaration
+    instead of its own last one, so timing alone moves D by at most the larger of the two. If the preceding quarter does
+    not resolve, the row is not classified. GM: |1,169 − 602| = $567M, against a largest quarter of $164M;
+  - the filing corroborates the external page: (P_x / V) × (N_f / N, unless the count factor was divided out) ×
+    C_d / (N_f · E) lies within ±15%.
+
+  The classification does not divide D out. It shows that D is the wrong operand by D / C_d, which is printed, and
+  that the filing's common amount agrees with the external one. A proxy defect is never counted as reconciled and does
+  not count towards the minimum coverage of 10 of 12. It is listed and filed like a member defect, whose size the
+  policy does not bound either. Any other miss fails. GM: D / C_d 1.942, corroboration 0.960.
+
+**Codex checkpoint 1 on this amendment, round 1 (UNSOUND, 8 findings).**
+
+| # | finding | action |
+|---|---|---|
+| 1 | P1: finding 3 excuses an operand-selection error | Kept as an input defect under the existing policy (the XRX precedent; same root cause). The reason, the unscreenable 269 and the normaliser's widened scope are stated. Never counted as reconciled. |
+| 2 | P1: dividing out D / C_d cancels D | Replaced: no divide-out. The classification requires D / C_d outside the band, and the filing's C_d corroborating E. |
+| 3 | P2: `DividendsCommonStock` includes noncash | Dropped; `DividendsCommonStockCash` only. |
+| 4 | P2: the exemption allowed unresolved members | Now requires all four members to `agree`. |
+| 5 | P2: the residual re-multiplied a factor never applied | Computed afresh from the price factor, the count factor (unless divided out) and C_d / (N_f · E). |
+| 6 | P2: zero declarations dropped | Zero declared counted; positive paid against zero declared is listed. |
+| 7 | P2: file control ≠ deployed, unproved | Row-and-column equality with the deployment, checked while the deployment predates sql/507; passed in the dry run. |
+| 8 | P2: E not auditable | Dated events stored; E derived by `external_ttm`; share basis stated. |
+
+**Round 2 (UNSOUND; 7 of 8 resolved, finding 1 partial; 8 new).**
+
+| # | finding | action |
+|---|---|---|
+| 1 | P1, partial: declared ≠ paid, so agreement does not show the excess is noncommon | Timing bound added (above). A proxy defect is still classified, not passed: this amendment deliberately keeps "Input policy"'s treatment for the generic concept's errors (the XRX precedent). The alternative is blocking until the normaliser carries concept provenance, and that keeps today's form, which publishes EFC at 10,046% and no yield for HD or KO, and agrees with the rebuild on 342 of 526 rows against 518. |
+| 9 | P2: the count factor did not check N = `shares_reported` × `split_factor` | Required, within 0.5%. |
+| 10 | P2: a member defect excused the whole miss | Quantified: the members are corrected to the rule's values and the factors re-applied, and the residual must be within ±15%. In section 3 a member trace needs the corrected total within [0.95, 1.05] of the rebuild. A concept trace needs every member resolved. PRI and SSNC pass on their corrected totals. |
+| 11 | P2: zero cases escaped tracing | A resolved zero rebuild against positive stored, and a zero publication against a positive rebuild where today is positive, both need a trace. The dry run has 7 resolved zero rebuilds, all stored zero, and no zero regression. |
+| 12 | P2: duplicate slots | Named names are reserved first. Replacements and the untagged slots exclude every taken name, and coverage counts distinct names. |
+| 13 | P2: slot rules | A non-panel name is replaced only for a refused cap or a failed category predicate. Any other missing yield on a named name fails, panel included. |
+| 14 | P2: N_f / N does not carry historical weighting | Wording corrected (finding 2): it stays in C / (N_f · E). |
+| 15 | P3: outliers not all printed | Section 3 prints every publication outside [0.95, 1.05] with both totals and its quarter branches (12 in the dry run). |
+| 16 | P3: timestamp | Corrected to the runs' own times. |
+
+**Round 3, the cap (UNSOUND; 9, 11, 14, 15 and 16 resolved; 1, 10, 12 and 13 partial; 5 new).** As in v4, the round's
+findings are applied without a fourth round. Dry run 22:53Z.
+
+| # | finding | action |
+|---|---|---|
+| 1 | P1, partial: the timing bound ignored the quarter before the window | The bound takes the preceding quarter's declared amount too, and an unresolved preceding quarter is not classified. The residual disagreement stands and is recorded: Codex holds that only a reconciliation to common cash paid should make a miss non-blocking. This amendment keeps the "Input policy" treatment and states why (round 2, finding 1). |
+| 10 | P2, partial: the concept trace did not measure its contribution | Quantified. Each concept quarter is moved to the rebuild's value, after member correction, and the adjusted total must lie within [0.95, 1.05] of the rebuild. PRI, SSNC and XRX each adjust exactly to their rebuilt totals. |
+| 12, 18 | P2: one symbol could hold several slots, or resolve to another instrument | Pools and the untagged ranking hold one canonical instrument per symbol, so a slot resolves to the instrument that was assessed. |
+| 13 | P2, partial: the predicate was checked only when the name published | The predicate is checked first, whatever the yield. |
+| 17 | P2: a zero corrected total divided zero by zero | Guarded. |
+| 19 | P3: candidates called defects | Called investigation candidates. |
+| 20 | P3: Input policy's counts are stale | The script separates resolved zero rebuilds: in the 22:53Z dry run, 75 publications lack a resolved comparison and 7 have a resolved zero rebuild, all stored zero. The 9 zero publications include JACK and RFIL, whose zeros remain unresolved. v4's 82 counted both groups as unresolved. |
+| 21 | P3: a resolved zero rebuild printed as "unresolved" | Printed as "resolved zero". |
 
 ## Rollback
 

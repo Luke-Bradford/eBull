@@ -172,15 +172,15 @@ def _latest_fact(facts: list[dict[str, Any]]) -> dict[str, Any] | None:
     return max(facts, key=lambda f: (f["filed"], f["accn"])) if facts else None
 
 
-def diluted_shares(facts: dict[str, Any], end: date) -> tuple[Decimal, str] | None:
-    """The filing's weighted diluted share count for the quarter ending ``end``, and how it was read.
+def diluted_shares(facts: dict[str, Any], end: date, concept: str = DILUTED) -> tuple[Decimal, str] | None:
+    """The filing's weighted diluted (or ``concept``'s) share count for the quarter ending ``end``, and how it was read.
 
     The 80–100 day context when filed. Else, for a fiscal Q4, the duration-weighted difference of the fiscal-year and
     nine-month averages, (FY × d_FY − 9M × d_9M) / (d_FY − d_9M): a weighted average is additive over time only when
     weighted by duration (spec Amendment 1). It is an approximation, because ASC 260 tests each period's dilution on
     its own. None when neither resolves.
     """
-    units = [f for f in _units(facts, "us-gaap", DILUTED, "shares") if f.get("start")]
+    units = [f for f in _units(facts, "us-gaap", concept, "shares") if f.get("start")]
     at_end = [f for f in units if f["end"] == end.isoformat()]
     quarter = _latest_fact([f for f in at_end if 80 <= _days(f) <= 100])
     if quarter is not None:

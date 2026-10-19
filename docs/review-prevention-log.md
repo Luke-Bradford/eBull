@@ -13421,3 +13421,20 @@ neighbouring container and match it.**
 - Prevention (round 2): a measurement script that selects a population by a view's flag value (an arm read as
   `is_complete_ttm IS NULL`) cites, beside the predicate, the view line that sets that value.
 - Enforced in: `tests/test_measure_3903_buckets.py`; the `_LEGACY` comment in `scripts/measure_3903_premise.py`.
+
+### A rebuild that reads the stored concept cannot validate the stored concept's composition (#3903, 2026-10-19)
+
+- Symptom (#3903 `dividend_yield` build, acceptance dry run): GM's stored `dividends_paid` members are
+  `PaymentsOfDividends`, $1.169B TTM. That concept includes payments to NCI and preferred holders. The spec's
+  common-only rebuild read the same concept less *filed* deductions. GM files none, so the rebuild returned the same
+  $1.169B and the full-population comparison passed it. The external yield and GM's filed `DividendsCommonStockCash`
+  ($602M) put the common figure at half. The spec's headline agreement (749 of 761 within ±5%) counts such rows as
+  agreeing by construction.
+- Prevention: when a check rebuilds a stored figure from filings, report separately the rows where the rebuild took
+  the same concept and branch the normaliser stored. Those rows show the extraction was reproducible; they say
+  nothing about what the figure means. Screen them against an independent concept (here, declared common cash), and
+  require an external sample that includes such a row.
+- Prevention: stockanalysis's "Annual Dividend" is forward (4 × the latest declared). A trailing external DPS is the
+  sum of the page's dated cash amounts in the trailing window, stored with their ex-dates.
+- Enforced in: `scripts/measure_3903_dividend_acceptance.py` (section 3's generic-concept screen, `external_ttm`),
+  spec `docs/specs/fundamentals/2026-10-19-3903-dividend-yield-total-form.md` Amendment 1.
