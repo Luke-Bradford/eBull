@@ -4,10 +4,17 @@ Issue #1982 (child of #1015 item 4). Upgrades SC TO-T / SC TO-I / SC 14D9 /
 SC 13E3 (+ /A) from metadata-only to PARSE+RAW under the new manifest source
 ``sec_tender``. Mirrors ``sec_424b.py``: fetch the primary document, persist
 it as ``tender_body`` in ``filing_raw_documents`` (born-compacted — swept
-kind, sha only), fetch the EDGAR SGML header (``<acc>.hdr.sgml``, same archive
-directory as the primary document — verified live 2026-07-05), then run the
-pure extractor (``app.services.tender_offers``) and upsert
+kind, sha only), fetch the EDGAR SGML header (``<acc>.hdr.sgml`` in the
+accession folder, built from the manifest CIK by ``sec_header.header_url``),
+then run the pure extractor (``app.services.tender_offers``) and upsert
 ``tender_offer_events``.
+
+#3872: the header URL was once derived from the primary document's directory.
+Index- and Atom-derived rows record the complete submission
+``/data/<cik>/<acc>.txt``, which sits in the CIK directory, so the derived URL
+dropped the accession folder and the header fetch failed (tombstoned while the
+fetch returned nothing, failed once SEC began answering 403). For a primary URL
+inside the accession folder the two constructions give the same URL.
 
 The header fetch is the load-bearing step: ``sec_filing_manifest`` is keyed on
 accession alone, so a dual-party accession (subject + offeror both in
@@ -23,15 +30,14 @@ this module only orchestrates fetch / store / transition.
 from __future__ import annotations
 
 import logging
-import posixpath
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
 
 import psycopg
 
 from app.config import settings
 from app.providers.implementations.sec_edgar import SecFilingsProvider
+from app.providers.implementations.sec_header import header_url
 from app.services.raw_filings import store_raw
 from app.services.tender_offers import (
     IN_SCOPE_FORMS,
@@ -90,21 +96,6 @@ def _tombstone_after_store(conn: psycopg.Connection[Any], accession: str, error:
     )
 
 
-def _header_url(primary_document_url: str, accession: str) -> str:
-    """``<acc>.hdr.sgml`` URL in the primary document's archive directory.
-
-    EDGAR disseminates the SGML header alongside the filing's documents
-    (``.../Archives/edgar/data/<cik>/<acc-nodash>/<acc-dashed>.hdr.sgml``) —
-    verified live on 0001193125-26-280246 (200, 1.6 KB). All 1,753 in-scope
-    ``filing_events`` URLs live under an instrument-owned CIK directory
-    (full-population check in the spec), so deriving from the manifest URL
-    never routes through a filing-agent CIK (#1233 n/a).
-    """
-    scheme, netloc, path, _query, _fragment = urlsplit(primary_document_url)
-    directory = posixpath.dirname(path)
-    return urlunsplit((scheme, netloc, f"{directory}/{accession}.hdr.sgml", "", ""))
-
-
 def _parse_tender(
     conn: psycopg.Connection[Any],
     row: Any,  # ManifestRow — forward-ref to avoid circular import
@@ -145,7 +136,8 @@ def _parse_tender(
     try:
         with SecFilingsProvider(user_agent=settings.sec_user_agent) as provider:
             body = provider.fetch_document_text(url)
-            header = provider.fetch_document_text(_header_url(url, accession)) if body else None
+            # ``sec_filing_manifest.cik`` is NOT NULL and ``record_manifest_entry`` refuses an empty one.
+            header = provider.fetch_document_text(header_url(row.cik, accession)) if body else None
     except Exception as exc:  # noqa: BLE001 — transient fetch errors retry via worker backoff
         logger.warning(
             "sec_tender parser: fetch raised accession=%s url=%s: %s",

@@ -195,6 +195,29 @@ class TenderOfferParse:
     cusip: str | None
 
 
+def _primary_document(body: str) -> str:
+    """The primary document's ``<TEXT>`` when ``body`` is an EDGAR complete submission, else ``body`` unchanged.
+
+    Index-derived and Atom-derived manifest rows record ``/Archives/edgar/data/<cik>/<acc>.txt`` (#3590,
+    ``sec-edgar.md`` "``.txt`` full-submission vs primary doc"): a ``<SEC-DOCUMENT>`` container holding the
+    ``<SEC-HEADER>`` and then every ``<DOCUMENT>`` in ``<SEQUENCE>`` order, the primary document first. Parsing the
+    whole container shifts the cover window past the header and lets exhibit prose answer the Item 1004 formulas
+    (#3872: 46 of 127 accessions parsed differently from their primary HTML; the first ``<DOCUMENT>`` was the
+    primary file on all 127). A container with no ``<DOCUMENT>…<TEXT>…</TEXT>`` is returned unchanged.
+    """
+    # EDGAR writes these container tags upper-case and attribute-free. The close is the LAST ``</TEXT>`` before the
+    # first ``</DOCUMENT>``, so a literal ``</TEXT>`` inside the primary document cannot truncate it.
+    if not body.lstrip().startswith("<SEC-DOCUMENT>"):
+        return body
+    doc = body.find("<DOCUMENT>")
+    start = body.find("<TEXT>", doc) if doc != -1 else -1
+    doc_end = body.find("</DOCUMENT>", start) if start != -1 else -1
+    end = body.rfind("</TEXT>", start, doc_end) if doc_end != -1 else -1
+    if end == -1:
+        return body
+    return body[start + len("<TEXT>") : end]
+
+
 def _strip_html(raw: str) -> str:
     # Tags first, entities second (same rationale as nt_notices._strip_html).
     no_tags = _HTML_TAG_RE.sub(" ", raw)
@@ -361,7 +384,7 @@ def parse_tender_offer(body_html: str, header_sgml: str, form: str) -> TenderOff
         return None
     subject, filed_by = parties
 
-    text = _strip_html(body_html)
+    text = _strip_html(_primary_document(body_html))
     low = text.lower()
     if "schedule to" not in low and "schedule 14d-9" not in low and "schedule 13e-3" not in low:
         return None

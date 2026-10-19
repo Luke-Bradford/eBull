@@ -13348,3 +13348,19 @@ neighbouring container and match it.**
   equality is a candidate for adjudication, not a fold key. The 13F stratum (53 cliques, 52 instruments) was deferred
   rather than folded.
 - Enforced in: `docs/specs/ownership/2026-10-19-3227-cofiler-links-widened.md` (proposition 3; deferred 13F stratum).
+
+### A sibling archive URL is built from the CIK and accession, never from the primary document's directory (#3872, 2026-10-19)
+
+- Symptom: `sec_tender` derived `<acc>.hdr.sgml` from `dirname(primary_document_url)`. Index- and Atom-derived manifest
+  rows record the complete submission `/Archives/edgar/data/<cik>/<acc>.txt`, which sits in the CIK directory, so the
+  derived URL lost the accession folder. 97 accessions tombstoned on an empty header fetch (2026-07-14 to 10-05) and
+  15 failed once SEC began answering 403. The same `.txt` body, parsed whole, also let the SGML header shift the cover
+  window and exhibit prose answer the Item 1004 formulas: 46 of 127 accessions parsed differently from their primary
+  HTML.
+- Prevention: build any per-accession archive URL with `app.providers.implementations.sec_header.header_url(cik,
+  accession)` (or the same `/data/<int cik>/<acc-nodash>/` shape), never from the path of a stored document URL, whose
+  shape depends on which discovery path wrote the row. A parser that reads a primary document must slice the first
+  `<DOCUMENT>`'s `<TEXT>` out of a `<SEC-DOCUMENT>` body (`sec-edgar.md`, "`.txt` full-submission vs primary doc").
+- Enforced in: `app/services/manifest_parsers/sec_tender.py` (`header_url`),
+  `app/services/tender_offers.py::_primary_document`, `tests/test_manifest_parser_sec_tender.py`
+  (`test_cik_directory_txt_url_fetches_header_from_the_accession_folder`).
