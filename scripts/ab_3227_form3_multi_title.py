@@ -5,7 +5,7 @@ naming one class as one title (``form4_title_match``): the XML Form 3 writers'
 ``form3_observation_shares`` and the DERA ``:NDH:`` ``INSIDER_HOLDING_LINE_SUM_LATERAL``. The
 rollup's Form 3 component scope (``_summable_scope``) follows them.
 
-Control is the code on ``--ref`` (default ``origin/main``, loaded with ``git show`` and EXECUTED —
+Control is the code on ``--ref`` (default ``98b332b0``, the pre-change base; loaded with ``git show`` and EXECUTED —
 trusted refs only); treatment is the working tree. Both are recomputed from stored lines, never
 read from what an observation happens to hold.
 
