@@ -6,9 +6,10 @@ operating margin, debt/equity, net margin), their cohort medians, and a peer
 set — entirely from EXISTING tables (no new ingest):
 
   * price-free factors from ``financial_periods_ttm`` (is_complete_ttm),
-  * ``pe_ratio`` from the ``instrument_valuation`` view (universe-wide since
-    sql/236 priced the view off the latest ``price_daily`` close, #1857;
-    thinness is governed by the ordinary coverage ratio like any factor),
+  * ``pe_ratio`` from the ``instrument_valuation`` view: since sql/506 (#3903)
+    market cap / TTM net income on the #3841 point-in-time cap, NULL when the
+    cap is refused (thinness is governed by the ordinary coverage ratio like
+    any factor),
   * ``revenue_growth_yoy`` from the two most recent canonical FY rows in
     ``financial_periods``, with a consecutive-year day-gap guard,
   * cohort medians via ``percentile_cont`` over the SIC cohort's complete-TTM set,

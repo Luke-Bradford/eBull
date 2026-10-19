@@ -3,9 +3,9 @@
 Spec: ``docs/specs/fundamentals/2026-10-19-3903-pe-total-form.md`` ("The numerator is a proxy"). Read-only.
 
 NI* is JKP Table 5's IB, else NI − ``xido*`` (#3609 Amendment 2b): per quarter, ``IncomeLossFromContinuingOperations``
-when filed, else ``NetIncomeLoss`` − DO − XI, where DO is the parent discontinued-operations concept, else the
-consolidated one, and an unfiled DO or XI counts as zero. That last step is a simplification of the panel's witness
-rules (``app/services/factor_panel.py`` ``companion``), stated, not hidden.
+when filed, else ``NetIncomeLoss`` − DO − XI, where DO is, per quarter, the parent discontinued-operations concept,
+else the consolidated one, and an unfiled DO or XI counts as zero. That last step is a simplification of the panel's
+witness rules (``app/services/factor_panel.py`` ``companion``), stated, not hidden.
 
 Facts come from the local SEC ``companyfacts.zip`` (path, size and SHA-256 printed). For each complete-TTM row of
 ``instrument_valuation`` with a positive ``market_cap_live``, the four window quarters are sql/220's. A quarter's value
@@ -93,6 +93,35 @@ def quarter_value(facts: list[dict[str, Any]], end: date) -> Decimal | None:
     return None if nine is None else Decimal(str(fy_latest["val"])) - nine
 
 
+def ni_star_ttm(gaap: dict[str, Any], ends: list[date]) -> tuple[Decimal, set[str]] | None:
+    """NI* summed over the window's quarters (module docstring's rule) and the branches used; None if a quarter has
+    neither IB nor NI."""
+
+    def usd(concept: str) -> list[dict[str, Any]]:
+        return gaap.get(concept, {}).get("units", {}).get("USD", [])
+
+    ni_facts, ib_facts, xi_facts = usd(NI), usd(IB), usd(XI)
+    do_by_concept = [usd(c) for c in DO]
+    total = Decimal(0)
+    used: set[str] = set()
+    for end in ends:
+        ib_q = quarter_value(ib_facts, end)
+        if ib_q is not None:
+            total += ib_q
+            used.add("IB")
+            continue
+        ni_q = quarter_value(ni_facts, end)
+        if ni_q is None:
+            return None
+        # DO per quarter: the parent concept, else the consolidated one (an issuer can switch between quarters).
+        do_q = next((v for v in (quarter_value(f, end) for f in do_by_concept) if v is not None), None)
+        xi_q = quarter_value(xi_facts, end)
+        # The branch label records a FILED DO or XI, zero included; an unfiled one counts as zero.
+        used.add("NI-xido" if do_q is not None or xi_q is not None else "NI")
+        total += ni_q - (do_q or Decimal(0)) - (xi_q or Decimal(0))
+    return total, used
+
+
 def bucket(x: Decimal) -> str:
     """Closed bands at both edges of the centre bucket: 0.95 and 1.05 are in ``[0.95,1.05]``."""
     if x < Decimal("0.75"):
@@ -136,15 +165,7 @@ def main() -> None:
                 unresolved["no companyfacts member"] += 1
                 continue
             gaap = json.loads(z.read(member)).get("facts", {}).get("us-gaap", {})
-
-            def usd(concept: str, gaap: dict[str, Any] = gaap) -> list[dict[str, Any]]:
-                return gaap.get(concept, {}).get("units", {}).get("USD", [])
-
-            ni_facts, ib_facts, xi_facts = usd(NI), usd(IB), usd(XI)
-            do_facts = next((usd(c) for c in DO if usd(c)), [])
-            total = Decimal(0)
-            used: set[str] = set()
-            ok = True
+            ni_facts = gaap.get(NI, {}).get("units", {}).get("USD", [])
             for end, stored in zip(r["ends"], r["stored_ni"], strict=True):
                 ni_q = quarter_value(ni_facts, end)
                 if stored is not None and ni_q is not None:
@@ -152,22 +173,11 @@ def main() -> None:
                     validation["agree" if agree else "differ"] += 1
                 else:
                     validation["unresolved"] += 1
-                ib_q = quarter_value(ib_facts, end)
-                if ib_q is not None:
-                    total += ib_q
-                    used.add("IB")
-                    continue
-                if ni_q is None:
-                    ok = False
-                    break
-                do_q = quarter_value(do_facts, end)
-                xi_q = quarter_value(xi_facts, end)
-                # The branch label records a FILED DO or XI, zero included; an unfiled one counts as zero.
-                used.add("NI-xido" if do_q is not None or xi_q is not None else "NI")
-                total += ni_q - (do_q or Decimal(0)) - (xi_q or Decimal(0))
-            if not ok:
+            star = ni_star_ttm(gaap, r["ends"])
+            if star is None:
                 unresolved["a quarter with neither IB nor NI"] += 1
                 continue
+            total, used = star
             branch["+".join(sorted(used))] += 1
             ni_ttm = r["net_income_ttm"]
             if ni_ttm > 0 and total <= 0:

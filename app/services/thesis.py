@@ -254,7 +254,12 @@ _MAX_TOKENS_CRITIC = 2048
 # session close on the #3841 point-in-time market cap, while P/E and dividend
 # yield stay on `current_price`. _WRITER_SYSTEM names the price base per
 # multiple for re-rating arithmetic.
-_PROMPT_VERSION = "v8"
+# v9 (#3903): a context field's MEANING changes. `valuation.pe_ratio` is now
+# market cap / TTM net income on the session close (sql/506), not price / summed
+# per-share EPS on `current_price`. _WRITER_SYSTEM moves P/E into the market-cap
+# set and says neither P/E nor P/B is price / the context's per-share `eps` or
+# `book_value`.
+_PROMPT_VERSION = "v9"
 
 # thesis_runs.trigger — matches the table CHECK in sql/218.
 RunTrigger = Literal["manual", "cascade", "scheduled"]
@@ -853,8 +858,9 @@ def _shape_price_anchor(
 #   9 ev_ebitda, 10 debt_equity_ratio, 11 net_margin, 12 gross_margin,
 #   13 operating_margin, 14 roa, 15 roe, 16 dividend_yield, 17 is_complete_ttm,
 #   18 session, 19 valuation_price
-# #3850: the count-based multiples are priced at valuation_price (the close of
-# `session`), the per-share ones at current_price.
+# #3850/#3903: the count-based multiples, P/E among them, are priced at
+# valuation_price (the close of `session`); dividend yield and the legacy arm's
+# P/B at current_price.
 _VALUATION_FIELDS: tuple[str, ...] = (
     "current_price",
     "price_as_of",
@@ -1336,10 +1342,12 @@ You will be given a research context including:
   fractions). Null when no price history exists.
 - `valuation`: fundamentals-derived multiples (P/E, P/B, P/FCF, FCF yield,
   EV/revenue, EV/EBITDA, margins, ROA/ROE, dividend yield) with their own
-  `price_as_of`. The market-cap multiples (P/FCF, FCF yield, EV/revenue,
-  EV/EBITDA, and P/B when `is_complete_ttm` is true) are priced at
-  `valuation_price`, the close of `session`; P/E, dividend yield, and P/B
-  when `is_complete_ttm` is not true are priced at `current_price`.
+  `price_as_of`. The market-cap multiples (P/E, P/FCF, FCF yield,
+  EV/revenue, EV/EBITDA, and P/B when `is_complete_ttm` is true) are priced
+  at `valuation_price`, the close of `session`; dividend yield, and P/B when
+  `is_complete_ttm` is not true, are priced at `current_price`. P/E is market
+  cap / TTM net income and that P/B is market cap / equity: neither is price /
+  the context's per-share `fundamentals.eps` or `fundamentals.book_value`.
   `available: false` with a reason means the surface is structurally
   absent for this instrument — not a data error. Null fields
   inside an available row are honest gaps (e.g. dual-class suppression) —
@@ -1444,8 +1452,12 @@ Rules:
        multiple / the context's current multiple), using a non-null ratio
        from `valuation` (pe_ratio, pb_ratio, p_fcf_ratio, ev_ebitda, ...).
        The multiple's own price is `valuation.valuation_price` for a
-       market-cap multiple and `valuation.current_price` for P/E (see the
-       `valuation` bullet above).
+       market-cap multiple (P/E included) and `valuation.current_price` for
+       dividend yield and the per-share P/B (see the `valuation` bullet
+       above).
+     For a per-share basis, choose your own multiple: `valuation.pe_ratio`
+     and `valuation.pb_ratio` are not the current multiple of `eps` or
+     `book_value`.
      Justify the multiple you chose (own history or peer judgement) and SHOW
      THE ARITHMETIC in the memo's valuation section, in the form
      "base = <your multiple> x EPS <the eps from THIS context> = <product>"

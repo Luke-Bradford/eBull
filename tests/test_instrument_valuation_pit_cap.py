@@ -154,10 +154,9 @@ def test_refused_with_reason(_seed: psycopg.Connection[Any], iid: int, reason: s
     assert row["session"] == SESSION
     for col in ITEM4:
         assert row[col] is None, col
-    # Per-share columns are not count-based and keep sql/241's behaviour (#3903).
-    price = 160 if iid == 111 else 150
-    assert float(row["pe_ratio"]) == pytest.approx(price / 10 / 6 if iid == 107 else price / 6)
-    assert row["current_price"] == price
+    # #3903: P/E is count-based (and the legacy arm has no earnings total), so it is NULL here.
+    assert row["pe_ratio"] is None
+    assert row["current_price"] == (160 if iid == 111 else 150)
 
 
 @pytest.mark.db
@@ -178,8 +177,8 @@ def test_quote_after_the_session_does_not_price_the_cap(_seed: psycopg.Connectio
     assert row["current_price"] == 160
     assert row["valuation_price"] == 150
     assert row["market_cap_live"] == Decimal("1.5e11")
-    # P/E stays on the selected price.
-    assert float(row["pe_ratio"]) == pytest.approx(160 / 6)
+    # Legacy P/B stays per-share on the selected price (#3903 left it there).
+    assert float(row["pb_ratio"]) == pytest.approx(160 / 30)
 
 
 @pytest.mark.db
