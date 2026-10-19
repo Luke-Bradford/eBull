@@ -17,7 +17,7 @@ Prints:
 3. every NULL member of an active window (one with a nonzero member) classified against ``financial_facts_raw``
    (``classify_member``), windows by category and cap eligibility, and each missed amount;
 4. the rule's own check: ``priority_value`` (the normaliser's concept priority) against every stored non-NULL member
-   of an active window, and the matching candidate concept;
+   of an active window or proposed publication, as of the member's filed_date, and the matching candidate concept;
 5. the common-only TTM rebuilt per quarter from companyfacts (``common_ttm``) against the stored members, for active
    windows and for every proposed publication with each exclusion counted; both forms against the rebuilt yield; the
    rows where the proposal is further from it than today, with their member checks; every published window outside
@@ -97,7 +97,7 @@ _WINDOW = """
         HAVING COUNT(*) = 4 AND MAX(period_end_date) - MIN(period_end_date) <= 330
     )
     SELECT r.instrument_id, r.period_start_date, r.period_end_date, r.period_type, r.shares_diluted, r.dps_declared,
-           r.dividends_paid
+           r.dividends_paid, r.filed_date
     FROM r JOIN ok USING (instrument_id) WHERE r.rn <= 4
     ORDER BY r.instrument_id, r.period_end_date
 """
@@ -179,13 +179,17 @@ def quarter_value(facts: list[Fact], qstart: date, qend: date) -> tuple[str, Dec
 
 
 def priority_value(
-    by_concept: dict[str, list[Fact]], qstart: date, qend: date
+    by_concept: dict[str, list[Fact]], qstart: date, qend: date, as_of: date | None = None
 ) -> tuple[str, Decimal | None, str | None]:
     """The normaliser's priority applied to a quarter: the first concept in ``PAID`` with a value. ("unresolved", …)
-    when none has one and any is unresolved; else ("no fact", …)."""
+    when none has one and any is unresolved; else ("no fact", …). ``as_of`` keeps only facts filed on or before it
+    (the stored member's own vintage)."""
     unresolved = False
     for c in PAID:
-        k, v = quarter_value(by_concept.get(c, []), qstart, qend)
+        facts = by_concept.get(c, [])
+        if as_of is not None:
+            facts = [f for f in facts if f["filed"] <= as_of]
+        k, v = quarter_value(facts, qstart, qend)
         if k == "value":
             return "value", v, c
         unresolved |= k == "unresolved"
@@ -204,11 +208,13 @@ def classify_member(by_concept: dict[str, list[Fact]], qstart: date, qend: date)
 
 def common_quarter(gaap: dict[str, list[Fact]], qstart: date, qend: date) -> tuple[str, Decimal, str, set[str]]:
     """Cash dividends to the parent's common holders for one quarter: ``COMMON``; else the partnership concepts; else
-    ``GENERIC`` less the ``PAID_NOT_COMMON`` amounts. Returns (state, value, branch, flags). State "value"; "no fact"
-    (no concept has a fact ending at the quarter end: value 0, branch "none"); "unresolved" (a payment fact ends there
-    and does not derive, or a needed deduction is unresolved)."""
+    ``GENERIC`` less the filed ``PAID_NOT_COMMON`` amounts. Returns (state, value, branch, flags). State "value";
+    "no fact" (none of these concepts nor ``PaymentsOfOrdinaryDividends`` has a fact ending at the quarter end: value
+    0, branch "none"); "unresolved" (a payment fact ends there and does not derive, a filed deduction is unresolved,
+    preferred dividends are declared with no paid amount, or only an ordinary-dividend fact exists). The partnership
+    branch is a proxy: its concepts do not establish the recipient class."""
     unresolved = False
-    for branch, concepts in (("common", (COMMON,)), ("partnership", PARTNERSHIP)):
+    for branch, concepts in (("common", (COMMON,)), ("partnership proxy", PARTNERSHIP)):
         for c in concepts:
             k, v = quarter_value(gaap.get(c, []), qstart, qend)
             if k == "value":
@@ -231,9 +237,13 @@ def common_quarter(gaap: dict[str, list[Fact]], qstart: date, qend: date) -> tup
         for c in DECLARED_PREFERRED:
             kk, vv = quarter_value(gaap.get(c, []), qstart, qend)
             if kk == "value" and vv and not paid_pref_nonzero:
-                flags.add("preferred declared, no nonzero paid-preferred value")
-        return "value", v, "generic less paid preferred and NCI", flags
+                # Preferred dividends declared with no paid amount to deduct: composition unknown.
+                return "unresolved", Decimal(0), "", set()
+        return "value", v, "generic less filed deductions", flags
     unresolved |= k == "unresolved"
+    # A payment concept this rebuild does not classify (ordinary dividends to all holders) makes the quarter unknown.
+    kk, _ = quarter_value(gaap.get(UNTRACKED[0], []), qstart, qend)
+    unresolved |= kk != "no fact"
     return ("unresolved" if unresolved else "no fact"), Decimal(0), "none", set()
 
 
@@ -278,7 +288,7 @@ def proposed_yield(r: dict[str, Any], window: list[dict[str, Any]]) -> tuple[Dec
 def inventory_cause(window: list[dict[str, Any]], tight_miss: bool, long_span: bool) -> str:
     """First matching observational predicate for a row whose two yields disagree; a candidate, not a cause."""
     dps = [q["dps_declared"] for q in window if q["dps_declared"] is not None and q["dps_declared"].is_finite()]
-    sh = [q["shares_diluted"] for q in window if q["shares_diluted"]]
+    sh = [q["shares_diluted"] for q in window if q["shares_diluted"] and q["shares_diluted"].is_finite()]
     positive = [d for d in dps if d > 0]
     if len(sh) >= 2 and max(sh) / min(sh) >= SPREAD:
         return "1 weighted diluted shares spread >= 1.5x"
@@ -286,7 +296,7 @@ def inventory_cause(window: list[dict[str, Any]], tight_miss: bool, long_span: b
         return "2 a negative DPS member"
     if positive and max(positive) > 50 * min(positive):
         return "3 largest positive DPS member over 50x the smallest positive one"
-    if any(q["dps_declared"] is None and (q["dividends_paid"] or 0) > 0 for q in window):
+    if any(q["dps_declared"] is None and q["dividends_paid"] is not None and q["dividends_paid"] > 0 for q in window):
         return "4 a quarter with a positive paid member and a NULL DPS member"
     if tight_miss:
         return "5 stored paid sum outside [0.95,1.05] of the rebuilt common-only TTM"
@@ -386,10 +396,17 @@ def main() -> None:
                 )
             ] += 1
     print(f"\n2. dividends_paid members of the {len(win)} windows by sign: {dict(signs)}")
-    active = {i for i, w in win.items() if any((q["dividends_paid"] or 0) != 0 for q in w)}
+    active = {i for i, w in win.items() if any(q["dividends_paid"] is not None and q["dividends_paid"] != 0 for q in w)}
     nn = Counter(sum(1 for q in win[i] if q["dividends_paid"] is not None) for i in active)
     print(f"   windows with a nonzero member (``active``): {len(active)}; non-NULL members: {dict(sorted(nn.items()))}")
-    neg = sorted(sym[i] for i in win if any((q["dividends_paid"] or 0) < 0 for q in win[i]))
+    neg = sorted(
+        sym[i]
+        for i in win
+        if any(
+            q["dividends_paid"] is not None and q["dividends_paid"].is_finite() and q["dividends_paid"] < 0
+            for q in win[i]
+        )
+    )
     print(f"   windows with a negative member: {len(neg)} {neg}")
 
     # 3
@@ -457,11 +474,11 @@ def main() -> None:
                     descriptions[c] = g[c].get("description") or ""
             gaap = {c: _cf_facts(g, c) for c in DESCRIBED}
             qs = qb.get(iid, [])
-            if iid in active:
+            if iid in active or iid in pub_ids:
                 for q, (q0, q1) in zip(win[iid], qs, strict=True):
                     if q["dividends_paid"] is None:
                         continue
-                    k, v, c = priority_value(gaap, q0, q1)
+                    k, v, c = priority_value(gaap, q0, q1, q["filed_date"])
                     if k != "value":
                         check[k] += 1
                         member_check[iid].append(f"{q1} {k}")
@@ -482,7 +499,9 @@ def main() -> None:
                 lost_untracked[f"{prop[iid][1]}; untracked filed in window: {' + '.join(found) or 'none'}"] += 1
 
     print(
-        "\n4. the rule's own check: ``priority_value`` against every stored non-NULL member of active windows (0.5%):"
+        "\n4. the rule's own check: ``priority_value`` on facts filed by each member's filed_date, against every "
+        "stored "
+        "non-NULL member of active windows and proposed publications (0.5%):"
     )
     print(f"   {dict(check)}; matching candidate concept: {dict(candidate.most_common())}")
 
@@ -560,6 +579,10 @@ def main() -> None:
         f"   proposed-published rows with a stored member that differs from the rule (section 4): {len(mismatch)} "
         f"{mismatch}"
     )
+    gained_mismatch = sorted(s_ for s_ in mismatch if by_id[sym_to_id[s_]]["dividend_yield"] is None)
+    print(f"   of them today NULL (newly exposed): {len(gained_mismatch)} {gained_mismatch}")
+    unresolved_pub = sorted(sym[i] for i in pub_ids if i not in pub_ratios)
+    print(f"   proposed publications without a resolved comparison: {len(unresolved_pub)} {unresolved_pub}")
     zero_pub = sorted(i for i in pub_ids if prop[i][0] == 0)
     print(
         f"   zero publications: {len(zero_pub)}; rebuilt total per row: "

@@ -1,7 +1,8 @@
 # #3903: the valuation view's dividend yield on the total/ME form
 
-**Ticket:** #3903 (remainder item 1; refs #3850, #3841). **Status:** spec v3. Codex checkpoint 1: round 1 raised 30
-findings, round 2 re-graded them and added 24 (both UNSOUND); "Checkpoint record" gives each disposition.
+**Ticket:** #3903 (remainder item 1; refs #3850, #3841). **Status:** spec v4. Codex checkpoint 1 ran three rounds,
+the cap: round 1 raised 30 findings, round 2 re-graded them and added 24, round 3 re-graded all 54 and added 21, each
+UNSOUND. v4 applies round 3 without a fourth round, as #3910 did; "Checkpoint record" gives every disposition.
 
 `instrument_valuation.dividend_yield` divides a per-share dividend sum by a price. The sum crosses share bases and
 derived quarters, and it misses most issuers that report dividends only as a cash total. This spec moves the column
@@ -11,9 +12,9 @@ observed. It follows #3911's P/E (`docs/specs/fundamentals/2026-10-19-3903-pe-to
 ## Problem
 
 Figures are printed by `PYTHONPATH=. uv run python scripts/measure_3903_dividend_premise.py` (dev DB, run
-2026-10-19 21:41Z, code `a5557f47`, companyfacts.zip SHA-256 file `12bad36a…`). Its database reads share one
+2026-10-19 21:55Z, code `bfad5805`, companyfacts.zip SHA-256 file `12bad36a…`). Its database reads share one
 REPEATABLE READ snapshot; section numbers refer to its output. The published-cap population falls through the evening
-(an earlier run at 21:03Z printed 2,555; this one 2,360): the candle refresh writes `price_daily_revision` rows, and
+(an earlier run at 21:03Z printed 2,555; this one 2,348): the candle refresh writes `price_daily_revision` rows, and
 `instrument_market_cap_pit` refuses those steps as `basis_stale` until the next build
 (`sql/499_market_cap_pit.sql:78-81`, by design). "Proposed" is the construction below evaluated over stored columns
 (`proposed_yield`).
@@ -29,42 +30,41 @@ back-adjusted for every split (#3841 "Problem").
    PAYC's 0.375, −0.75, 0.375, 0.375.
 2. **Payers with no per-share fact.** HD, KO, FAST and O have no `dps_declared` member, so today's view publishes no
    yield; their stored cash dividends paid are $9.221B, $10.971B, $1.056B and $2.996B TTM.
-3. **Against an independent rebuild** (section 5). On the 544 rows publishing a positive yield both ways whose
-   companyfacts common-only rebuild resolves, today's yield is within 5% of the rebuilt yield on 351 and within
-   [0.8, 1.25] on 423; the proposed yield on 536 and 538. This is evidence on those 544, not on every publication
-   (see "Input policy").
+3. **Against an independent rebuild** (section 5). On the 526 rows publishing a positive yield both ways whose
+   companyfacts common-only rebuild resolves, today's yield is within 5% of the rebuilt yield on 342 and within
+   [0.8, 1.25] on 410; the proposed yield on 518 and 520. This is evidence on those 526 rows only.
 
 **Populations** (section 1), all 3,941 complete-TTM rows (every one has a sql/220 window):
 
 | today | proposed | rows |
 |---|---|---|
-| published | published | 578 |
-| published | NULL: cap refused | 413 (`basis_stale` 177, `no_left_anchor` 146, `no_pit_row` 72, `basis_unresolved` 14, `dual_class` 4) |
+| published | published | 572 |
+| published | NULL: cap refused | 419 (`basis_stale` 183, `no_left_anchor` 146, `no_pit_row` 72, `basis_unresolved` 14, `dual_class` 4) |
 | published | NULL: fewer than four observed members | 32 |
 | published | NULL: no observed member | 39 |
 | published | NULL: a negative member | 3 |
-| NULL | published (positive) | 264 |
+| NULL | published (positive) | 262 |
 | NULL | published (zero) | 9 |
-| NULL | NULL: cap refused | 1,168 |
+| NULL | NULL: cap refused | 1,174 |
 | NULL | NULL: fewer than four observed members | 50 |
-| NULL | NULL: no observed member | 1,380 |
+| NULL | NULL: no observed member | 1,376 |
 | NULL | NULL: a negative member | 5 |
 
-**Discrepancy inventory** (section 8). Over the 578 rows publishing a positive yield both ways, today ÷ proposed is
-in [0.8, 1.25] for 451. The script asserts on every row that today ÷ proposed = (V/P) × (DPS·N/D), with V the session
+**Discrepancy inventory** (section 8). Over the 572 rows publishing a positive yield both ways, today ÷ proposed is
+in [0.8, 1.25] for 446. The script asserts on every row that today ÷ proposed = (V/P) × (DPS·N/D), with V the session
 close, P `current_price` (equal to `metric_price` wherever a cap publishes, since a curated ADS ratio refuses the
 cap), N = `market_cap_live / valuation_price` and D the four members' sum. V/P lies in [0.936, 1.049] and outside
-[0.95, 1.05] on 2 rows; it is printed per discrepant row. Each of the 127 rows outside the band is tagged with the
+[0.95, 1.05] on 2 rows; it is printed per discrepant row. Each of the 126 rows outside the band is tagged with the
 first observational predicate it matches (`inventory_cause`; a candidate, not a verified cause): shares spread
 ≥ 1.5× 5; a negative DPS member 11; a positive DPS member over 50× the smallest positive one 2; a quarter with a
-positive paid member and a NULL DPS member 84; stored paid sum outside [0.95, 1.05] of the rebuild 4; span over
+positive paid member and a NULL DPS member 83; stored paid sum outside [0.95, 1.05] of the rebuild 4; span over
 365 days 1; untagged 20 (listed).
 
 ## Source rule
 
 | decision | rule | source |
 |---|---|---|
-| dividend yield | `div12m_me` = Σ over the last 12 months of (per-share distribution on the current share basis × shares) ÷ ME; NULL when the security has fewer than 12 months of history | JKP code, `bkelly-lab/ReplicationCrisis` at `67174c7f170b`: `GlobalFactors/market_chars.sas:122-131` (`div_sum = %apply_to_lastn(x=div_tot*shares, _n=&n., func=sum); div&n.m_me = div_sum/me; if count < &n. then div&n.m_me = .`), `:86-95` (`count` = months since the security's first observation) |
+| dividend yield | `div12m_me` = Σ over the last 12 months of (per-share distribution on the current share basis × shares) ÷ ME; NULL when the security has fewer than 12 months since its first observation | JKP code, `bkelly-lab/ReplicationCrisis` at `67174c7f170b`: `GlobalFactors/market_chars.sas:122-131` (`div_sum = %apply_to_lastn(x=div_tot*shares, _n=&n., func=sum); div&n.m_me = div_sum/me; if count < &n. then div&n.m_me = .`), `:86-95` (`count` = months since the security's first observation) |
 | a period with no distribution | zero, a published value. CRSP's zero is arithmetic on observed returns (`project_macros.sas:423`, `div_tot = (ret-retx)*lag(prc)*(cfacshr/lag(cfacshr))`); Compustat's is **imputed** for a missing value (`:566-569`, "Dividend Adjustment (set to zero if missing)", `coalesce(div, 0)`) | as cited |
 | the dividend total | cash dividends to common shareholders of the parent: us-gaap `PaymentsOfDividendsCommonStock`, "Amount of cash outflow in the form of ordinary dividends to common shareholders of the parent entity." **The construction reads the stored `dividends_paid` members, a proxy** (below) | companyfacts `description` (section 12, verbatim) |
 | market equity | the #3850 `market_cap_live`, the #3841 PIT cap at the session | #3850 spec "Source rule" |
@@ -80,20 +80,21 @@ positive paid member and a NULL DPS member 84; stored paid sum outside [0.95, 1.
   and 31 are unresolved. "No tracked fact" is absence from the tracked USD facts, not proof that nothing was paid.
   The construction therefore publishes only from four observed members (zero included) and leaves
   `dividends_paid_ttm`'s sporadic sum (sql/220 `:17-22`) unchanged for its other readers. This also refuses the 48
-  windows (26 with a published cap) whose NULL members all have no fact, which are probably correct.
-- **No negative member.** The payment concepts describe a cash outflow, and every stored member of a correct filing
-  is non-negative; a negative member is treated as a data defect, a local display rule with no JKP counterpart.
-  It refuses 8 rows (3 published today). 20 windows have a negative member (section 2).
-- **Zero publishes as zero**, from four observed members summing to zero: 9 rows, 7 of which the rebuild also puts
-  at zero and 2 (JACK, RFIL) where it has an unresolved quarter (section 5).
-- **No listing-history test.** JKP's 12-month history is not implemented and not measured: the view has no listing
-  date, and `price_daily`'s first bar is our ingestion horizon, not the listing (107 proposed publications have a
-  stored series under 365 days, section 9). Four filed quarters are required instead.
-- **Quarter intervals.** sql/220's shape guard tests end dates only. 25 proposed publications have a member whose
-  stored interval is NULL or outside 80–100 days (section 8; several are 16-week first quarters, e.g. KR, ACI); 7
-  active windows span under 330 or over 371 days (FLXS 0, GOLD.US 456, IBKR 396, JRSH 546, LNN 730, OLP 638, YUMC
-  395), of which FLXS publishes. The construction accepts four consecutive stored quarters by end date, as every
-  other TTM column does.
+  windows (26 with a published cap) whose NULL members all have no fact, which may be correct.
+- **No negative member** — a display convention. The payment concepts describe a cash outflow; this spec cites no
+  rule that a negative quarter is always an error, and treats it as unusable. It refuses 8 rows (3 published today);
+  20 windows have a negative member (section 2).
+- **Zero publishes as zero**, from four observed members summing to zero, and means "no cash dividends recorded in
+  the window", not "a non-payer": 9 rows, 7 of which the rebuild also puts at zero and 2 (JACK, RFIL) where it has
+  an unresolved quarter (section 5).
+- **No history test.** JKP's 12 months since first observation is not implemented and not measured: the view holds
+  no first-observation date, and `price_daily`'s first bar is our ingestion horizon (107 proposed publications have
+  a stored series under 365 days, section 9). Four filed quarters are required instead.
+- **Quarter intervals.** sql/220's shape guard tests end dates only; it does not establish four consecutive valid
+  quarters. 25 proposed publications have a member whose stored interval is NULL or outside 80–100 days (section 8;
+  KR and ACI store 112-day first quarters, queried separately); 7 active windows span under 330 or over 371 days
+  (FLXS 0, GOLD.US 456, IBKR 396, JRSH 546, LNN 730, OLP 638, YUMC 395), and FLXS publishes. This is the same
+  window every TTM column of the view reads; the start-date metadata is filed with the normaliser ticket.
 
 ### The numerator is a proxy
 
@@ -105,28 +106,33 @@ noncontrolling interests" (section 12).
 
 - **Reconstruction rule** (`quarter_value`). Per concept and quarter, boundaries matched within 3 days: the
   latest-filed dated fact spanning the quarter; else, per year-to-date start, the latest-filed fact ending at the
-  quarter end less the latest same-start fact ending the day before the quarter **filed no later than it**, so a
-  later restatement of the earlier period is never subtracted from an older cumulative. Undated facts make a quarter
-  unresolved, never absent. 45 window quarters with a NULL `period_start_date` take the previous member's end + 1
-  day (31) or end − 90 days (14) (`bounds`).
-- **The rule's own check** (section 4). `priority_value` applies the normaliser's priority to companyfacts. Of 5,685
-  stored non-NULL members of active windows, 5,520 agree within 0.5%, 64 differ, 97 are unresolved and 4 have no
-  fact. The concept of the matching candidate is `PaymentsOfDividendsCommonStock` 3,247, `PaymentsOfDividends` 2,243,
-  partnership 30; a match does not prove which concept the normaliser stored.
-- **Composition** (section 5). `common_ttm` rebuilds each quarter: `PaymentsOfDividendsCommonStock`; else a
-  partnership concept; else `PaymentsOfDividends` less `PaymentsOfDividendsPreferredStockAndPreferenceStock` and
-  `PaymentsOfDividendsMinorityInterest`, where an unresolved deduction makes the quarter unresolved. A quarter with no
-  fact is zero. Declared preferred dividends ("paid and unpaid") are not subtracted; 24 compared publications declare
-  them with no nonzero paid-preferred value and are flagged. Of 851 proposed publications, 793 are compared (51 have
-  an unresolved quarter, 7 are zero in both); stored ÷ rebuilt is in [0.95, 1.05] for 781. Of the 487 compared
-  publications rebuilt from `PaymentsOfDividendsCommonStock` in all four quarters, 476. Every published window
-  outside [0.95, 1.05] is listed with both amounts and its per-quarter branch.
+  quarter end less the latest same-start fact ending the day before the quarter filed no later than it. Undated
+  facts make a quarter unresolved, never absent. 45 window quarters with a NULL `period_start_date` take the
+  previous member's end + 1 day (31) or end − 90 days (14) (`bounds`). The rule does not establish that two facts
+  share an accounting revision basis beyond that filing-date bound.
+- **The rule's own check** (section 4). `priority_value` applies the normaliser's priority to companyfacts facts
+  **filed on or before each stored member's `filed_date`**, so a later restatement is not reported against an older
+  stored value. Of 5,721 stored non-NULL members of active windows and proposed publications, 5,557 agree within
+  0.5%, 59 differ, 100 are unresolved and 5 have no fact. The matching candidate's concept is
+  `PaymentsOfDividendsCommonStock` 3,263, `PaymentsOfDividends` 2,263, partnership 31; a match does not prove which
+  concept the normaliser stored.
+- **Composition** (section 5). `common_quarter` takes `PaymentsOfDividendsCommonStock`; else a partnership concept
+  (a proxy: those concepts do not establish the recipient class); else `PaymentsOfDividends` less the filed
+  `PaymentsOfDividendsPreferredStockAndPreferenceStock` and `PaymentsOfDividendsMinorityInterest`. A quarter is
+  unresolved when a payment fact does not derive, a filed deduction is unresolved, preferred dividends are declared
+  with no paid amount to deduct, or the only payment fact is `PaymentsOfOrdinaryDividends`; it is zero only when none
+  of these concepts has a fact ending there. An unfiled deduction counts as zero, so the generic branch is "less
+  filed deductions", not verified common-only. Of 843 proposed publications, 761 are compared (75 have an unresolved
+  quarter, 7 are zero in both); stored ÷ rebuilt is in [0.95, 1.05] for 749. The verified common-only subset — all
+  four quarters on `PaymentsOfDividendsCommonStock` — is 481 publications, 470 in [0.95, 1.05]. Every published
+  window outside [0.95, 1.05] is listed with both amounts and its per-quarter branch, and the 82 publications without
+  a resolved comparison are listed by name.
 - **Special distributions.** JKP's `ret − retx` carries every distribution; `PaymentsOfDividendsCommonStock` is
   ordinary dividends. `PaymentsOfCapitalDistribution` ("excluding ordinary dividends. Includes special dividends")
-  has an amount in a window quarter for 28 windows, 6 active and 0 proposed publications (section 6). Whether a
-  stored generic amount includes a special distribution is not established.
+  has a nonzero amount in a window quarter for 28 windows, 6 active and 0 proposed publications (section 6). Whether
+  a stored generic amount includes a special distribution is not established.
 - **Timing.** Cash paid by payment date over four fiscal quarters, against JKP's ex-date distributions over 12
-  months. No stored ex-date source covers the population (3 of 842 positive publications have an 8-K
+  months. No stored ex-date source covers the population (3 of 834 positive publications have a stored
   `dividend_events` ex-date in the 365 days to today, section 10), so the difference is not measured.
 
 ### Input policy
@@ -134,20 +140,26 @@ noncontrolling interests" (section 12).
 The view cannot see filing facts, so it publishes by the construction alone. One rule applies to every row, whether
 or not it is in an external sample:
 
-- **A stored member that disagrees with the filing rule is an input defect, not a construction error.** 35 proposed
-  publications have one (section 5 lists them). They are filed as one normaliser ticket with the concept-priority
-  and missed-member defects ("Not in scope"). The rows stay published: today's form reads the same defective
-  normaliser output through other members, and the rebuild comparison (Problem item 3) shows the proposal closer to
-  the filings on the compared population.
+- **A stored member that disagrees with the filing rule, as of its own filing date, is an input defect.** 34
+  proposed publications have one (section 5); 12 of them publish no yield today (ASTH, CHDN, CWBC, EBF, EPM, EXP,
+  HRB, ORCL, PFLT, RPM, TNET, VALU), so this change newly exposes those 12. They stay published and are filed as one
+  normaliser ticket. The reason is the view's limit, not equivalence with today's form (which reads DPS, not these
+  members): refusing them needs filing facts the view does not hold, and the normaliser fix repairs every reader of
+  the column at once.
 - **A construction error blocks.** A proposed publication further from the rebuilt yield than today's and outside
-  [0.95, 1.05] must trace to a stored member that differs from the rule, or to the concept priority (the generic
-  concept stored where the common-only one is filed). An untraced row fails acceptance. At 21:41Z there are 3: PRI
-  (stored Q4 168,936,000 against the rule's 33,288,000) and SSNC (stored Q4 3,900,000 against 65,500,000), both
-  member defects; XRX, whose members match the generic concept (29,000,000 against the common-only 15,000,000; XRX
-  files a preferred payment), the concept priority. None is untraced.
+  [0.95, 1.05] must trace to a stored member that disagrees with the rule, or to the concept priority (the generic
+  concept stored where the common-only concept is filed). An untraced row fails acceptance. At 21:55Z there are 3:
+  PRI (stored Q4 168,936,000 against the rule's 33,288,000) and SSNC (stored Q4 3,900,000 against 65,500,000), member
+  defects; XRX, whose members agree with the rule's generic concept while its per-quarter rebuild is on
+  `PaymentsOfDividendsCommonStock` (stored 29,000,000 against 15,000,000), the concept priority. None is untraced.
+- **Rows the rebuild cannot judge** — the 82 publications without a resolved comparison, the 9 zero publications
+  among them where unresolved — are listed by name and covered by the member check alone, which runs on every
+  publication including all-zero windows. A zero publication whose members disagree with the rule is an input defect
+  like any other.
 
-**Alternatives rejected.** 8-K ex-dates (3 of 842 covered); Σ DPS × that quarter's count (the DPS member is the
-defective operand); restating per-share DPS (no split register, #3841 "Problem").
+**Alternatives rejected.** Stored ex-dates (3 of 834 covered); Σ DPS × that quarter's count (the DPS member is the
+defective operand); `dps_cash_paid` (per-share, so it carries the same share-basis problem, and is raw-only); restating
+per-share DPS (no split register, #3841 "Problem").
 
 ## Construction
 
@@ -174,7 +186,7 @@ defective operand); restating per-share DPS (no split register, #3841 "Problem")
 
 ### Expected movement
 
-Kept 578; gained 264 positive and 9 zero; lost 413 to a refused cap, 71 to an unobserved member and 3 to a negative
+Kept 572; gained 262 positive and 9 zero; lost 419 to a refused cap, 71 to an unobserved member and 3 to a negative
 member. Of the 74 lost with a published cap (section 7), 26 file `PaymentsOfOrdinaryDividends`, which is not
 tracked, in a window quarter.
 
@@ -185,21 +197,24 @@ tracked, in a window quarter.
   (`:862-863`) price dividend yield at `current_price` and allow re-rating "the multiple's own price × (your target
   multiple / the context's current multiple)". The build moves dividend yield into the `valuation_price` set,
   defines it as TTM cash dividends paid ÷ market cap, and states: a yield re-rates inversely, price × (current yield ÷
-  target yield), and only when both are finite and positive; a zero yield is a non-payer and is not a re-rating
-  basis. `_PROMPT_VERSION` becomes v10. The thesis window is listed and repaired as in the P/E spec ("Deploy order and
-  the thesis window"), with v9 in place of v8.
+  target yield), only when both are finite and positive; a zero yield means no cash dividends recorded in the window
+  and is not a re-rating basis. `_PROMPT_VERSION` becomes v10. The thesis window is listed and repaired as in the P/E
+  spec ("Deploy order and the thesis window"), with v9 in place of v8.
 - **`ranking_pot` exposure.** `ranking_pot_rebalance` reads `dps_declared_ttm`, `dividend_yield` and `current_price`
   (`app/services/ranking_pot_rebalance.py:703-712`) into `NameFacts` (`app/services/ranking_pot.py:145-149`).
-  `ranking_pot_exposure.dividend_yield` (`ranking_pot_exposure.py:103-119`) returns: None for a NULL or negative
-  `dps_ttm` or an unusable close; 0 for a zero `dps_ttm`, whatever the view says; None for a positive `dps_ttm` with a
-  NULL view yield; else yield × `current_price` ÷ 100 ÷ the close on D. Under sql/506 that product is DPS ÷ close.
-  Under sql/507 it is (TTM cash paid ÷ N) × (`current_price` ÷ `valuation_price`) ÷ close: the cash-total form,
-  scaled by the quote's drift from the session close. Payers with no DPS stay uncovered. The module states
-  "Descriptive only: nothing here enters a decision, a look or a gate" (`ranking_pot_exposure.py:3`); the three files
-  are hashed (`ranking_pot_policy.py:55`, `:62`, `:69`; `ranking_pot_v2_policy.py:47`, `:49`, `:53`) and not edited.
-  v1 is halted pre-trade; v2 is not frozen and must state its exposure definition before it freezes. Exposure rows
-  carry their snapshot date, so the deploy date is the version boundary; the build posts it on #2842 and #3592.
-  Acceptance item 5 exercises every combination above.
+  `ranking_pot_exposure.dividend_yield` (`ranking_pot_exposure.py:103-119`, `_usable` at `:54-55`: a finite Decimal
+  above zero) returns None for a NULL, non-finite or negative `dps_ttm` or an unusable close; 0 for a zero `dps_ttm`,
+  whatever the view says; None for a positive `dps_ttm` when the view yield or `current_price` is not usable (a NULL,
+  zero or non-finite yield included); else yield × `current_price` ÷ 100 ÷ the close on D. Under sql/506 that
+  product is DPS × the curated ADS ratio (1 for a non-ADS row) ÷ close. Under sql/507 it is (TTM cash paid ÷ N) ×
+  (`current_price` ÷ `valuation_price`) ÷ close: the cash-total form scaled by the quote's drift from the session
+  close; curated-ratio ADS rows lose coverage (their cap refuses), and payers with no DPS stay uncovered. The module
+  states "Descriptive only: nothing here enters a decision, a look or a gate" (`ranking_pot_exposure.py:3`); the
+  three files are hashed (`ranking_pot_policy.py:55`, `:62`, `:69`; `ranking_pot_v2_policy.py:47`, `:49`, `:53`) and
+  not edited. v1 is halted pre-trade; v2 is not frozen and must state its exposure definition before it freezes. The
+  build posts sql/507's apply time on #2842 and #3592 as the forward boundary (and a rollback's apply time as the
+  reverse one); a readout spanning a boundary states it, by the capture's own time if exposure rows record one, which
+  the build checks.
 - **Not readers.** The instrument page and `ranking_ablation_reader` read `instrument_dividend_summary.ttm_yield_pct`
   (`app/api/instruments.py:4352`, `app/services/ranking_ablation_reader.py:412-416`). The two yields can disagree
   until that surface moves; the build notes it on #3904.
@@ -218,30 +233,34 @@ after the 08:20Z PIT build and before the evening candle refresh.
    `proposed_yield`) within relative 1e-12, NULL decisions and causes included; every other column of both views
    equals the control exactly.
 2. **A/B.** Section 1's table re-printed; differences from "Expected movement" explained by data that changed.
-3. **Input policy, full population.** Section 5 over the treatment: the publications that disagree with the rule,
-   listed and filed; every publication further from the rebuild than today and outside [0.95, 1.05], traced or
-   failed.
+3. **Input policy, full population.** Section 5 over the treatment: the member check on every publication, the
+   input defects listed (newly exposed ones marked) and filed; every publication further from the rebuild than today
+   and outside [0.95, 1.05] traced, else FAIL; every publication without a resolved comparison listed.
 4. **Independent values.**
    - **NULL and zero checks:** GME (no observed member) NULL; BJRI (fewer than four) NULL; every zero publication
-     enumerated with its four members.
+     enumerated with its four members and member-check result.
    - **External yields**, positive only, against a published TTM dividend yield (stockanalysis, else
-     companiesmarketcap), recording the external price, date and TTM DPS. Mandatory by category: panel payers MSFT,
-     JPM, HD, AAPL; gained cash-only payers O, FAST, KO; a negative DPS member, CEG; a DPS scale outlier, EFC; and the
-     three untagged section 8 rows with the largest |log(today ÷ proposed)|. A name whose cap is refused at the run
-     is reported with its reason and replaced by the largest proposed-published name of the **same category**; a
-     category with none is reported as unavailable. Panel names are not replaced.
-   - **Reconciliation, an exact identity.** With external price P_x and TTM DPS E, and N_f the filing's latest
-     weighted basic count: ours ÷ external = (P_x / V) × (N_f / N) × (D / (N_f · E)). Asserted per row.
-   - **Pass:** |ours ÷ external − 1| ≤ 15%. Otherwise only these are divided out, each with its cited figure, and the
-     residual must be within ±15%: the count factor, only when the PIT row's `shares_reported` equals the filed cover
-     or balance-sheet count at its context date within 0.5% (#3911 Amendment 1, rule 2); the payout factor, only when
-     every stored member agrees with the rule (section 4) and the difference is definitional (a filed preferred or NCI
-     payment, a dividend change inside the window, a payment-date shift). A payout factor traced to a stored member
-     that disagrees with the rule is an input defect under "Input policy": listed and filed, the same as anywhere in
-     the population. Anything else fails. Price is never divided out. ±15%, ±5% and 0.5% are chosen by construction.
-5. **Readers.** `ranking_pot_exposure.dividend_yield` called on `NameFacts` from each arm's rows for the latest v1 and
-   v2 snapshot universes, reported per combination of `dps_ttm` (NULL, zero, positive) and treatment yield (NULL,
-   zero, positive): names changed, gained or lost. A printed record; nothing reads it for a decision.
+     companiesmarketcap), recording the external price, date and TTM DPS. Mandatory slots by category: panel payers
+     MSFT, JPM, HD, AAPL; gained cash-only payers O, FAST, KO; a negative DPS member, CEG; a DPS scale outlier, EFC;
+     and the three untagged section 8 rows with the largest |log(today ÷ proposed)|. A non-panel name whose cap is
+     refused at the run is replaced by the largest proposed-published name of the same category. **Minimum
+     coverage:** at least 10 of the 12 slots reconciled and every category with an available name covered; a refused
+     panel name is reported with its reason and is not a failure. Below the minimum, acceptance reruns after the next
+     08:20Z build.
+   - **Reconciliation, an exact identity.** With external price P_x and TTM DPS E, N_f the filing's latest weighted
+     basic count, and C the rebuilt common-only TTM: ours ÷ external = (P_x / V) × (N_f / N) × (D / C) ×
+     (C / (N_f · E)). Asserted per row.
+   - **Pass:** |ours ÷ external − 1| ≤ 15%. Otherwise only these are divided out, and the residual must be within
+     ±15%: the count factor N_f / N, only when N = `shares_reported` × `split_factor` with `split_factor` = 1 and
+     `shares_reported` equals the filed cover or balance-sheet count at its context date within 0.5% (#3911
+     Amendment 1, rule 2); the composition factor D / C, only when every stored member agrees with the rule and every
+     quarter of the rebuild resolves. C / (N_f · E) — timing, dividend changes and the external page's method — is
+     never divided out, nor is price. A row whose D / C traces to a member that disagrees with the rule is an input
+     defect under "Input policy". Anything else fails. ±15%, ±5% and 0.5% are chosen by construction.
+5. **Readers.** Deterministic fixtures call `ranking_pot_exposure.dividend_yield` once per branch above (DPS NULL,
+   non-finite, negative, zero, positive; view yield NULL, zero, non-finite, positive; close unusable) with expected
+   outputs under each arm. The latest v1 and v2 snapshot universes are then reported per combination: names
+   changed, gained or lost. Nothing reads it for a decision.
 6. **DB tests (synthetic):** published; four observed zeros → 0; a NULL member among positive ones → NULL while
    `dividends_paid_ttm` stays the three-member sum; a negative member → NULL; `NaN` → NULL; a refused cap → NULL with
    its reason; `fpi_adr` NULL before and after; `dual_class` and `ads_ratio` rows whose sql/506 yield is positive →
@@ -254,79 +273,81 @@ after the 08:20Z PIT build and before the evening candle refresh.
 
 ## Rollback
 
-A revert PR applies `sql/rollback/507_…sql`, which restores sql/506's `instrument_valuation` body, together with the
-reverted `thesis.py` (`_PROMPT_VERSION` back to v9). The thesis window applies in reverse, as in the P/E spec: theses
-written with v10 between the rollback migration's apply time and the reverted jobs child's PID change are listed and
-regenerated. `financial_periods_ttm` keeps the appended column, unused: removing it needs `DROP VIEW … CASCADE` over
-both views. A DB test applies forward then rollback in one transaction and asserts that `instrument_valuation`'s
-ordered columns, types and every row equal sql/506's on a fixture covering each NULL cause and each suppression.
+A revert PR applies `sql/rollback/507_…sql`, which restores sql/506's `instrument_valuation` body, and changes
+`thesis.py` to v11: dividend yield back to `current_price` and DPS ÷ price, while **keeping** the inverse yield
+re-rating and its positive-only guard (that arithmetic is right under either definition). The thesis window applies
+in reverse, as in the P/E spec: theses written with v10 between the rollback migration's apply time and the jobs
+child's PID change are listed and regenerated. The rollback's apply time is posted on #2842 and #3592 as the reverse
+exposure boundary. `financial_periods_ttm` keeps the appended column, unused: removing it needs
+`DROP VIEW … CASCADE` over both views. A DB test applies forward then rollback in one transaction and asserts that
+`instrument_valuation`'s ordered columns, types and every row equal sql/506's on a fixture covering each NULL cause
+and each suppression.
 
 ## Not in scope
 
 Filed by the build PR:
-- **Normaliser** (a corpus change): derive the 22 missed members; store an observed zero for a payer's quarter with
-  no payment fact; track `PaymentsOfOrdinaryDividends` and `PaymentsOfCapitalDistribution`; read
-  `PaymentsOfDividendsCommonStock` before `PaymentsOfDividends`; the 35 publications whose stored member disagrees with
-  the rule.
+- **Normaliser** (a corpus change): derive the 22 missed members; the 34 publications whose stored member disagrees
+  with the rule; track `PaymentsOfOrdinaryDividends` and `PaymentsOfCapitalDistribution`; read
+  `PaymentsOfDividendsCommonStock` before `PaymentsOfDividends`; quarter start-date metadata (FLXS and the 7 spans).
+  A quarter with no payment fact may be stored as an **imputed** zero only with its provenance marked; whether an
+  imputed zero counts as observed for this construction is decided there, on filing evidence.
 - **Non-payers.** JKP's yield for a non-payer is zero. The view publishes zero only from four observed zeros; a
-  window with no observed member stays NULL until the normaliser stores observed zeros.
+  window with no observed member stays NULL.
 
 These stay on #3903: legacy `pb_ratio` and the derived-Q4 per-share rule. The instrument page's yield is #3904.
 
 ## Checkpoint record
 
-Round 1 (30 findings) and round 2's grade of each; v3's action where round 2 left it open:
+Rounds 1 and 2 (54 findings), with round 3's grade and v4's action where round 3 left one open. Findings 16–22 and
+27, 28, 30 were graded resolved in round 2; round 3 marked them "unresolved" only because the v3 record carried no
+text for them: 16 tag labels, 17 lost-yield causes, 18 witnesses printed, 19 tight-band list, 20 exhaustive
+populations, 21 ex-date bound, 22 price attribution, 27 reader evidence, 28 inverse yield re-rating, 30 split
+fixture. No change.
 
-| # | finding | round 2 | v3 |
+| # | finding | round 3 | v4 |
 |---|---|---|---|
-| 1 | measurement used `abs()` | resolved | NaN ordering fixed (finding 44) |
-| 2 | one concept per window | resolved | |
-| 3 | unresolved read as zero | partial | unresolved deductions make the quarter unresolved |
-| 4 | generic fallback not common-only | partial | the wholly-common subset now requires four common quarters |
-| 5 | quarter interval | partial | tolerance stated; substitutions counted; interval anomalies listed ("Quarter intervals") |
-| 6 | vintage mixing | unresolved | contemporaneous subtraction (prior filed no later than the cumulative) |
-| 7 | classifier | partial | undated facts kept as unresolved; "no tracked fact" named as such |
-| 8 | missed direction | resolved | |
-| 9 | zero / absence | partial | JKP's Compustat zero stated as imputed; four-observed stated as a local departure |
-| 10 | specials | partial | measured over every window; the blanket claim removed |
-| 11 | timing | partial | span table complete; difference stated as unmeasured |
-| 12 | listing history | partial | stated as unmeasured; `price_daily` disclaimed |
-| 13 | supplier provenance | partial | "matching candidate"; provenance not claimed |
-| 14 | selected population | partial | every publication accounted for in section 5 |
-| 15 | rebuild validation | partial | the rule check's scope stated; branches reported per quarter |
-| 16–22 | | resolved | |
-| 23 | P1: input policy | partial | "Input policy": one rule, population-wide |
-| 24 | pass rule | partial | factors divided out only on verified inputs |
-| 25 | replacement, zero count | partial | same-category replacement; zero rows enumerated |
-| 26 | pot semantics | partial | every combination stated and tested; drift factor stated; version boundary is the deploy date |
-| 27–28, 30 | | resolved | |
-| 29 | rollback | partial | thesis reversal and reverse window added |
+| 1, 2, 7, 8, 13, 31, 33, 34, 37–39, 43, 45, 46, 50–52 | | resolved | |
+| 3, 4 | unresolved / generic as common-only | partial | ordinary-dividend-only and declared-preferred quarters unresolved; generic branch renamed "less filed deductions"; verified common-only subset reported (finding 55) |
+| 5, 36 | intervals | partial | stated as the view's shared window limit; metadata filed (finding 63) |
+| 6, 35 | vintage | partial | member check as of each member's `filed_date`; revision-basis limit stated (finding 58) |
+| 9 | imputed zero | partial | imputed and observed zeros distinguished (finding 64) |
+| 10, 40 | specials | partial | count is nonzero amounts; the unresolved denominator not separated, stated |
+| 11 | timing | partial | stated as unmeasured |
+| 12 | history | partial | restated as first observation, not listing |
+| 14, 41 | selected population | partial | the 526-row comparison scoped to itself; unresolved publications listed (finding 60) |
+| 15 | rule-check scope | partial | stated |
+| 23, 42 | input policy | partial | justification corrected; newly exposed defects counted (findings 59, 60) |
+| 24, 47 | factor division | partial | count factor needs `split_factor` 1; composition factor D / C needs a resolved rebuild (findings 61, 62) |
+| 25 | coverage | partial | minimum coverage defined (finding 70) |
+| 26, 48, 49 | pot reader | partial | full contract with `_usable`; fixtures per branch; ADS identity; forward and reverse boundaries (66–69) |
+| 29 | rollback | partial | v11 keeps inverse re-rating (finding 75) |
+| 32 | sign | partial | restated as a display convention |
+| 44 | NaN | partial | the remaining comparisons check finiteness first (finding 65) |
+| 53 | denominators | partial | member check covers all-zero windows (finding 59) |
+| 54 | claims not emitted | partial | KR/ACI marked as queried separately; XRX's preferred attribution removed (finding 72) |
 
-Round 2's new findings:
+Round 3's new findings:
 
-| # | finding | v3 |
+| # | finding | v4 |
 |---|---|---|
-| 31 | JKP zero is imputed | stated |
-| 32 | sign rule source | stated as a local rule; affected rows counted |
-| 33 | P1: unresolved deductions | propagated |
-| 34 | wholly-common subset | requires four common quarters |
-| 35 | P1: vintage mixing | contemporaneous subtraction |
-| 36 | quarter validity | measured and accepted as a stated departure |
-| 37 | "source absent" too strong | renamed "no tracked fact"; undated facts unresolved |
-| 38 | window categories | printed separately, with cap eligibility |
-| 39 | span counts | complete table |
-| 40 | specials | over every window; claim removed |
-| 41 | P1: selected-population claims | every publication accounted for; claims limited to the compared rows |
-| 42 | P1: comparative gate | replaced by "Input policy": per-row trace or fail |
-| 43 | rule check overreach | renamed; scope stated |
-| 44 | NaN ordering | finiteness checked first |
-| 45 | two-view control binding | `pg_depend` assertion |
-| 46 | oracle preconditions | stated in `proposed_yield`; applied explicitly in acceptance |
-| 47 | P1: factor division | only verified inputs are divided out (#3911 Amendment 1 rule) |
-| 48 | pot coverage combinations | stated and tested |
-| 49 | quote-dependent pot semantics | stated; deploy date as version boundary; v2 must restate |
-| 50 | zero-yield re-rating | guarded |
-| 51 | rollback thesis | added |
-| 52 | replacement category | same-category |
-| 53 | counter denominators | each counter's population printed |
-| 54 | claims not emitted | the earlier run is labelled as such; listing-history claim removed |
+| 55 | P1: uncertain fallback certified common-only | declared-preferred and ordinary-only quarters unresolved; branch renamed; verified subset separate |
+| 56 | ignored payment fact read as no fact | `PaymentsOfOrdinaryDividends` alone makes the quarter unresolved |
+| 57 | partnership recipient scope | labelled a proxy |
+| 58 | vintage in the member check | facts filed by the member's `filed_date` only |
+| 59 | P1: zero publications escape | member check on every publication; zero and unresolved publications listed |
+| 60 | P1: false input-reuse premise | removed; newly exposed defects counted (12) |
+| 61 | P1: count factor | requires `split_factor` 1 |
+| 62 | payout factor bridge | only D / C on a resolved rebuild is divided out |
+| 63 | impossible intervals | stated; filed |
+| 64 | imputed zero called observed | distinguished; decided in the normaliser ticket |
+| 65 | NaN elsewhere | finiteness checked first in every comparison |
+| 66 | ADS factor in the old identity | stated |
+| 67 | reader gates | full contract |
+| 68 | reader combinations | deterministic fixtures |
+| 69 | version boundary | apply times, forward and reverse |
+| 70 | unavailable mandatory checks | minimum coverage and rerun rule |
+| 71 | zero ≠ non-payer | reworded |
+| 72 | claims not emitted | addressed |
+| 73 | 8-K provenance | "stored `dividend_events`" |
+| 74 | `dps_cash_paid` | rejected with reason |
+| 75 | rollback restores wrong arithmetic | v11 keeps it |
