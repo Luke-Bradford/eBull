@@ -184,8 +184,10 @@ def main() -> None:
                             and r["shares_outstanding"] > 0
                             and abs(Decimal(r["shares_outstanding"]) / _effective(r) - 1) <= _HALF_PCT
                         )
-                        price_only += same_count
-                        count_driven += not same_count
+                        if same_count:
+                            price_only += 1
+                        else:
+                            count_driven += 1
                 elif reason is None:
                     gained += 1
                     arm_gained["ttm" if r["is_complete_ttm"] else "legacy"] += 1
@@ -269,7 +271,9 @@ def main() -> None:
                     "submissions sha256",
                     build[3],
                 )
-                build_date = build[1] if isinstance(build[1], date) else date.today()
+                build_date = build[1]
+                if not isinstance(build_date, date):
+                    raise RuntimeError(f"market_cap_pit_builds.build_date is not a date: {build_date!r}")
                 with zipfile.ZipFile(archive) as z:
                     for batch in iter_instrument_builds(
                         conn, scope=scope, index_of=submissions_reader(z), build_date=build_date
