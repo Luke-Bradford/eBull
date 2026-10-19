@@ -4426,8 +4426,9 @@ def _cofiler_graph(
         for h in holders:
             key = _identity_key(h.filer_cik, h.filer_name)
             # Unreachable by construction: ``_reconcile_owner_once`` groups by this same key
-            # (ownership_rollup.py:2733) and extends exactly one category per group
-            # (ownership_rollup.py:2741, :2822), and nothing between it and this pass adds a row.
+            # (``groups.setdefault(_identity_key(...))``) and, per group, extends exactly one
+            # category (``by_category[category].extend(keep)``), and nothing between it and this pass
+            # adds a row.
             # A breach is a programming error. It raises, as owner-once's own invariant does,
             # rather than serving a pie the grouping cannot vouch for (#3895 review).
             if category_of.setdefault(key, category) != category:

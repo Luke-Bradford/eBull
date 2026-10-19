@@ -13317,7 +13317,7 @@ neighbouring container and match it.**
   read it as a new way to 500 `/ownership-rollup`. The guarantee was real (`_reconcile_owner_once` groups by the same
   `_identity_key` and extends exactly one category per group), but it lived only in the author's head and in a PR
   reply, so the next round could not see it.
-- Prevention: a new `raise` on a read path carries a comment citing, at file:line, the code that makes it unreachable,
+- Prevention: a new `raise` on a read path carries a comment citing the code that makes it unreachable, by function and statement (line numbers go stale),
   and says why raising beats log-and-skip. For a pass, skipping means serving a figure the invariant cannot vouch
   for. Without such a citation, log-and-skip is the right default.
 - Enforced in: `app/services/ownership_rollup.py::_cofiler_graph` (the comment at the raise).
