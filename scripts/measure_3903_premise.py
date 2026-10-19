@@ -183,7 +183,8 @@ def inventory_cause(r: dict[str, Any], quarters: list[dict[str, Any]]) -> str:
 
 
 def main() -> None:
-    head = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
+    git = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, check=False)
+    head = git.stdout.strip() if git.returncode == 0 else "unknown (git rev-parse failed)"
     print(f"#3903 premise, {datetime.now(UTC):%Y-%m-%d %H:%MZ}, code {head}")
     with psycopg.connect(settings.database_url) as conn:
         conn.read_only = True

@@ -94,14 +94,16 @@ def quarter_value(facts: list[dict[str, Any]], end: date) -> Decimal | None:
 
 
 def bucket(x: Decimal) -> str:
-    for bound, label in (
-        (Decimal("0.75"), "<0.75"),
-        (Decimal("0.95"), "[0.75,0.95)"),
-        (Decimal("1.05"), "[0.95,1.05]"),
-    ):
-        if x < bound or (label == "[0.95,1.05]" and x <= bound):
-            return label
-    return ">1.25" if x > Decimal("1.25") else "(1.05,1.25]"
+    """Closed bands at both edges of the centre bucket: 0.95 and 1.05 are in ``[0.95,1.05]``."""
+    if x < Decimal("0.75"):
+        return "<0.75"
+    if x < Decimal("0.95"):
+        return "[0.75,0.95)"
+    if x <= Decimal("1.05"):
+        return "[0.95,1.05]"
+    if x <= Decimal("1.25"):
+        return "(1.05,1.25]"
+    return ">1.25"
 
 
 def main() -> None:
@@ -158,10 +160,11 @@ def main() -> None:
                 if ni_q is None:
                     ok = False
                     break
-                do_q = quarter_value(do_facts, end) or Decimal(0)
-                xi_q = quarter_value(xi_facts, end) or Decimal(0)
-                used.add("NI-xido" if do_q or xi_q else "NI")
-                total += ni_q - do_q - xi_q
+                do_q = quarter_value(do_facts, end)
+                xi_q = quarter_value(xi_facts, end)
+                # The branch label records a FILED DO or XI, zero included; an unfiled one counts as zero.
+                used.add("NI-xido" if do_q is not None or xi_q is not None else "NI")
+                total += ni_q - (do_q or Decimal(0)) - (xi_q or Decimal(0))
             if not ok:
                 unresolved["a quarter with neither IB nor NI"] += 1
                 continue

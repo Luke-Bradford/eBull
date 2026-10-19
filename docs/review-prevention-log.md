@@ -13410,3 +13410,12 @@ neighbouring container and match it.**
 - Enforced in: `sql/505_instrument_valuation_pit_market_cap.sql` (the `fb`/`fc`/`ses` laterals), spec
   `docs/specs/fundamentals/2026-10-19-3850-live-cap-share-basis.md` Amendment 1,
   `tests/test_instrument_valuation_pit_cap.py::test_bar_after_the_frontier_is_not_the_session`.
+
+### A count a spec cites comes from an untested bucket helper (#3903, 2026-10-19)
+
+- Symptom (#3903 spec, PR #3910 review): the measurement scripts' ratio-bucket helpers decided which band an edge
+  value (0.95, 1.05, 1.25) fell in through a loop with a special-cased label. The cited counts happened to be right,
+  but nothing showed it: a helper that misplaced an edge would have moved rows between the bands the spec quotes.
+- Prevention: a measurement script whose bucket counts a spec or PR cites writes each bucket as an explicit
+  comparison chain, and a pure test pins every edge value on both sides before the counts are quoted.
+- Enforced in: `tests/test_measure_3903_buckets.py`.
