@@ -211,3 +211,13 @@ def test_cik_tie_break_is_numeric() -> None:
     cats = _cats(insiders=[_h("0000000010", "Ten", 50, accession="J"), _h("0000000002", "Two", 50, accession="J")])
     out, _ = _reconcile_cofiler_groups(cats, {"J": frozenset({"10", "2"})})
     assert [h.filer_name for h in out["insiders"]] == ["Two"]
+
+
+def test_a_name_keyed_identity_never_links() -> None:
+    # No CIK at all: the identity is ``NAME:…``, so it is not a node even if its name's filer is on the accession.
+    cats = _cats(
+        insiders=[_h(None, "Person Without Cik", 500, accession="J")],
+        blockholders=[_h("0000000007", "Fund", 400, source="13d", accession="J")],
+    )
+    out, corrections = _reconcile_cofiler_groups(cats, {"J": frozenset({"7", "8"})})
+    assert corrections == [] and _pie(out) == Decimal(900)

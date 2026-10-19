@@ -259,17 +259,18 @@ def main() -> int:
     p95 = statistics.quantiles(overhead, n=20)[-1] if len(overhead) >= 20 else max(overhead, default=0.0)
     if p95 > 0.10:
         failures.append(f"latency: p95 overhead {p95:.1%} > 10%")
-    json.dump(
-        {
-            "stats": stats,
-            "shares": {k: str(v) for k, v in shares.items()},
-            "cliques": cliques_out,
-            "failures": failures,
-        },
-        open(args.out, "w"),
-        indent=1,
-        default=str,
-    )
+    with open(args.out, "w") as fh:
+        json.dump(
+            {
+                "stats": stats,
+                "shares": {k: str(v) for k, v in shares.items()},
+                "cliques": cliques_out,
+                "failures": failures,
+            },
+            fh,
+            indent=1,
+            default=str,
+        )
     for k, v in sorted(stats.items()):
         print(f"{k}: {v}")
     for k, v in sorted(shares.items()):

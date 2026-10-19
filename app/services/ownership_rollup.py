@@ -4431,7 +4431,9 @@ def _cofiler_graph(
                 rows_by_identity.setdefault(key, []).append(h)
 
     totals = {k: sum((h.shares for h in rows), Decimal(0)) for k, rows in rows_by_identity.items()}
-    canon = {k: _canonical_cik(rows[0].filer_cik) for k, rows in rows_by_identity.items()}
+    # From the identity key itself (``CIK:<stripped filer_cik>``, else ``NAME:``), so every row of
+    # one identity shares it by construction.
+    canon = {k: _canonical_cik(k[4:]) if k.startswith("CIK:") else None for k in rows_by_identity}
     nodes = sorted(
         k
         for k, rows in rows_by_identity.items()
