@@ -9,7 +9,11 @@ B: this checkout) and write one JSON line per instrument. The driver then reads,
 oracle (``scripts/measure_3925_premise.py``'s ``evaluate``) needs for every arm-B step whose selection is eligible.
 
     git worktree add /tmp/ebull-3925-base origin/main
-    PYTHONPATH=. uv run python scripts/ab_3925_scale_fallback.py --base-checkout /tmp/ebull-3925-base > out.txt
+    PYTHONPATH=. uv run python scripts/ab_3925_scale_fallback.py --base-checkout /tmp/ebull-3925-base \\
+        --reference docs/research/3925-companiesmarketcap.json > out.txt
+
+``--reference`` holds companiesmarketcap weekly points per symbol (fail 6). A point stamped Saturday 00:00 UTC carries
+the previous Friday's close, so it is compared on the last NYSE session before its stamp date.
 """
 
 from __future__ import annotations
@@ -21,7 +25,7 @@ import os
 import subprocess
 import sys
 from collections import Counter, defaultdict
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -31,9 +35,13 @@ from scripts.measure_3925_premise import NEW_YORK, Fact, evaluate
 
 PANEL = ("AAPL", "GME", "MSFT", "JPM", "HD")
 TOLERANCE = 100.0
+EXTERNAL_BAND = (0.95, 1.05)
 BASIS_REFUSALS = {"no_left_anchor", "basis_unresolved"}
 GATE_REFUSALS = {"anchor_contradicted", "float_bound"}
 _SYMBOLS_SQL = "SELECT instrument_id, symbol FROM instruments WHERE instrument_id = ANY(%s)"
+_CLOSES_SQL = (
+    "SELECT instrument_id, price_date, close FROM price_daily WHERE instrument_id = ANY(%s) AND close IS NOT NULL"
+)
 
 # The oracle's inputs for the eligible (instrument, accession) keys, read inside the driver's snapshot.
 _ORACLE_FACTS_SQL = """
@@ -144,7 +152,7 @@ def _discontinuity(steps: list[dict[str, Any]]) -> list[str]:
     return problems
 
 
-def drive(base: Path) -> int:
+def drive(base: Path, reference_path: Path) -> int:
     import psycopg
 
     from app.config import settings
@@ -191,6 +199,12 @@ def drive(base: Path) -> int:
         for iid, accession, concept, start, end, value, fiscal_period in conn.execute(_ORACLE_FACTS_SQL, params):
             oracle_facts[(iid, accession)].append(Fact(concept, start, end, value, fiscal_period))
         oracle_sheets = {(i, a): v for i, a, v in conn.execute(_ORACLE_SHEET_SQL, params)}
+        reference = json.loads(reference_path.read_text())
+        by_symbol = {symbol: iid for iid, symbol in symbols.items()}
+        referenced = [by_symbol[s] for s in reference["symbols"] if s in by_symbol]
+        closes: dict[tuple[int, str], float] = {
+            (iid, str(day)): float(close) for iid, day, close in conn.execute(_CLOSES_SQL, (referenced,))
+        }
 
     sessions = [str(s) for s in nyse_sessions(FIRST_SESSION, build_date)]
     latest = sessions[-1]
@@ -304,19 +318,39 @@ def drive(base: Path) -> int:
             ):
                 traced.append(f"[TRACE 11 panel] {label}: A {sa['refusal']} B {sb['refusal']}")
 
-    print("\nfail 6, newly published counts (balance-sheet pass in B, else an external check is required):")
-    external: list[str] = []
+    print(f"\nfail 6, newly published counts against {reference['source']} (retrieved {reference['retrieved']}):")
     for (iid, accession), days in sorted(newly.items()):
         step = next(s for s in new[iid]["steps"] if s["selection"]["accession"] == accession)
         scale = step["evidence"]["checks"]["scale"]
-        sheet_pass = scale.get("comparator") == "balance_sheet" and scale["outcome"] == "pass"
-        verdict = "balance-sheet pass" if sheet_pass else "EXTERNAL CHECK REQUIRED"
-        if verdict != "balance-sheet pass":
-            external.append(f"{symbols.get(iid)} iid={iid} {accession}")
-        print(
-            f"  {symbols.get(iid)} iid={iid} {accession} shares {step['selection']['shares']}: {len(days)} sessions "
-            f"{days[0]}..{days[-1]}; scale {scale['outcome']}/{scale.get('comparator')} -> {verdict}"
-        )
+        label = f"{symbols.get(iid)} iid={iid} {accession} shares {step['selection']['shares']}"
+        span = f"{len(days)} sessions {days[0]}..{days[-1]}"
+        print(f"  {label}: {span}; scale {scale['outcome']}/{scale.get('comparator')}")
+        if scale.get("comparator") == "balance_sheet" and scale["outcome"] == "pass":
+            continue
+        compared = 0
+        b_steps = new[iid]["steps"]
+        for point in reference["symbols"].get(symbols.get(iid), []):
+            stamp = date.fromisoformat(point["stamp"])
+            session = next((d for d in reversed(sessions) if date.fromisoformat(d) < stamp), None)
+            if session not in days:
+                continue
+            covering = _covering(b_steps, [s["valid_from"] for s in b_steps], session)
+            close = closes.get((iid, session))
+            if covering is None or close is None or covering["split_factor"] is None:
+                fail("6", f"{label}: no arm-B cap on {session}")
+                continue
+            cap = close * float(covering["selection"]["shares"]) * covering["split_factor"]
+            ratio = cap / point["market_cap_usd"]
+            compared += 1
+            ok = EXTERNAL_BAND[0] <= ratio <= EXTERNAL_BAND[1]
+            print(
+                f"    {session} (point {point['stamp']}): B {cap / 1e9:,.4f}B vs "
+                f"{point['market_cap_usd'] / 1e9:,.4f}B = {ratio:.4f} {'ok' if ok else 'MISS'}"
+            )
+            if not ok:
+                fail("6", f"{label}: {session} ratio {ratio:.4f}")
+        if compared == 0:
+            fail("6", f"{label}: no balance-sheet pass and no external point in its newly published sessions")
     print("\nscale outcomes by (comparator, outcome), steps:")
     for name in ("A", "B"):
         print(f"  {name}: {dict(sorted(scale_by[name].items()))}")
@@ -326,15 +360,17 @@ def drive(base: Path) -> int:
     print(f"\ntraced cases ({len(traced)}):")
     for line in traced:
         print(" ", line)
-    print(f"\nstructural failures: {dict(sorted(failures.items()))}; external checks pending: {external}")
-    print("RESULT:", "PASS (pending traces and external checks)" if not failures else "FAIL")
+    print(f"\nstructural failures: {dict(sorted(failures.items()))}")
+    print("RESULT:", "PASS (pending traces)" if not failures else "FAIL")
     return 0 if not failures else 1
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-checkout", type=Path, required=True)
-    return drive(parser.parse_args().base_checkout)
+    parser.add_argument("--reference", type=Path, required=True)
+    args = parser.parse_args()
+    return drive(args.base_checkout, args.reference)
 
 
 if __name__ == "__main__":

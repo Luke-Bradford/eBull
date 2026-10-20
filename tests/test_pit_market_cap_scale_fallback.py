@@ -231,6 +231,15 @@ def test_penny_boundary_is_exact_decimal(sign: str) -> None:
     )
 
 
+def test_penny_threshold_is_exact_for_the_widest_stored_operands() -> None:
+    # numeric(30, 6): 0.01 x W must not round. The gap here exceeds 0.01 x W by 0.00000044 (Codex checkpoint 2).
+    w, n = "111111111111111111111111.123456", "112222222222222222222222.234691"
+    assert period_status(90, "Q1", _operands(period(w, "1", n)))[0] is PeriodStatus.IDENTITY_DISAGREES
+    expected = oracle.period_status(90, "Q1", {oracle.WA: {Decimal(w)}, oracle.EPS: {Decimal(1)},
+                                               oracle.NET_INCOME: {Decimal(n)}})  # fmt: skip
+    assert expected[0] == "identity_disagrees"
+
+
 def test_hundredfold_bound_on_the_implied_count_at_eps_one_cent() -> None:
     # EPS 0.01 and net income 1M imply 100M shares; a weighted average 1,000x larger still meets the penny test
     # (1M / 100B = 0.00001), so the 100x bound is what refuses it.

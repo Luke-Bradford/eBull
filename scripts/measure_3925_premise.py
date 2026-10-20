@@ -29,7 +29,7 @@ import math
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from zoneinfo import ZoneInfo
 
 import psycopg
@@ -151,8 +151,11 @@ def period_status(
     (w,), (e,), (n,) = wa, eps, numerator
     if not all(math.isfinite(float(x)) for x in (w, e, n)) or w <= 0 or e == 0 or n == 0 or (n > 0) != (e > 0):
         return "operand_invalid", None, None
-    implied = n / e
-    if abs(n - e * w) > PER_SHARE_TOLERANCE * w or not math.isfinite(float(implied)):
+    with localcontext() as context:
+        context.prec = 60  # exact for any stored numeric(..., 6) operands
+        within_penny = abs(n - e * w) <= PER_SHARE_TOLERANCE * w
+        implied = n / e
+    if not within_penny or not math.isfinite(float(implied)):
         return "identity_disagrees", w, implied
     if not agrees(float(w), float(implied)):
         return "identity_disagrees", w, implied

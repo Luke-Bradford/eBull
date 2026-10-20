@@ -456,10 +456,10 @@ def period_status(
     if not all(_finite_decimal(x) for x in (w, e, n)) or w <= 0 or e == 0 or n == 0 or (n > 0) != (e > 0):
         return PeriodStatus.OPERAND_INVALID, None, None
     with localcontext() as context:
-        context.prec = 60  # wide enough that N - E x W is exact for any stored numeric(…, 6) operands
-        gap = abs(n - e * w)
+        context.prec = 60  # wide enough that N - E x W and 0.01 x W are exact for any stored numeric(…, 6) operands
+        within_penny = abs(n - e * w) <= PER_SHARE_TOLERANCE * w
         implied = n / e
-    if gap > PER_SHARE_TOLERANCE * w or not _finite_decimal(implied):
+    if not within_penny or not _finite_decimal(implied):
         return PeriodStatus.IDENTITY_DISAGREES, w, implied
     if not _within_tolerance(float(w) / float(implied)):
         return PeriodStatus.IDENTITY_DISAGREES, w, implied
