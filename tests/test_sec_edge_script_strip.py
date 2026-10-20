@@ -36,6 +36,11 @@ def test_strip_is_a_no_op_on_a_clean_body_and_idempotent() -> None:
     assert strip_sec_edge_script(strip_sec_edge_script(_INJECTED)) == _FILED
 
 
+def test_an_uppercase_body_tag_strips_the_same() -> None:
+    # 110 of the 253 stored cases close with </BODY>.
+    assert strip_sec_edge_script(_INJECTED.replace("</body>", "</BODY>")) == _FILED.replace("</body>", "</BODY>")
+
+
 def test_a_rotated_token_strips_the_same() -> None:
     rotated = _INJECTED.replace(
         "/-QOA/64Vm/ig/zTjS/gt8A/m1aEQkGLcNmQ4Q/XiUsWQ/Yl0/HHTAfbn4", "/N3AEOPt9/dJoipWz/AQsW1I"
@@ -52,6 +57,8 @@ def test_a_rotated_token_strips_the_same() -> None:
         '<script type="text/javascript"  src="/a">alert(1)</script>',
         # SEC's own XBRL viewer script inside a .txt submission (R pages).
         '<script type="text/javascript" src="Show.js">/* Do Not Remove This Comment */</script>',
+        # The edge's shape anywhere but immediately before </body> is not the edge's tag.
+        '<p><script type="text/javascript"  src="/a"></script></p></body>',
         # Text that merely mentions the word.
         "<p>The script of the meeting is below.</p>",
     ],

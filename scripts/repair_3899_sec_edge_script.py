@@ -18,7 +18,7 @@ arrive clean. Two kinds of row were written before that:
     reproduce. Each row is re-fetched (shared SEC budget) and classified:
     ``canonical`` (already matches), ``reconstructed`` (matches once a known
     token is re-inserted before the last ``</body>``, the position on all 253
-    stored DEF 14A cases), ``gone`` (404/410) or ``unverifiable``. With
+    stored DEF 14A cases), ``gone`` (404/410), ``error`` (fetch raised; re-run) or ``unverifiable``. With
     ``--apply``, a ``reconstructed`` row's hash is re-recorded as the canonical
     body's: the recorded hash was verified first, so the bytes it named are
     unchanged. ``unverifiable`` rows keep their hash and fail loud on rehydrate.
@@ -171,7 +171,12 @@ def _swept(conn: psycopg.Connection[Any], *, apply: bool) -> int:
     rebaselined = 0
     with SecFilingsProvider(user_agent=settings.sec_user_agent) as provider:
         for accession, kind, url, recorded in rows:
-            canonical = provider.fetch_document_text(str(url))
+            try:
+                canonical = provider.fetch_document_text(str(url))
+            except Exception as exc:  # noqa: BLE001 — one 5xx/429 must not abort a census of thousands
+                print(f"  fetch error {accession} {kind}: {type(exc).__name__}: {exc}")
+                tally[(kind, "error")] += 1
+                continue
             verdict = classify_swept(str(recorded), canonical)
             tally[(kind, verdict)] += 1
             if apply and verdict == "reconstructed" and canonical is not None:

@@ -116,10 +116,11 @@ _PREFETCH_BODY_CACHE: contextvars.ContextVar[dict[str, str] | None] = contextvar
 # inside ``.txt`` submissions do carry scripts (``<script type="text/javascript"
 # src="Show.js">/* Do Not Remove This Comment */</script>``, 1,896 stored rows
 # on 2026-10-20); the empty, root-relative-src shape below excludes them.
-# Stripped at both raw body boundaries (here and
-# ``sec_pipelined_fetcher.prefetch_document_texts``) so stored bodies and their
-# hashes are the document as filed.
-_SEC_EDGE_SCRIPT_RE = re.compile(r'<script type="text/javascript"\s+src="/[^"<>]*"></script>')
+# Anchored to the edge's position, immediately before ``</body>`` (any case):
+# all 253 stored DEF 14A cases sit there. Stripped at both raw body boundaries
+# (here and ``sec_pipelined_fetcher.prefetch_document_texts``) so stored
+# bodies and their hashes are the document as filed.
+_SEC_EDGE_SCRIPT_RE = re.compile(r'<script type="text/javascript"\s+src="/[^"<>]*"></script>(?=</(?i:body)>)')
 
 
 def strip_sec_edge_script(text: str) -> str:
