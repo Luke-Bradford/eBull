@@ -1,6 +1,6 @@
 # #3903: the valuation view's dividend yield on the total/ME form
 
-**Ticket:** #3903 (remainder item 1; refs #3850, #3841). **Status:** spec v4. Codex checkpoint 1 ran three rounds,
+**Ticket:** #3903 (remainder item 1; refs #3850, #3841). **Status:** spec v4 + Amendment 1 (build). Codex checkpoint 1 ran three rounds,
 the cap: round 1 raised 30 findings, round 2 re-graded them and added 24, round 3 re-graded all 54 and added 21, each
 UNSOUND. v4 applies round 3 without a fourth round, as #3910 did; "Checkpoint record" gives every disposition.
 
@@ -270,6 +270,387 @@ after the 08:20Z PIT build and before the evening candle refresh.
 7. **Latency.** Per-instrument and bulk reads of both views, both arms; above 2× blocks (#3850's bound).
 8. **Corpus evidence** (CLAUDE.md "Corpus changes"): the smoke panel; item 4 as the cross-source check; backfill
    none (views); live re-check after deploy; the thesis-window listing.
+
+## Amendment 1 (build, 2026-10-19): the control's source, the external E, and the generic concept's unfiled deductions
+
+Figures are from dry runs of `scripts/measure_3903_dividend_acceptance.py` at 2026-10-19 22:40–22:46Z (code
+`03030946` plus this branch's working tree; the run's first line prints both). Those runs fell after the evening candle
+refresh, so outside the acceptance window (the panel's caps were `basis_stale`). They justify the
+change. The timed run after the next 08:20Z build is the acceptance.
+
+**Finding 1: the control cannot be read "as deployed" at the timed run.** The pre-push hook's smoke test applies a new
+`sql/NNN` to the dev database, so once the branch is pushed the deployed views are sql/507's.
+- **Change:** the control is built from files, as two temporary views. They are sql/220's `financial_periods_ttm` body
+  and sql/506's `instrument_valuation` body (`sql/rollback/507_…`, byte for byte), the latter rewritten to read the
+  former by name. The treatment is built the same way from sql/507. `pg_depend` asserts that each valuation arm
+  depends on its own TTM arm and on no other.
+- **Evidence of equivalence:** while the deployed views lack the appended column, the script compares them with the
+  file control on every row and every column. In the 22:40Z dry run, before any push, both views were equal: 4,564 TTM
+  rows and 4,561 valuation rows. This is equality of the two snapshots' rows, not a proof that the SQL definitions are
+  equivalent.
+- After the push the comparison cannot run, and the script says so. The result is then a comparison against the file
+  baseline that the dry run proved equal to the deployment.
+
+**Finding 2: the external page's "Annual Dividend" is forward, not trailing.**
+- stockanalysis shows MSFT's Annual Dividend at $3.92, four times the declared $0.98. Each of the four ex-dates in the
+  trailing year paid $0.91.
+- **Change:** the script stores every dividend-history row the page lists from 2025-09-01, as (ex-date, amount).
+  `external_ttm` derives E from the amounts whose ex-date falls in the 365 days to the external close.
+- Specials stay in E, as JKP's `ret − retx` carries them; FCBC's $1.00 on 2026-01-02 is one.
+- No reference name split in the period, so the page's amounts and the close are on one share basis.
+- This is a comparison convention: JKP sums monthly `div_tot × shares` over 12 observations, and a single count does
+  not reproduce those weights. N_f / N compares two counts only; the difference between Σ(dividend_t × shares_t) and
+  N_f × Σ dividend_t stays in the residual C / (N_f · E), which is never divided out.
+
+**Finding 3: the rebuild cannot see a deduction the filer does not tag.** GM's case:
+- GM's stored members are `PaymentsOfDividends`, $1.169B TTM, and they agree with the filing rule.
+- GM files no `PaymentsOfDividendsCommonStock`, and no preferred or minority-interest payment fact. The rebuild's
+  "generic less filed deductions" branch therefore returns the same $1.169B (D / C = 1.000), and section 3 cannot flag
+  it.
+- GM's filed `DividendsCommonStockCash` (common cash dividends declared) is $602M over the window.
+- Against stockanalysis (P_x 82.75, E 0.69), ours is 1.587% and the external 0.834%, a ratio of 1.903. Today's
+  per-share form is near the external here.
+
+This is the composition that "The numerator is a proxy" names: `PaymentsOfDividends` includes preferred and NCI
+payments. It is the same root cause as XRX, which "Input policy" already classes as an input defect: the normaliser
+stores the generic concept. XRX's case is the concept order; GM's is that no common-paid fact is filed. The view
+cannot tell them apart from a stored scalar, because `financial_periods` records no concept provenance (its columns
+are `source` and `source_ref`, grep 2026-10-19).
+
+**The population.** Of 843 publications, 344 have a member whose rule concept is `PaymentsOfDividends`.
+- 75 of those file a four-quarter `DividendsCommonStockCash` TTM.
+- For 7 of the 75, stored ÷ declared lies outside [0.95, 1.05]: XRX 2.231, GM 1.942, WTFC 1.272, BUSE 1.212 (newly
+  exposed), EFC 1.121, SRBK 1.055 and OGN 0.900.
+- The other 269 cannot be screened this way, so the error of the generic-concept population is not bounded by this
+  evidence.
+- Declared is not paid, so timing alone can move the ratio. The screen produces candidates, not verdicts.
+- `DividendsCommonStock` is not used, because it includes stock and other noncash forms.
+
+**Change:**
+- **Section 3** lists the investigation candidates: stored ÷ declared outside [0.95, 1.05], or a positive amount paid
+  against zero declared. Newly exposed ones are marked.
+  - They are candidates, not confirmed defects. Under "Input policy" they stay published, because the view cannot see
+    the concept.
+  - The normaliser ticket's scope gains them, together with what it would take to give a generic-only filer a
+    common-paid operand: concept provenance per stored member, and deductions the filer does not tag.
+- **Item 4:** a reference miss that the count and composition factors do not account for is classified as a
+  numerator proxy defect when all of the following hold:
+  - all four stored members agree with the rule, and one is on `PaymentsOfDividends`;
+  - stored D ÷ the filed `DividendsCommonStockCash` TTM C_d lies outside [0.95, 1.05];
+  - |D − C_d| exceeds the largest declared amount over the quarter before the window and the window's four.
+    Declared is not paid. With a payment lag of up to one quarter, the window pays the preceding quarter's declaration
+    instead of its own last one, so timing alone moves D by at most the larger of the two. If the preceding quarter does
+    not resolve, the row is not classified. GM: |1,169 − 602| = $567M, against a largest quarter of $164M;
+  - the filing corroborates the external page: (P_x / V) × (N_f / N, unless the count factor was divided out) ×
+    C_d / (N_f · E) lies within ±15%.
+
+  The classification does not divide D out. It shows that D is the wrong operand by D / C_d, which is printed, and
+  that the filing's common amount agrees with the external one. A proxy defect is never counted as reconciled and does
+  not count towards the minimum coverage of 10 of 12. It is listed and filed like a member defect, whose size the
+  policy does not bound either. Any other miss fails. GM: D / C_d 1.942, corroboration 0.960.
+
+**Codex checkpoint 1 on this amendment, round 1 (UNSOUND, 8 findings).**
+
+| # | finding | action |
+|---|---|---|
+| 1 | P1: finding 3 excuses an operand-selection error | Kept as an input defect under the existing policy (the XRX precedent; same root cause). The reason, the unscreenable 269 and the normaliser's widened scope are stated. Never counted as reconciled. |
+| 2 | P1: dividing out D / C_d cancels D | Replaced: no divide-out. The classification requires D / C_d outside the band, and the filing's C_d corroborating E. |
+| 3 | P2: `DividendsCommonStock` includes noncash | Dropped; `DividendsCommonStockCash` only. |
+| 4 | P2: the exemption allowed unresolved members | Now requires all four members to `agree`. |
+| 5 | P2: the residual re-multiplied a factor never applied | Computed afresh from the price factor, the count factor (unless divided out) and C_d / (N_f · E). |
+| 6 | P2: zero declarations dropped | Zero declared counted; positive paid against zero declared is listed. |
+| 7 | P2: file control ≠ deployed, unproved | Row-and-column equality with the deployment, checked while the deployment predates sql/507; passed in the dry run. |
+| 8 | P2: E not auditable | Dated events stored; E derived by `external_ttm`; share basis stated. |
+
+**Round 2 (UNSOUND; 7 of 8 resolved, finding 1 partial; 8 new).**
+
+| # | finding | action |
+|---|---|---|
+| 1 | P1, partial: declared ≠ paid, so agreement does not show the excess is noncommon | Timing bound added (above). A proxy defect is still classified, not passed: this amendment deliberately keeps "Input policy"'s treatment for the generic concept's errors (the XRX precedent). The alternative is blocking until the normaliser carries concept provenance, and that keeps today's form, which publishes EFC at 10,046% and no yield for HD or KO, and agrees with the rebuild on 342 of 526 rows against 518. |
+| 9 | P2: the count factor did not check N = `shares_reported` × `split_factor` | Required, within 0.5%. |
+| 10 | P2: a member defect excused the whole miss | Quantified: the members are corrected to the rule's values and the factors re-applied, and the residual must be within ±15%. In section 3 a member trace needs the corrected total within [0.95, 1.05] of the rebuild. A concept trace needs every member resolved. PRI and SSNC pass on their corrected totals. |
+| 11 | P2: zero cases escaped tracing | A resolved zero rebuild against positive stored, and a zero publication against a positive rebuild where today is positive, both need a trace. The dry run has 7 resolved zero rebuilds, all stored zero, and no zero regression. |
+| 12 | P2: duplicate slots | Named names are reserved first. Replacements and the untagged slots exclude every taken name, and coverage counts distinct names. |
+| 13 | P2: slot rules | A non-panel name is replaced only for a refused cap or a failed category predicate. Any other missing yield on a named name fails, panel included. |
+| 14 | P2: N_f / N does not carry historical weighting | Wording corrected (finding 2): it stays in C / (N_f · E). |
+| 15 | P3: outliers not all printed | Section 3 prints every publication outside [0.95, 1.05] with both totals and its quarter branches (12 in the dry run). |
+| 16 | P3: timestamp | Corrected to the runs' own times. |
+
+**Round 3, the cap (UNSOUND; 9, 11, 14, 15 and 16 resolved; 1, 10, 12 and 13 partial; 5 new).** As in v4, the round's
+findings are applied without a fourth round. Dry run 22:53Z.
+
+| # | finding | action |
+|---|---|---|
+| 1 | P1, partial: the timing bound ignored the quarter before the window | The bound takes the preceding quarter's declared amount too, and an unresolved preceding quarter is not classified. The residual disagreement stands and is recorded: Codex holds that only a reconciliation to common cash paid should make a miss non-blocking. This amendment keeps the "Input policy" treatment and states why (round 2, finding 1). |
+| 10 | P2, partial: the concept trace did not measure its contribution | Quantified. Each concept quarter is moved to the rebuild's value, after member correction, and the adjusted total must lie within [0.95, 1.05] of the rebuild. PRI, SSNC and XRX each adjust exactly to their rebuilt totals. |
+| 12, 18 | P2: one symbol could hold several slots, or resolve to another instrument | Pools and the untagged ranking hold one canonical instrument per symbol, so a slot resolves to the instrument that was assessed. |
+| 13 | P2, partial: the predicate was checked only when the name published | The predicate is checked first, whatever the yield. |
+| 17 | P2: a zero corrected total divided zero by zero | Guarded. |
+| 19 | P3: candidates called defects | Called investigation candidates. |
+| 20 | P3: Input policy's counts are stale | The script separates resolved zero rebuilds: in the 22:53Z dry run, 75 publications lack a resolved comparison and 7 have a resolved zero rebuild, all stored zero. The 9 zero publications include JACK and RFIL, whose zeros remain unresolved. v4's 82 counted both groups as unresolved. |
+| 21 | P3: a resolved zero rebuild printed as "unresolved" | Printed as "resolved zero". |
+
+## Amendment 2 (acceptance, 2026-10-20): a window longer than a calendar year can hold a fifth payment
+
+The timed acceptance at 2026-10-20 08:30Z (code `270ce02a`, after `market_cap_pit_rebuild` 08:20–08:22Z) failed
+section 4: 9 of 12 slots reconciled. KO's and FAST's external figures come from that run of
+`scripts/measure_3903_dividend_acceptance.py`, whose log is on PR #3917. The population figures are printed by
+`PYTHONPATH=. uv run python -m scripts.measure_3903_dividend_window_span` (dev DB, 2026-10-20 ~09:00Z, deployed sql/507
+views, one REPEATABLE READ snapshot). The hand classification and the earlier spec's figures are labelled where used.
+
+**Finding 1: KO, a defect of the construction.**
+- Ours 2.729%, stockanalysis 2.248%: ratio 1.214, residual 1.214 after the count factor (acceptance log).
+- KO's window is Q2'25–Q1'26, 2025-03-29 to 2026-04-03: 371 days. Its stored members (script section 5):
+  - Q1'25 (to 03-28) $89M; Q2'25 $2,194M; Q3'25 $2,108M; Q4'25 $4,388M; Q1'26 (to 2026-04-03) $2,281M.
+  - FY2025 = $8,779M = Q1'25 + Q2'25 + Q3'25 + Q4'25.
+  - The window replaces Q1'25's $89M with Q1'26's $2,281M, so D = $10,971M, 1.250 × FY2025.
+  - KO's single-quarter amounts are $2.1–2.3B, so the total is consistent with one payment more than four. The
+    payment dates are not stored, and nothing here establishes them. What is established independently is that the
+    window's envelope exceeds a calendar year.
+- The source rule (above) is Σ over the last 12 months of (per-share distribution × shares) ÷ ME, from monthly
+  observations. The construction's proxy sums fiscal-quarter cash paid. A fiscal window longer than a calendar year
+  is not the source's 12 months. Section 4 keeps timing in C / (N_f · E) and never divides it out, so the FAIL is the
+  rule working.
+
+**The population.** The column the change touches is `dividends_paid_ttm_observed`: 1,368 non-NULL TTM rows (the
+script asserts this equals a direct count, one row per instrument, and that each window's member sum equals the
+view's value). No window member sits on a tied sql/220 dedup key (instrument, end, `filed_date`), and no FY comparator
+key is tied. 1,055 rows have a published yield, and 1,045 of those are positive. Span runs from the first member's
+(`rn = 4`) `period_start_date` to the last member's `period_end_date`.
+- **Spans of positive publications:** 1,005 at 334–365 days; 1 at 366 (TFX); 37 at 367–371; FLXS at 0, from an
+  inverted interval; BHE NULL.
+- **Screen:** D ÷ the normalized FY `dividends_paid` with the latest period end, then the latest filing, unless the
+  window's two boundaries are the FY's. It filters candidates: it does not count payments, and a ratio inside [0.87, 1.15] does not establish
+  correct timing. Growth, cuts and composition can offset timing.
+  - Windows over one calendar year: 35 positive windows screened; 3 lie above 1.15 (KO 1.250, HNI 1.320, TILE
+    1.673) and 1 below 0.87 (CRI 0.649). KO is read from its members, as above; HNI and TILE are candidates.
+  - Retained windows: 956 screened; 65 lie above 1.15 and 50 below 0.87. The script lists all 115 with the FY used.
+  - By hand, the 30 highest include an initiation (GEV), an annual special (PGR) and growth. That classification
+    covers those 30 only. It does not clear the other 85, nor a timing error inside the band.
+  - Timing inside a retained window stays in section 4's residual.
+- **Ex-date input:** for each of the 44 refused rows with a valid window, no stored `dividend_events` ex-date falls
+  inside the window. For BHE and FLXS, coverage cannot be assessed, because their windows are not valid. This
+  establishes what is stored, not what is obtainable. The earlier measurement ("Alternatives rejected", v4) found
+  stored ex-dates for 3 of 834 publications.
+
+**Change: `dividends_paid_ttm_observed` gains three conditions (sql/508). The rest of sql/507's expression is
+unchanged.**
+1. **Valid intervals.** All four members have a non-NULL `period_start_date` that is not after their
+   `period_end_date`. `period_end_date` is `NOT NULL` in the schema.
+2. **No overlap.** No member starts on or before the previous member's `period_end_date`, so no stored interval is
+   summed twice. A cumulative member stored as a quarter (Jan 1 to each quarter end) fails this.
+   - It refuses CRM, HUN and WWW. Each has a derived Q4 stamped with a start a year early (457–460-day intervals on
+     quarter-sized amounts). That is probably metadata, but it is not distinguishable from a cumulative period
+     without provenance, which the view does not carry.
+3. **Within one calendar year, for a positive total.** The last member's `period_end_date` < the first member's
+   `period_start_date` + `INTERVAL '1 year'`. The first member is `rn = 4`, read as
+   `MAX(period_start_date) FILTER (WHERE rn = 4)`.
+   - A zero total from four valid, non-overlapping, non-negative members is zero over every period it spans, the
+     12 months included, so it publishes whatever the span (VSTS, 368 days).
+   - The conditions apply in order 1, 2, 3, and a refusal reports the first that fails.
+   - This is calendar arithmetic, not 365 days. An end on the anniversary is refused. A start on 29 February adds a
+     year to 28 February, so its window must end by 27 February.
+
+**What it is: a fiscal cash-yield heuristic with measured limits, not the source rule.**
+- It does not establish ex-date membership. It removes one measured failure: a fiscal window longer than a calendar
+  year, which for a schedule on fixed calendar dates can hold the same payment date twice.
+- It does not refuse five genuine distributions. A special dividend inside a window under a year stays, as JKP keeps
+  it.
+- **Remaining false inclusions:**
+  - a schedule drifting by business days;
+  - a first start that understates the span (cross-checked below);
+  - **gaps between members.** 101 publications have one, up to 30 days, and none also overlaps. A gap or a short
+    window may drop a payment; whether any does is undetermined.
+- **Exclusions:** of the 35 positive windows refused over a year and screened, 31 have in-band ratios. Their correctness is
+  undetermined.
+- **Why accept the coverage cost:** the construction already prefers NULL to an operand it knows can be wrong ("four
+  observed members"). Nothing reads the yield for a decision ("Readers").
+
+**No lower bound and no gap rule.** Neither has a source rule. The snapshot does not support a value: 17 of the 20
+positive publications under 364 days lie within [0.87, 1.15], and the other three are TDG 0.550, DIN 0.645 and FLXS
+(condition 1). A day minimum chosen from that would be fitted to the sample. The start metadata is known to be noisy
+(KO's derived Q4 is stamped 10-01 after a Q3 ending 09-26), so a continuity rule would refuse on metadata.
+
+**End-anchored cross-check, an acceptance diagnostic, not enforcement.**
+- The span runs from the day after the preceding stored quarter's end (`rn = 5`) to the last end. The test is
+  `e < (e5 + 1) + INTERVAL '1 year'`.
+- A kept window over a year by this test is classed:
+  - "predecessor missing, start filed" when `financial_facts_raw` holds a fact whose context runs from the stored
+    first start to the first member's end. The filing itself then dates the start. A plausible interval length
+    would not, because a start can be understated by days and still look like a quarter;
+  - "start unverified" otherwise;
+  - "no predecessor stored" when there is no `rn = 5`.
+- **Today:** 996 kept publications are within a year by end dates. 7 are "predecessor missing, start filed": EBF,
+  ETD, EXP, ORCL, RPM, SRBK and VALU, each with a preceding stored end 3 or 6 months before its start. 10 are zero
+  totals, to which condition 3 does not apply. None is "start unverified" or "no predecessor stored".
+- The guard is the enforcement. The cross-check guards the start-date input the guard relies on, at each acceptance.
+
+**Measured effect.**
+- 46 of 1,368 TTM values are refused: 41 over one calendar year, 2 with invalid intervals (BHE, FLXS) and 3 with
+  overlapping members.
+- 42 of 1,055 publications are refused, all of them positive (42 of 1,045).
+- Expectation, not measured: a window over a year comes from a 53-week year, or from a quarter-end calendar drifting
+  past the anniversary. It leaves when its long quarter rolls out.
+
+**Scope and migration.**
+- Only `dividends_paid_ttm_observed` changes. sql/220's dedup, ranking and shape guard, and every other TTM column,
+  are untouched. Their treatment of a long window is a separate corpus change, recorded on #3903.
+- The change ships as sql/508, not as an edit to sql/507, because the pre-push smoke has already applied sql/507 to the
+  dev DB.
+  - sql/508 replaces `financial_periods_ttm` only. Columns, order and types are unchanged.
+  - `instrument_valuation` keeps sql/507's body.
+  - `sql/rollback/508_…` restores sql/507's TTM body. Rolling back the whole construction applies 508's rollback,
+    then 507's.
+
+**Acceptance changes.**
+- **Arms.**
+  - Control: the original baseline, sql/220 and sql/506 from files (Amendment 1).
+  - Prior: sql/507's TTM and valuation bodies.
+  - Treatment: sql/508's TTM body with sql/507's valuation body.
+- **Section 1.**
+  - The independent evaluation applies conditions 1–3 after the member conditions. The causes are "invalid member
+    interval", "overlapping members" and "window over one calendar year".
+  - Treatment versus prior, NULL-safe, on every TTM row and every valuation row. Key sets are equal and unique.
+    - Every column is equal except `dividends_paid_ttm_observed` and `dividend_yield`.
+    - Each of those two equals the independent expected result exactly: the prior value when conditions 1–3 pass, and
+      NULL when one fails, with that condition's cause.
+  - The increment's refusals are printed by cause, as TTM rows and as publications.
+  - The end-anchored classes are printed. A positive treatment publication classed "start unverified" or "no
+    predecessor stored" FAILs.
+- **Section 2:** the A/B prints the three causes.
+- **Section 4.**
+  - Expected NULL with "window over one calendar year": KO, HNI and TILE, alongside GME and BJRI.
+  - Expected NULL with "invalid member interval": FLXS. Expected NULL with "overlapping members": HUN.
+  - **Slot replacement.**
+    - A non-panel slot made NULL by a condition is replaced like a refused cap: by the largest proposed-published name
+      of its category not already taken.
+    - The original slot's outcome is printed separately from its replacement.
+    - A replacement that is unavailable is printed, and counts as unreconciled.
+  - The 12 slots are distinct instruments. NULL checks never count as reconciliations.
+  - A panel name made NULL by a condition is reported with its cause, and is not a failure.
+  - **Boundary category**, mandatory and outside the 10 of 12: the two largest-cap positive publications with a
+    364-day window, 52/53-week filers the guard retains. At least one must reconcile under item 4's rules, or FAIL;
+    the other may fail or be classified, as in every category (build note). It is a regression case, not a validation
+    of timing in general; that stays in the residual.
+  - The minimum stays 10 of 12.
+- **DB tests (synthetic), added to item 6.** Each case carries a stated expected outcome:
+  - Anniversary, for a window starting 2025-04-01: an end on 2026-03-31 publishes; an end on 2026-04-01 or
+    2026-04-02 is NULL.
+  - Leap year: a window from 2023-03-01 to 2024-02-29 (366 days) publishes. A window from 2024-02-29 to 2025-02-28
+    is NULL; its anniversary is 2025-02-28.
+  - NULL starts: a NULL start on the `rn = 4` member, with the other starts present, is NULL; so is a NULL start on
+    another member.
+  - Bad intervals: an inverted interval is NULL. A one-day overlap is NULL. Cumulative members (Jan 1 to each quarter
+    end) are NULL.
+  - Short windows: a gap between members, and a window of 334 days, both publish (the stated no-lower-bound decision).
+  - A zero total over 368 days publishes zero; the same window with a positive total is NULL.
+  - Multiple failures (an inverted interval inside an over-long window) report condition 1.
+  - **Layout of each case.**
+    - Every case states all four member intervals and amounts, and passes sql/220's shape guard.
+    - Every case has a fifth, older quarter, which must not enter the sum.
+    - A publishing case asserts the exact sum.
+    - Valuation cases carry a published cap, so that no unrelated NULL can make a refusal pass.
+  - **Rollback.**
+    - Execute sql/508's file, then its rollback file. Compare the view definition, its ordered columns and types, and
+      its rows, plus the dependent valuation rows, against sql/507's state.
+    - A separate test runs the whole-construction sequence: 508's rollback, then 507's.
+  - The end-anchored classifier is an acceptance diagnostic. It is exercised by the acceptance run, not by the view's
+    DB tests.
+
+**Finding 2: FAST, reference-data lag, no change.** Ours 1.892%, external 1.882%, ratio 1.005. The acceptance
+script stops at `N_f unresolved` (08:30Z log). Our window ends 2026-09-30 (10-Q filed about 2026-10-14), and the local
+`companyfacts.zip` (2026-10-17 09:34) does not carry that quarter. The rerun follows `sec_companyfacts_bulk_refresh`.
+N_f stays required, because the identity is asserted per row (item 4).
+
+**Codex checkpoint 1, round 1 (UNSOUND, 14 findings), applied in v2.** v3 supersedes the figures it quotes.
+
+| # | finding | action |
+|---|---|---|
+| 1 | P1: FLXS's span of 0 passes; intervals and continuity unchecked | Condition 1, valid intervals, refuses FLXS. A continuity rule is rejected because the start metadata is noisy (101 gaps); the end-anchored cross-check replaces it. |
+| 2 | P2: not the source rule | Stated as a local departure, with its false inclusions and exclusions. |
+| 3 | P2: ratios promoted to diagnoses | KO is shown from its members; HNI and TILE are candidates; "sound yields" becomes "within the band". |
+| 4 | P2: 30 of 65 explained, conclusion overreaches | Narrowed to the 30. All 116 retained outliers are listed; timing stays in the section 4 residual. |
+| 5 | P2: ex-date coverage judged in aggregate | Per instrument: 0 ex-dates inside the window for each of the 45 refused rows. |
+| 6 | P2: FY comparator not deterministic or boundary-checked | Normalized FY only, latest filed first; "that FY" means both boundaries equal; provenance printed. |
+| 7 | P2: screened by day span, not by guard outcome | The screen and the listing are by guard outcome; every refused row is listed. |
+| 8 | P2: claims not reproducible | The script prints every figure here; the hand classification is labelled and limited to the 30. |
+| 9 | P2: impact measured on publications only | Measured on all 1,368 TTM values; acceptance compares treatment and prior on every TTM row. |
+| 10 | P2: "continuous flows, 1.6%" unsupported | Removed; justified by scope instead. |
+| 11 | P2: replacing KO weakens timing coverage | Original and replacement outcomes printed separately; a mandatory 52/53-week boundary slot added. |
+| 12 | P2: boundary and NULL fixtures missing | Added to the DB tests; `rn = 4` start stated. |
+| 13 | P2: baseline ambiguous | Three arms named: control (original baseline), prior (sql/507), treatment. |
+| 14 | P3: recovery asserted | Labelled an expectation, not measured. |
+
+**Codex checkpoint 1, round 2 (UNSOUND; round-1 findings 4, 7, 10, 13 and 14 resolved, the other nine partial; 14 new),
+applied in v3.**
+
+| # | finding | action |
+|---|---|---|
+| 1 | P2: JKP formula misstated | Restated from the Source rule table, with the proxy named separately. |
+| 2 | P1: valid intervals can overlap; cumulative periods pass | Condition 2, no overlap, refuses CRM, HUN and WWW; cumulative-member fixture added. |
+| 3 | P2: "conservative" claimed as soundness | Recast as a fiscal cash-yield heuristic with measured limits; five genuine distributions inside a window under a year are not refused. |
+| 4 | P2: 60-day exception unsupported; snapshot is not enforcement | The 60-day rule is replaced by first-member-length classes; "no predecessor stored" is its own class; the check is stated as a diagnostic, and the guard as the enforcement. |
+| 5 | P2: no lower bound rests on a sample | Kept, with the reason stated: no source rule, and a value fitted to the sample is what the finding warns against. The under-count risk is stated as undetermined; fixtures pin the decision. |
+| 6 | P2: in-band called "false exclusions" | "In-band ratios, correctness undetermined." |
+| 7 | P2: BHE and FLXS zero ex-dates are mechanical | Printed as unassessable; the others as "no stored ex-date", with instrument totals. |
+| 8 | P2: NULL end premise | `period_end_date` is `NOT NULL` in the schema (information_schema, 2026-10-20). |
+| 9 | P2: end-anchor leap arithmetic | The script uses `e < (e5 + 1) + INTERVAL '1 year'`; leap fixtures carry expected outcomes. |
+| 10 | P2: ties; comparator provenance | Member sums equal the view's value on all 1,368 rows, so no tie mismatch occurs today. The dedup is sql/220's and is unchanged. FY provenance is printed for every listed row. |
+| 11 | P2: inner joins may drop rows | Driven from the TTM rows with left joins; the count is asserted against a direct count and for uniqueness. |
+| 12 | P2: figures not in the log | KO's members are printed; KO's and FAST's external figures cite the acceptance log; the hand classification is labelled. |
+| 13 | P2: publication-level increment unchecked | Treatment versus prior, every valuation row and column, NULL-safe; distinct slots; an unavailable replacement counts as unreconciled. |
+| 14 | P3: gap count conditioned on no overlap | Any-gap 101, any-overlap 3, both 0. |
+
+**Codex checkpoint 1, round 3, the cap (UNSOUND; round-2 findings 1, 2, 3, 6, 7, 8, 9, 11, 13 and 14 resolved, 4,
+10 and 12 partial, 5 unresolved; 10 new).** Applied without a fourth round, as in v4.
+
+| # | finding | action |
+|---|---|---|
+| 1 | P1: conditions 1–3 do not establish 12-month coverage (one-day members pass) | **Recorded disagreement**, below. |
+| 2 | P2: an interval length does not prove the start | The class needs a filed fact whose context starts at the stored start. All 7 kept cases have one. |
+| 3 | P2: equal sums do not exclude ties | Ties measured: no window member on a tied dedup key, and no tied FY key. |
+| 4 | P2: member-sum check printed, not asserted | Asserted. |
+| 5 | P2: a zero total over a long window is still zero | Condition 3 applies to positive totals only. VSTS publishes zero; fixture added. |
+| 6 | P2: KO's amounts are not a payment count | "Consistent with one payment more than four"; the envelope is the established fact. |
+| 7 | P2: attribution and comparator provenance | Attribution split by source; CRM, HUN and WWW intervals printed; FY ordering stated; FY provenance printed for every comparator. |
+| 8 | P3: one-way equality | Exact equality to the independent expected result; key sets equal and unique. |
+| 9 | P2: fixtures under-specified | Every case states four intervals, amounts, a fifth quarter and exact sums; precedence fixture added. The end-anchor classifier is an acceptance diagnostic, not a view test. |
+| 10 | P3: rollback test underspecified | The rollback file is executed and compared, and the whole-construction sequence has its own test. |
+
+**Recorded disagreement (round 3, finding 1).** Codex holds that the Source rule's "last 12 months" requires each
+window to be shown to cover twelve months, and that four one-day members pass all three conditions.
+- **The amendment does not adopt a coverage rule.** The window is sql/220's four latest quarters, which v4 accepted
+  through three rounds. This amendment removes one measured failure, a window longer than a calendar year, without
+  re-deciding the window.
+- **Coverage cannot be read from the stored metadata.**
+  - The start dates are noisy: 101 publications have gaps of up to 30 days, and KO's derived Q4 is stamped 10-01.
+  - A coverage rule would refuse on that noise. A day minimum would be fitted to this snapshot.
+  - The one-day counterexample needs four stored intervals of a day. Today, 20 positive publications are under 364
+    days, the shortest 334 days.
+- **Ownership.** Coverage moves with the start-date metadata, which is the normaliser ticket's (#3916, "quarter
+  start-date metadata"). The view's coverage rule is decided there.
+
+**Amendment 2, build note (2026-10-20 ~09:30Z, dry runs of the acceptance script; no ckpt-1 round remained).**
+- **The boundary category holds two names.** The single boundary slot drew NVDA, which failed.
+  - Ours 0.129%, external 0.240%, a ratio of 0.537.
+  - NVDA raised its dividend from $0.01 to $0.25 (ex-dates 2026-06-04 and 2026-09-10), and our window ends at its
+    last filed quarter, 2026-07-26.
+  - Item 4 keeps dividend changes in the residual, so one mandatory name fails on any recent change, whatever the
+    boundary does. Two names with one reconciled is how every other category is covered. The selection rule (largest
+    cap) is unchanged; the second name is COST.
+- **A filing-lag classification**, on Amendment 1's pattern: classified, never reconciled, never counted.
+  - E_w is the page's amounts with an ex-date in the 365 days to the window's own last end. It is computed only where
+    the stored list covers that span.
+  - A miss is classified when E_w ≠ E and ours × E ÷ E_w (count factor divided out where valid) lies within ±15%.
+    NVDA: E_w $0.28 against E $0.52, residual 0.993.
+  - It is self-limiting: with no dividend change E_w = E, and nothing is classified.
+  - It records a property of every filings-based form, the control's included: a yield lags a dividend change by up
+    to a quarter plus the filing delay.
+- **N_f for a 12/12/12/16-week filer.** COST files a 52-week FY and a 36-week (252-day) year-to-date context, and no
+  16-week one. The fiscal-Q4 rule's nine-month leg (260–285 days) misses it. The dividend acceptance widens that leg
+  to 240–290 days, duration-weighted as before. The P/E acceptance's resolver is untouched.
+- Dry run 09:40Z: 11 of 12 reconciled. COST reconciles (ratio 1.002). KO's replacement XOM reconciles (1.018).
+  RESULT PASS.
 
 ## Rollback
 
