@@ -282,9 +282,18 @@ def main() -> None:
 
     print("\n4. legacy rows publishing both ways, today ÷ proposed = price × count × equity factor:")
     pairs = []
+    no_inputs: list[str] = []
     for r in legacy:
         p, _ = proposed(r)
-        if r["pb_ratio"] is None or p is None or not r["snapshot_equity"].is_finite():
+        if r["pb_ratio"] is None or p is None:
+            continue
+        # Today's legacy pb_ratio needs book_value > 0, which the write sets only when the count is positive, so a
+        # published row carries a snapshot equity, count and (with a published cap) a PIT row. Count any that do not.
+        if r["snapshot_equity"] is None or not r["snapshot_equity"].is_finite() or not r["snapshot_shares"]:
+            no_inputs.append(r["symbol"])
+            continue
+        if r["pit_cap"] is None or not r["pit_close"]:
+            no_inputs.append(r["symbol"])
             continue
         metric_price = r["current_price"] / ratios.get(r["instrument_id"], 1)
         pit_shares = Decimal(str(r["pit_cap"])) / r["pit_close"]
@@ -299,7 +308,7 @@ def main() -> None:
     for _, ratio, *_ in pairs:
         d = abs(ratio - 1)
         band["<=1%" if d <= Decimal("0.01") else "<=5%" if d <= Decimal("0.05") else ">5%"] += 1
-    print(f"   rows {len(pairs)}: {dict(band)}")
+    print(f"   rows {len(pairs)}: {dict(band)}; skipped for missing snapshot or PIT inputs: {no_inputs}")
     if pairs:
         pf = sorted(t[2] for t in pairs)
         print(f"   price factor min {pf[0]:.4f} max {pf[-1]:.4f}")
@@ -314,7 +323,7 @@ def main() -> None:
                 f" {price_f:.4f} {count_f:.4f} {equity_f:.4f}; {r['as_of_date']} {r['snapshot_shares']:.0f};"
                 f" {pit_shares:.0f} {r['shares_concept']} {r['context_date']} {r['split_factor']} {r['pit_accession']}"
             )
-            facts, stored = traces[r["instrument_id"]]
+            facts, stored = traces.get(r["instrument_id"], ([], []))
             for f in facts:
                 print(f"       instant {f['concept']} {f['val']:.0f} {f['accession_number']} filed {f['filed_date']}")
             counts = [(str(q["period_end_date"]), q["period_type"], q["shares_outstanding"]) for q in stored]
