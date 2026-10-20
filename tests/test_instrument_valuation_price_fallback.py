@@ -77,9 +77,9 @@ def test_daily_close_fallback_latest_positive(_seed: psycopg.Connection[tuple]) 
     as_of = row["price_as_of"]
     assert isinstance(as_of, datetime.datetime)
     assert as_of.date() == datetime.date(2026, 7, 10)
-    # The selected price reaches the per-share legacy P/B (120 / book value 30). Since sql/506 (#3903) the legacy arm
-    # publishes no P/E: it has no earnings total.
-    assert row["pb_ratio"] == 4
+    # Since sql/506 and sql/509 (#3903) the legacy arm publishes no P/E (no earnings total) and no per-share P/B: P/B is
+    # market cap / stored quarterly equity, none seeded here.
+    assert row["pb_ratio"] is None
     assert row["pe_ratio"] is None
 
 

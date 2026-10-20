@@ -2,9 +2,8 @@
 
 For a ``coverage.filings_status = 'fpi'`` instrument the view NULLs every
 price-bearing column — a WIDER list than the #1664 dual-class suppression
-(dividend_yield and legacy pb_ratio are per-share-basis consistent across
-share classes but not across the ADS ratio; pe_ratio is count-based since
-sql/506, #3903). Price-free columns and the per-ADS
+(pe_ratio, dividend_yield and pb_ratio are count-based since sql/506, sql/507
+and sql/509, #3903, and NULL with the cap's fpi_adr reason). Price-free columns and the per-ADS
 price itself survive. ``resolve_market_cap_basis`` fails closed FIRST with
 ``fpi_adr_unavailable``. Seeds via the legacy CTE (``fundamentals_snapshot``
 is a base table; ``financial_periods_ttm`` is a view).

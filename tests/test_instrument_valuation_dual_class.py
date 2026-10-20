@@ -92,5 +92,6 @@ def test_single_class_control_unchanged(_seed: psycopg.Connection[tuple]) -> Non
     row = _val(_seed, 3)
     assert row["market_cap_live"] is not None
     assert row["fcf_yield"] is not None
-    assert row["pb_ratio"] is not None
+    # sql/509 (#3903): P/B needs stored quarterly equity and a USD instrument, neither seeded here.
+    assert row["pb_ratio"] is None
     assert row["debt_equity_ratio"] is not None
