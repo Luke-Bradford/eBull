@@ -29,6 +29,7 @@ import contextvars
 import hashlib
 import json
 import logging
+import re
 import threading
 import urllib.parse
 from dataclasses import dataclass
@@ -102,6 +103,29 @@ _PROCESS_RATE_LIMIT_LOCK: threading.Lock = threading.Lock()
 _PREFETCH_BODY_CACHE: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar(
     "_prefetch_body_cache", default=None
 )
+
+
+# #3899 — www.sec.gov's edge appends a bot-manager script to HTML responses:
+# ``<script type="text/javascript"  src="/<path token>"></script>`` near
+# ``</body>``. First seen in our corpus on bodies fetched 2026-09-20; the token
+# rotates (6 distinct across 400 stored bodies), so a stored body's sha256 is
+# not reproducible across a rotation and a pre-onset body never matches a
+# re-fetch. It is not filer content: EDGAR suspends any submission whose HTML
+# carries active content (EDGAR Filer Manual Vol. II ch. 5, §5.2 "No Active
+# Content"; error ACTIVE_CONTENT_NOT_ALLOWED). SEC's own XBRL viewer pages
+# inside ``.txt`` submissions do carry scripts (``<script type="text/javascript"
+# src="Show.js">/* Do Not Remove This Comment */</script>``, 1,896 stored rows
+# on 2026-10-20); the empty, root-relative-src shape below excludes them.
+# Anchored to the edge's position, immediately before ``</body>`` (any case):
+# all 253 stored DEF 14A cases sit there. Stripped at both raw body boundaries
+# (here and ``sec_pipelined_fetcher.prefetch_document_texts``) so stored
+# bodies and their hashes are the document as filed.
+_SEC_EDGE_SCRIPT_RE = re.compile(r'<script type="text/javascript"\s+src="/[^"<>]*"></script>(?=</(?i:body)>)')
+
+
+def strip_sec_edge_script(text: str) -> str:
+    """Remove the SEC edge's injected bot-manager script tag(s) from a fetched body."""
+    return _SEC_EDGE_SCRIPT_RE.sub("", text)
 
 
 def set_prefetch_body_cache(cache: dict[str, str]) -> contextvars.Token[dict[str, str] | None]:
@@ -660,7 +684,7 @@ class SecFilingsProvider(FilingsProvider):
         if resp.status_code in (404, 410):
             return None
         resp.raise_for_status()
-        return resp.text
+        return strip_sec_edge_script(resp.text)
 
     def fetch_submission_header(self, absolute_url: str) -> tuple[int, str]:
         """One GET of an archived ``<accession>.hdr.sgml`` (#3714): ``(status, body)``, no retry.
