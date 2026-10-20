@@ -25,7 +25,7 @@ from bisect import bisect_right
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from enum import StrEnum
 from typing import Any, Final
 
@@ -116,6 +116,17 @@ def rule_version() -> str:
         "max_shares_age_months": MAX_SHARES_AGE_MONTHS,
         "scale_tolerance": str(SCALE_TOLERANCE),
         "dollar_volume_me_ceiling": DOLLAR_VOLUME_ME_CEILING,
+        "scale_fallback": {
+            "comparator": "weighted_average_basic_eps_identity",
+            "version": SCALE_FALLBACK_VERSION,
+            "units": IDENTITY_UNITS,
+            "numerator": [INCOME_AVAILABLE, NET_INCOME],
+            "periods": "latest weighted-average end, on or before acceptance; one per start",
+            "focus": "one distinct non-blank fiscal_period, else unknown",
+            "short_period_days": DQC_SHORT_PERIOD_DAYS,
+            "per_share_tolerance": f"exact |N - E*W| <= {PER_SHARE_TOLERANCE}*W",
+            "statuses": sorted(PeriodStatus),
+        },
         "refusals": sorted(Refusal),
         "cik_refusals": sorted(CikRefusal),
         "anchor_statuses": sorted(AnchorStatus),
@@ -376,6 +387,155 @@ def accession_sheet_count(facts: Sequence[ShareFact], accession: str) -> Decimal
     return values.pop() if len(values) == 1 else None
 
 
+# --------------------------------------------------------------------------- scale fallback (Amendment 3, #3925)
+
+# The EPS-identity operands (ASC 260-10-45-10; DQC_0227's numerator, then the stored stand-in) and their units.
+WEIGHTED_AVERAGE: Final = "WeightedAverageNumberOfSharesOutstandingBasic"
+EPS_BASIC: Final = "EarningsPerShareBasic"
+INCOME_AVAILABLE: Final = "NetIncomeLossAvailableToCommonStockholdersBasic"
+NET_INCOME: Final = "NetIncomeLoss"
+IDENTITY_UNITS: Final = {
+    WEIGHTED_AVERAGE: "shares",
+    EPS_BASIC: "USD/shares",
+    INCOME_AVAILABLE: "USD",
+    NET_INCOME: "USD",
+}
+# DQC_0227 (2026): ``$perShareItemTolerance``, and the period minimums under which it suppresses an EPS failure.
+PER_SHARE_TOLERANCE: Final = Decimal("0.01")
+DQC_SHORT_PERIOD_DAYS: Final = {"FY": 310, "Q2": 120, "Q3": 200}
+SCALE_FALLBACK_VERSION: Final = 1
+
+
+class PeriodStatus(StrEnum):
+    """Rule 4: a period is consistent, or unused with the first condition it fails."""
+
+    CONSISTENT = "consistent"
+    FOCUS_UNKNOWN = "focus_unknown"
+    DQC_SHORT_PERIOD = "dqc_short_period"
+    OPERAND_COUNT = "operand_count"
+    OPERAND_INVALID = "operand_invalid"
+    IDENTITY_DISAGREES = "identity_disagrees"
+
+
+@dataclass(frozen=True)
+class IdentityFact:
+    """One EPS-identity operand of an accession: an undimensioned duration fact (rule 2)."""
+
+    concept: str
+    start: date
+    end: date
+    value: Decimal
+    fiscal_period: str | None
+
+
+def fiscal_focus(facts: Sequence[IdentityFact]) -> str | None:
+    """The accession's fiscal period focus: its one distinct non-blank ``fiscal_period``; None when unknown."""
+    found = {f.fiscal_period for f in facts if f.fiscal_period}
+    return found.pop() if len(found) == 1 else None
+
+
+def _finite_decimal(value: Decimal) -> bool:
+    return value.is_finite() and math.isfinite(float(value))
+
+
+def _exponent_spread(*values: Decimal) -> int:
+    exponents = [int(v.as_tuple().exponent) for v in values]
+    return max(exponents) - min(exponents)
+
+
+def period_status(
+    days: int, focus: str | None, operands: Mapping[str, set[Decimal]]
+) -> tuple[PeriodStatus, Decimal | None, Decimal | None]:
+    """Rule 4 for one period: (status, weighted average, numerator / EPS). The penny test is exact decimal arithmetic,
+    |N - E x W| <= 0.01 x W, so a gap of exactly one cent passes; the 100x bound is in float, as the cover check."""
+    if focus is None:
+        return PeriodStatus.FOCUS_UNKNOWN, None, None
+    if days < DQC_SHORT_PERIOD_DAYS.get(focus, 0):
+        return PeriodStatus.DQC_SHORT_PERIOD, None, None
+    weighted = operands.get(WEIGHTED_AVERAGE, set())
+    eps = operands.get(EPS_BASIC, set())
+    numerator = operands[INCOME_AVAILABLE] if INCOME_AVAILABLE in operands else operands.get(NET_INCOME, set())
+    if len(weighted) != 1 or len(eps) != 1 or len(numerator) != 1:
+        return PeriodStatus.OPERAND_COUNT, None, None
+    (w,), (e,), (n,) = weighted, eps, numerator
+    if not all(_finite_decimal(x) for x in (w, e, n)) or w <= 0 or e == 0 or n == 0 or (n > 0) != (e > 0):
+        return PeriodStatus.OPERAND_INVALID, None, None
+    with localcontext() as context:
+        # Exact whatever the operands' size (financial_facts_raw.val is numeric(30, 6), but this function is pure):
+        # E x W needs at most the sum of both coefficients' digits, and the exponent spread can add the rest.
+        context.prec = sum(len(x.as_tuple().digits) for x in (w, e, n)) + _exponent_spread(w, e, n) + 4
+        within_penny = abs(n - e * w) <= PER_SHARE_TOLERANCE * w
+        implied = n / e
+    if not within_penny or not _finite_decimal(implied):
+        return PeriodStatus.IDENTITY_DISAGREES, w, implied
+    if not _within_tolerance(float(w) / float(implied)):
+        return PeriodStatus.IDENTITY_DISAGREES, w, implied
+    return PeriodStatus.CONSISTENT, w, implied
+
+
+def weighted_average_scale(
+    cover: Decimal, accepted: date, facts: Sequence[IdentityFact]
+) -> tuple[Check, dict[str, Any]]:
+    """Rules 3-5: the scale outcome of an eligible cover count against its accession's consistent periods, and the
+    evidence. ``accepted`` is the accession's New York acceptance date; ``facts`` are the accession's operand rows."""
+    evidence: dict[str, Any] = {
+        "focus": fiscal_focus(facts),
+        "latest_end": None,
+        "accepted": accepted.isoformat(),
+        "no_period": None,
+        "periods": [],
+    }
+    ends = [f.end for f in facts if f.concept == WEIGHTED_AVERAGE]
+    if not ends:
+        evidence["no_period"] = "no_weighted_average"
+        return Check.UNTESTED, evidence
+    latest = max(ends)
+    evidence["latest_end"] = latest.isoformat()
+    if latest > accepted:
+        evidence["no_period"] = "end_after_acceptance"
+        return Check.UNTESTED, evidence
+    by_start: dict[date, dict[str, set[Decimal]]] = {}
+    for fact in facts:
+        if fact.end == latest:
+            by_start.setdefault(fact.start, {}).setdefault(fact.concept, set()).add(fact.value)
+    outcomes: list[bool] = []
+    for start, operands in sorted(by_start.items()):
+        if WEIGHTED_AVERAGE not in operands:
+            continue
+        days = (latest - start).days + 1
+        status, weighted, implied = period_status(days, evidence["focus"], operands)
+        entry: dict[str, Any] = {
+            "start": start.isoformat(),
+            "end": latest.isoformat(),
+            "days": days,
+            "values": {concept: sorted(str(v) for v in values) for concept, values in sorted(operands.items())},
+            "numerator": INCOME_AVAILABLE if INCOME_AVAILABLE in operands else NET_INCOME,
+            "implied": _str(implied),
+            "status": str(status),
+        }
+        if status is PeriodStatus.CONSISTENT:
+            assert weighted is not None and implied is not None
+            versus = {
+                "weighted_average": _within_tolerance(float(cover) / float(weighted)),
+                "implied": _within_tolerance(float(cover) / float(implied)),
+            }
+            entry["cover_vs"] = {k: str(Check.PASS if ok else Check.FAIL) for k, ok in versus.items()}
+            outcomes.extend(versus.values())
+        evidence["periods"].append(entry)
+    if not outcomes:
+        return Check.UNTESTED, evidence
+    return (Check.PASS if all(outcomes) else Check.FAIL), evidence
+
+
+def _sheet_unavailable(facts: Sequence[ShareFact], accession: str, sheet: Decimal | None) -> str:
+    """Rule 1's reason the balance-sheet comparator is unusable: a single non-positive value, several, or none."""
+    if sheet is not None:
+        return "invalid"
+    if any(f.concept is Concept.BALANCE_SHEET and f.accession == accession for f in facts):
+        return "ambiguous"
+    return "none"
+
+
 def _within_tolerance(ratio: float) -> bool:
     tolerance = float(SCALE_TOLERANCE)
     return 1 / tolerance <= ratio <= tolerance
@@ -437,14 +597,20 @@ def build_steps(
     closes: Mapping[date, float],
     dollar_volume: Mapping[date, float],
     multiclass: bool,
+    identity: Mapping[str, Sequence[IdentityFact]] | None = None,
 ) -> tuple[Step, ...]:
     """Steps for one instrument over ``sessions`` (ascending NYSE sessions to the build date).
+
+    ``identity`` holds each accession's EPS-identity operand rows, the scale check's comparator when the accession
+    has no usable balance-sheet count (spec Amendment 3).
 
     ``closes`` and ``dollar_volume`` (the mean 21-session dollar volume ending at the session) are on the stored
     basis. Every check is evaluated where its operands exist; the first failure, in the order below, is the refusal.
     A session with no eligible count has no step.
     """
+    identity = identity or {}
     bases: dict[tuple[date, date], Basis] = {}
+    fallbacks: dict[str, tuple[Check, dict[str, Any]]] = {}
     steps: list[Step] = []
     open_key: tuple[Any, ...] | None = None
     open_step: Step | None = None
@@ -478,11 +644,24 @@ def build_steps(
         checks: dict[str, Check] = {}
 
         sheet = accession_sheet_count(facts, selection.accession) if selection.concept is Concept.COVER else None
-        if shares is None or sheet is None or not _finite_positive(shares) or not _finite_positive(sheet):
+        scale: dict[str, Any] = {"cover": _str(shares), "sheet": _str(sheet), "comparator": None}
+        if selection.concept is not Concept.COVER or shares is None or not _finite_positive(shares):
             checks["scale"] = Check.UNTESTED
-        else:
+        elif sheet is not None and _finite_positive(sheet):
             # Float, not Decimal, division: a Decimal quotient beyond the context's exponent range would trap.
             checks["scale"] = Check.PASS if _within_tolerance(float(shares) / float(sheet)) else Check.FAIL
+            scale["comparator"] = "balance_sheet"
+        else:
+            # Amendment 3: no usable balance-sheet count, so the accession's EPS-consistent periods are the comparator.
+            if selection.accession not in fallbacks:
+                accepted = selection.accepted_at.astimezone(NEW_YORK).date()
+                fallbacks[selection.accession] = weighted_average_scale(
+                    shares, accepted, identity.get(selection.accession, ())
+                )
+            checks["scale"], detail = fallbacks[selection.accession]
+            scale["sheet_unavailable"] = _sheet_unavailable(facts, selection.accession, sheet)
+            scale["comparator"] = None if checks["scale"] is Check.UNTESTED else "weighted_average_basic"
+            scale.update(detail)
 
         close = closes.get(session)
         volume = dollar_volume.get(session)
@@ -550,7 +729,7 @@ def build_steps(
                 "window": [anchor.evidence() for anchor in basis.window],
             },
             "checks": {
-                "scale": {"outcome": str(checks["scale"]), "cover": _str(shares), "sheet": _str(sheet)},
+                "scale": {"outcome": str(checks["scale"]), **scale},
                 "turnover": {
                     "outcome": str(checks["turnover"]),
                     "session": session.isoformat(),

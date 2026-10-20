@@ -1,0 +1,344 @@
+build 9; min_context 2023-04-01; snapshot at (datetime.datetime(2026, 10, 20, 16, 4, 58, 403055, tzinfo=zoneinfo.ZoneInfo(key='Etc/UTC')),)
+  stored EarningsPerShareBasic: 145,846 rows, decimals NULL on 145,846
+  stored NetIncomeLoss: 179,566 rows, decimals NULL on 179,566
+  stored WeightedAverageNumberOfSharesOutstandingBasic: 143,975 rows, decimals NULL on 143,975
+
+33,946 (instrument, accession) units with a selected count; 0 with more than one selected count; 0 with more than one stored scale outcome. Cover selections with no single count (shares_reported NULL, excluded): (0,)
+
+[trace] iid=1531 0000045012-24-000015 accepted 2024-04-24 context 2024-04-17 cover=885,301,252 refused stored=untested sheet=none None focus=Q1 (instrument balance-sheet rows, any accession: 6) -> untested
+    2024-01-01..2024-03-31: identity_disagrees; implied=891; {'EarningsPerShareBasic': '680,000.000000', 'NetIncomeLoss': '606,000,000.000000', 'SharesOutstandingBasic': '889,000,000.000000'}
+
+[trace] iid=1531 0000045012-24-000043 accepted 2024-07-29 context 2024-07-22 cover=882,828,515 published stored=untested sheet=none None focus=Q2 (instrument balance-sheet rows, any accession: 6) -> untested
+    2024-01-01..2024-06-30: identity_disagrees; implied=889; {'EarningsPerShareBasic': '1,480,000.000000', 'NetIncomeLoss': '1,315,000,000.000000', 'SharesOutstandingBasic': '886,000,000.000000'}
+    2024-04-01..2024-06-30: dqc_short_period; implied=None; {'EarningsPerShareBasic': '800,000.000000', 'NetIncomeLoss': '709,000,000.000000', 'SharesOutstandingBasic': '884,000,000.000000'}
+
+[trace] iid=1531 0000045012-24-000063 accepted 2024-11-07 context 2024-10-31 cover=878,501,985 published stored=untested sheet=none None focus=Q3 (instrument balance-sheet rows, any accession: 6) -> untested
+    2024-01-01..2024-09-30: identity_disagrees; implied=885; {'EarningsPerShareBasic': '2,130,000.000000', 'NetIncomeLoss': '1,886,000,000.000000', 'SharesOutstandingBasic': '885,000,000.000000'}
+    2024-07-01..2024-09-30: dqc_short_period; implied=None; {'EarningsPerShareBasic': '650,000.000000', 'NetIncomeLoss': '571,000,000.000000', 'SharesOutstandingBasic': '881,000,000.000000'}
+
+[trace] iid=1531 0000045012-25-000010 accepted 2025-02-12 context 2025-02-05 cover=868,091,623 published stored=pass sheet=valid [Decimal('868000000.000000')] focus=FY (instrument balance-sheet rows, any accession: 6) -> n/a
+    2024-01-01..2024-12-31: operand_count; implied=None; {'NetIncomeLoss': '2,501,000,000.000000', 'SharesOutstandingBasic': '882,000,000.000000'}
+
+[trace] iid=1531 0000045012-25-000035 accepted 2025-04-25 context 2025-04-18 cover=859,715,017 published stored=untested sheet=none None focus=Q1 (instrument balance-sheet rows, any accession: 6) -> pass
+    2025-01-01..2025-03-31: consistent; implied=850,000,000; {'EarningsPerShareBasic': '0.240000', 'NetIncomeLoss': '204,000,000.000000', 'SharesOutstandingBasic': '866,000,000.000000'}
+
+[trace] iid=1531 0000045012-25-000057 accepted 2025-07-25 context 2025-07-18 cover=852,602,102 published stored=untested sheet=none None focus=Q2 (instrument balance-sheet rows, any accession: 6) -> pass
+    2025-01-01..2025-06-30: consistent; implied=866,666,667; {'EarningsPerShareBasic': '0.780000', 'NetIncomeLoss': '676,000,000.000000', 'SharesOutstandingBasic': '862,000,000.000000'}
+    2025-04-01..2025-06-30: dqc_short_period; implied=None; {'EarningsPerShareBasic': '0.550000', 'NetIncomeLoss': '472,000,000.000000', 'SharesOutstandingBasic': '857,000,000.000000'}
+
+[trace] iid=1531 0000045012-25-000069 accepted 2025-10-24 context 2025-10-17 cover=841,626,610 published stored=untested sheet=none None focus=Q3 (instrument balance-sheet rows, any accession: 6) -> pass
+    2025-01-01..2025-09-30: consistent; implied=856,790,123; {'EarningsPerShareBasic': '0.810000', 'NetIncomeLoss': '694,000,000.000000', 'SharesOutstandingBasic': '857,000,000.000000'}
+    2025-07-01..2025-09-30: dqc_short_period; implied=None; {'EarningsPerShareBasic': '0.020000', 'NetIncomeLoss': '18,000,000.000000', 'SharesOutstandingBasic': '849,000,000.000000'}
+
+[trace] iid=1531 0000045012-26-000015 accepted 2026-02-06 context 2026-01-30 cover=837,548,345 published stored=pass sheet=valid [Decimal('835000000.000000')] focus=FY (instrument balance-sheet rows, any accession: 6) -> n/a
+    2025-01-01..2025-12-31: operand_count; implied=None; {'NetIncomeLoss': '1,283,000,000.000000', 'SharesOutstandingBasic': '853,000,000.000000'}
+
+[trace] iid=1531 0000045012-26-000039 accepted 2026-04-24 context 2026-04-17 cover=835,397,735 published stored=untested sheet=none None focus=Q1 (instrument balance-sheet rows, any accession: 6) -> pass
+    2026-01-01..2026-03-31: consistent; implied=838,181,818; {'EarningsPerShareBasic': '0.550000', 'NetIncomeLoss': '461,000,000.000000', 'SharesOutstandingBasic': '837,000,000.000000'}
+
+[trace] iid=1531 0000045012-26-000061 accepted 2026-07-24 context 2026-07-17 cover=833,130,367 published stored=untested sheet=none None focus=Q2 (instrument balance-sheet rows, any accession: 6) -> pass
+    2026-01-01..2026-06-30: consistent; implied=836,134,454; {'EarningsPerShareBasic': '1.190000', 'NetIncomeLoss': '995,000,000.000000', 'SharesOutstandingBasic': '836,000,000.000000'}
+    2026-04-01..2026-06-30: dqc_short_period; implied=None; {'EarningsPerShareBasic': '0.640000', 'NetIncomeLoss': '534,000,000.000000', 'SharesOutstandingBasic': '836,000,000.000000'}
+
+[trace] iid=4387 0001410578-24-000999 accepted 2024-06-07 context 2024-06-06 cover=100 refused stored=pass sheet=valid [Decimal('100.000000')] focus=None (instrument balance-sheet rows, any accession: 18) -> n/a
+
+[trace] iid=4387 0001410578-24-001252 accepted 2024-08-09 context 2024-08-06 cover=519,358,323 refused stored=untested sheet=none None focus=Q2 (instrument balance-sheet rows, any accession: 18) -> fail
+    2024-01-01..2024-06-30: consistent; implied=2,440; {'EarningsPerShareBasic': '-5.040000', 'NetIncomeLoss': '-12,300.000000', 'SharesOutstandingBasic': '2,439.000000'}
+    2024-04-01..2024-06-30: dqc_short_period; implied=None; {'EarningsPerShareBasic': '-2.560000', 'NetIncomeLoss': '-12,300.000000', 'SharesOutstandingBasic': '4,803.000000'}
+
+[trace] iid=4387 0001628280-25-050408 accepted 2025-11-07 context 2025-10-31 cover=522,186,327 published stored=pass sheet=valid [Decimal('522171580.000000')] focus=Q3 (instrument balance-sheet rows, any accession: 18) -> n/a
+    2025-01-01..2025-09-30: consistent; implied=523,478,261; {'EarningsPerShareBasic': '1.150000', 'NetIncomeLoss': '602,000,000.000000', 'SharesOutstandingBasic': '521,000,000.000000'}
+    2025-07-01..2025-09-30: dqc_short_period; implied=None; {'EarningsPerShareBasic': '0.470000', 'NetIncomeLoss': '246,000,000.000000', 'SharesOutstandingBasic': '522,000,000.000000'}
+
+[trace] iid=4387 0001628280-26-012555 accepted 2026-02-27 context 2026-02-20 cover=524,253,735 published stored=pass sheet=valid [Decimal('522310486.000000')] focus=FY (instrument balance-sheet rows, any accession: 18) -> n/a
+    2025-01-01..2025-12-31: consistent; implied=521,641,791; {'EarningsPerShareBasic': '1.340000', 'NetIncomeLoss': '699,000,000.000000', 'SharesOutstandingBasic': '522,000,000.000000'}
+
+[trace] iid=4387 0001628280-26-029089 accepted 2026-05-01 context 2026-04-24 cover=524,464,078 published stored=pass sheet=valid [Decimal('524457866.000000')] focus=Q1 (instrument balance-sheet rows, any accession: 18) -> n/a
+    2026-01-01..2026-03-31: consistent; implied=541,666,667; {'EarningsPerShareBasic': '0.120000', 'NetIncomeLoss': '65,000,000.000000', 'SharesOutstandingBasic': '523,000,000.000000'}
+
+[trace] iid=4387 0001628280-26-051195 accepted 2026-07-31 context 2026-07-24 cover=524,522,908 published stored=pass sheet=valid [Decimal('524522908.000000')] focus=Q2 (instrument balance-sheet rows, any accession: 18) -> n/a
+    2026-01-01..2026-06-30: consistent; implied=531,034,483; {'EarningsPerShareBasic': '0.290000', 'NetIncomeLoss': '154,000,000.000000', 'SharesOutstandingBasic': '523,000,000.000000'}
+    2026-04-01..2026-06-30: dqc_short_period; implied=None; {'EarningsPerShareBasic': '0.170000', 'NetIncomeLoss': '89,000,000.000000', 'SharesOutstandingBasic': '524,000,000.000000'}
+
+[trace] iid=4387 0002005951-24-000010 accepted 2024-11-08 context 2024-11-05 cover=520,156,112 published stored=pass sheet=valid [Decimal('520056084.000000')] focus=Q3 (instrument balance-sheet rows, any accession: 18) -> n/a
+    2024-01-01..2024-09-30: consistent; implied=339,215,686; {'EarningsPerShareBasic': '0.510000', 'NetIncomeLoss': '173,000,000.000000', 'SharesOutstandingBasic': '342,000,000.000000'}
+    2024-07-01..2024-09-30: dqc_short_period; implied=None; {'EarningsPerShareBasic': '-0.300000', 'NetIncomeLoss': '-150,000,000.000000', 'SharesOutstandingBasic': '508,000,000.000000'}
+
+[trace] iid=4387 0002005951-25-000005 accepted 2025-03-07 context 2025-03-03 cover=521,964,165 published stored=pass sheet=valid [Decimal('520444261.000000')] focus=FY (instrument balance-sheet rows, any accession: 18) -> n/a
+    2024-01-01..2024-12-31: consistent; implied=384,337,349; {'EarningsPerShareBasic': '0.830000', 'NetIncomeLoss': '319,000,000.000000', 'SharesOutstandingBasic': '386,000,000.000000'}
+
+[trace] iid=4387 0002005951-25-000009 accepted 2025-05-09 context 2025-05-06 cover=522,012,629 published stored=pass sheet=valid [Decimal('521979145.000000')] focus=Q1 (instrument balance-sheet rows, any accession: 18) -> n/a
+    2025-01-01..2025-03-31: consistent; implied=518,918,919; {'EarningsPerShareBasic': '0.740000', 'NetIncomeLoss': '384,000,000.000000', 'SharesOutstandingBasic': '521,000,000.000000'}
+
+[trace] iid=4387 0002005951-25-000014 accepted 2025-08-07 context 2025-07-31 cover=522,125,044 published stored=pass sheet=valid [Decimal('522058394.000000')] focus=Q2 (instrument balance-sheet rows, any accession: 18) -> n/a
+    2025-01-01..2025-06-30: consistent; implied=523,529,412; {'EarningsPerShareBasic': '0.680000', 'NetIncomeLoss': '356,000,000.000000', 'SharesOutstandingBasic': '521,000,000.000000'}
+    2025-04-01..2025-06-30: dqc_short_period; implied=None; {'EarningsPerShareBasic': '-0.050000', 'NetIncomeLoss': '-28,000,000.000000', 'SharesOutstandingBasic': '522,000,000.000000'}
+
+[trace] iid=6104 0000950170-24-057736 accepted 2024-05-10 context 2024-05-08 cover=145,335,376 refused stored=pass sheet=valid [Decimal('145334642.000000')] focus=Q1 (instrument balance-sheet rows, any accession: 18) -> n/a
+    2024-01-01..2024-03-31: identity_disagrees; implied=145,428,571; {'EarningsPerShareBasic': '0.350000', 'NetIncomeLoss': '50,900,000.000000', 'SharesOutstandingBasic': '145.200000'}
+
+[trace] iid=6104 0000950170-24-094832 accepted 2024-08-09 context 2024-08-05 cover=151,394,441 refused stored=pass sheet=valid [Decimal('151391821.000000')] focus=Q2 (instrument balance-sheet rows, any accession: 18) -> n/a
+    2024-01-01..2024-06-30: identity_disagrees; implied=146,250,000; {'EarningsPerShareBasic': '0.400000', 'NetIncomeLoss': '58,500,000.000000', 'SharesOutstandingBasic': '146.300000'}
+    2024-04-01..2024-06-30: dqc_short_period; implied=None; {'EarningsPerShareBasic': '0.050000', 'NetIncomeLoss': '7,600,000.000000', 'SharesOutstandingBasic': '147.400000'}
+
+[trace] iid=6104 0000950170-24-123298 accepted 2024-11-07 context 2024-11-04 cover=151,598,240 refused stored=pass sheet=valid [Decimal('151594684.000000')] focus=Q3 (instrument balance-sheet rows, any accession: 18) -> n/a
+    2024-01-01..2024-09-30: identity_disagrees; implied=148,358,209; {'EarningsPerShareBasic': '0.670000', 'NetIncomeLoss': '99,400,000.000000', 'SharesOutstandingBasic': '148.100000'}
+    2024-07-01..2024-09-30: dqc_short_period; implied=None; {'EarningsPerShareBasic': '0.270000', 'NetIncomeLoss': '40,900,000.000000', 'SharesOutstandingBasic': '151.500000'}
+
+[trace] iid=6104 0000950170-25-030897 accepted 2025-03-03 context 2025-02-24 cover=151,705,168 refused stored=pass sheet=valid [Decimal('151677952.000000')] focus=FY (instrument balance-sheet rows, any accession: 18) -> n/a
+    2024-01-01..2024-12-31: identity_disagrees; implied=148,815,789; {'EarningsPerShareBasic': '0.760000', 'NetIncomeLoss': '113,100,000.000000', 'SharesOutstandingBasic': '149.000000'}
+
+[trace] iid=6104 0000950170-25-065610 accepted 2025-05-07 context 2025-05-02 cover=151,531,803 published stored=pass sheet=valid [Decimal('151520991.000000')] focus=Q1 (instrument balance-sheet rows, any accession: 18) -> n/a
+    2025-01-01..2025-03-31: identity_disagrees; implied=158,181,818; {'EarningsPerShareBasic': '0.110000', 'NetIncomeLoss': '17,400,000.000000', 'SharesOutstandingBasic': '151.600000'}
+
+[trace] iid=6104 0000950170-25-103333 accepted 2025-08-05 context 2025-07-29 cover=151,719,365 published stored=pass sheet=valid [Decimal('151715927.000000')] focus=Q2 (instrument balance-sheet rows, any accession: 18) -> n/a
+    2025-01-01..2025-06-30: consistent; implied=156,250,000; {'EarningsPerShareBasic': '0.160000', 'NetIncomeLoss': '25,000,000.000000', 'SharesOutstandingBasic': '151,600,000.000000'}
+    2025-04-01..2025-06-30: dqc_short_period; implied=None; {'EarningsPerShareBasic': '0.050000', 'NetIncomeLoss': '7,600,000.000000', 'SharesOutstandingBasic': '151,600,000.000000'}
+
+[trace] iid=8815 0000950170-24-059554 accepted 2024-05-14 context 2024-05-03 cover=89,703,571 refused stored=untested sheet=none None focus=Q1 (instrument balance-sheet rows, any accession: 18) -> untested
+    2024-01-01..2024-03-31: identity_disagrees; implied=204; {'EarningsPerShareBasic': '11,023.540000', 'NetIncomeLoss': '2,249,000.000000', 'SharesOutstandingBasic': '204.000000'}
+
+[trace] iid=8815 0000950170-24-096339 accepted 2024-08-13 context 2024-08-12 cover=89,703,571 published stored=pass sheet=valid [Decimal('89703571.000000')] focus=Q2 (instrument balance-sheet rows, any accession: 18) -> n/a
+    2024-01-01..2024-06-30: identity_disagrees; implied=89,909,091; {'EarningsPerShareBasic': '0.110000', 'NetIncomeLoss': '9,890,000.000000', 'SharesOutstandingBasic': '87,534.000000'}
+    2024-04-01..2024-06-30: dqc_short_period; implied=None; {'EarningsPerShareBasic': '0.090000', 'NetIncomeLoss': '7,641,000.000000', 'SharesOutstandingBasic': '87,534.000000'}
+
+[trace] iid=8815 0000950170-24-126401 accepted 2024-11-13 context 2024-11-12 cover=89,703,571 published stored=pass sheet=valid [Decimal('89703571.000000')] focus=Q3 (instrument balance-sheet rows, any accession: 18) -> n/a
+    2024-01-01..2024-09-30: identity_disagrees; implied=88,314,286; {'EarningsPerShareBasic': '0.210000', 'NetIncomeLoss': '18,546,000.000000', 'SharesOutstandingBasic': '88,722.000000'}
+    2024-07-01..2024-09-30: dqc_short_period; implied=None; {'EarningsPerShareBasic': '0.100000', 'NetIncomeLoss': '8,656,000.000000', 'SharesOutstandingBasic': '89,704.000000'}
+
+[trace] iid=8815 0000950170-25-047242 accepted 2025-03-31 context 2025-03-28 cover=93,556,071 published stored=pass sheet=valid [Decimal('93556071.000000')] focus=FY (instrument balance-sheet rows, any accession: 18) -> n/a
+    2024-01-01..2024-12-31: identity_disagrees; implied=88,924,000; {'EarningsPerShareBasic': '0.250000', 'NetIncomeLoss': '22,231,000.000000', 'SharesOutstandingBasic': '89,366.000000'}
+
+[trace] iid=8815 0000950170-25-069849 accepted 2025-05-13 context 2025-04-30 cover=93,556,071 published stored=pass sheet=valid [Decimal('93556071.000000')] focus=Q1 (instrument balance-sheet rows, any accession: 18) -> n/a
+    2025-01-01..2025-03-31: identity_disagrees; implied=95,725,000; {'EarningsPerShareBasic': '0.160000', 'NetIncomeLoss': '15,316,000.000000', 'SharesOutstandingBasic': '93,556.000000'}
+
+[trace] iid=8815 0000950170-25-107644 accepted 2025-08-13 context 2025-08-31 cover=93,622,471 published stored=pass sheet=valid [Decimal('93622471.000000')] focus=Q2 (instrument balance-sheet rows, any accession: 18) -> n/a
+    2025-01-01..2025-06-30: identity_disagrees; implied=94,202,941; {'EarningsPerShareBasic': '0.340000', 'NetIncomeLoss': '32,029,000.000000', 'SharesOutstandingBasic': '93,571.000000'}
+    2025-04-01..2025-06-30: dqc_short_period; implied=None; {'EarningsPerShareBasic': '0.180000', 'NetIncomeLoss': '16,713,000.000000', 'SharesOutstandingBasic': '93,586.000000'}
+
+[trace] iid=8815 0001193125-25-276199 accepted 2025-11-12 context 2025-11-04 cover=93,622,471 published stored=pass sheet=valid [Decimal('93622471.000000')] focus=Q3 (instrument balance-sheet rows, any accession: 18) -> n/a
+    2025-01-01..2025-09-30: identity_disagrees; implied=93,179,688; {'EarningsPerShareBasic': '0.640000', 'NetIncomeLoss': '59,635,000.000000', 'SharesOutstandingBasic': '93,588.000000'}
+    2025-07-01..2025-09-30: dqc_short_period; implied=None; {'EarningsPerShareBasic': '0.290000', 'NetIncomeLoss': '27,606,000.000000', 'SharesOutstandingBasic': '93,622.000000'}
+
+[trace] iid=8815 0001193125-26-210585 accepted 2026-05-07 context 2026-04-30 cover=93,624,471 published stored=pass sheet=valid [Decimal('93624471.000000')] focus=Q1 (instrument balance-sheet rows, any accession: 18) -> n/a
+    2026-01-01..2026-03-31: identity_disagrees; implied=92,858,333; {'EarningsPerShareBasic': '0.120000', 'NetIncomeLoss': '11,143,000.000000', 'SharesOutstandingBasic': '93,623.000000'}
+
+[trace] iid=8815 0001193125-26-336945 accepted 2026-08-06 context 2026-07-31 cover=93,688,471 published stored=pass sheet=valid [Decimal('93684471.000000')] focus=Q2 (instrument balance-sheet rows, any accession: 18) -> n/a
+    2026-01-01..2026-06-30: identity_disagrees; implied=92,950,000; {'EarningsPerShareBasic': '0.300000', 'NetIncomeLoss': '27,885,000.000000', 'SharesOutstandingBasic': '93,635.000000'}
+    2026-04-01..2026-06-30: dqc_short_period; implied=None; {'EarningsPerShareBasic': '0.180000', 'NetIncomeLoss': '16,742,000.000000', 'SharesOutstandingBasic': '93,647.000000'}
+
+[trace] iid=8815 0002000178-26-000003 accepted 2026-03-02 context 2026-02-16 cover=93,622,471 published stored=pass sheet=valid [Decimal('93622471.000000')] focus=FY (instrument balance-sheet rows, any accession: 18) -> n/a
+    2025-01-01..2025-12-31: identity_disagrees; implied=93,696,104; {'EarningsPerShareBasic': '0.770000', 'NetIncomeLoss': '72,146,000.000000', 'SharesOutstandingBasic': '93,597.000000'}
+
+[trace] iid=9864 0001628280-24-021732 accepted 2024-05-08 context 2024-05-06 cover=22,270,177,000 refused stored=untested sheet=none None focus=Q1 (instrument balance-sheet rows, any accession: 0) -> fail
+    2024-01-01..2024-03-31: consistent; implied=22,303,382; {'EarningsPerShareBasic': '2.070000', 'NetIncomeLoss': '46,168,000.000000', 'SharesOutstandingBasic': '22,250,000.000000'}
+
+[trace] iid=9864 0001628280-24-036214 accepted 2024-08-08 context 2024-08-05 cover=22,449,929,000 refused stored=untested sheet=none None focus=Q2 (instrument balance-sheet rows, any accession: 0) -> fail
+    2024-01-01..2024-06-30: consistent; implied=22,297,232; {'EarningsPerShareBasic': '2.890000', 'NetIncomeLoss': '64,439,000.000000', 'SharesOutstandingBasic': '22,267,000.000000'}
+    2024-04-01..2024-06-30: dqc_short_period; implied=None; {'EarningsPerShareBasic': '0.820000', 'NetIncomeLoss': '18,271,000.000000', 'SharesOutstandingBasic': '22,284,000.000000'}
+
+[trace] iid=9864 0001628280-24-046369 accepted 2024-11-07 context 2024-11-04 cover=22,780,819,000 refused stored=untested sheet=none None focus=Q3 (instrument balance-sheet rows, any accession: 0) -> fail
+    2024-01-01..2024-09-30: consistent; implied=22,328,610; {'EarningsPerShareBasic': '3.670000', 'NetIncomeLoss': '81,946,000.000000', 'SharesOutstandingBasic': '22,346,000.000000'}
+    2024-07-01..2024-09-30: dqc_short_period; implied=None; {'EarningsPerShareBasic': '0.780000', 'NetIncomeLoss': '17,507,000.000000', 'SharesOutstandingBasic': '22,501,000.000000'}
+
+[trace] iid=9864 0001628280-25-008213 accepted 2025-02-26 context 2025-02-24 cover=22,982,417 refused stored=untested sheet=none None focus=FY (instrument balance-sheet rows, any accession: 0) -> pass
+    2024-01-01..2024-12-31: consistent; implied=22,462,121; {'EarningsPerShareBasic': '5.280000', 'NetIncomeLoss': '118,600,000.000000', 'SharesOutstandingBasic': '22,469,000.000000'}
+
+[trace] iid=9864 0001628280-25-023220 accepted 2025-05-07 context 2025-05-02 cover=23,327,358,000 refused stored=untested sheet=none None focus=Q1 (instrument balance-sheet rows, any accession: 0) -> fail
+    2025-01-01..2025-03-31: consistent; implied=22,927,928; {'EarningsPerShareBasic': '2.220000', 'NetIncomeLoss': '50,900,000.000000', 'SharesOutstandingBasic': '22,957,000.000000'}
+
+[trace] iid=9864 0001628280-25-039014 accepted 2025-08-07 context 2025-08-04 cover=23,544,479,000 published stored=untested sheet=none None focus=Q2 (instrument balance-sheet rows, any accession: 0) -> fail
+    2025-01-01..2025-06-30: consistent; implied=23,157,895; {'EarningsPerShareBasic': '3.230000', 'NetIncomeLoss': '74,800,000.000000', 'SharesOutstandingBasic': '23,133,000.000000'}
+    2025-04-01..2025-06-30: dqc_short_period; implied=None; {'EarningsPerShareBasic': '1.030000', 'NetIncomeLoss': '23,900,000.000000', 'SharesOutstandingBasic': '23,307,000.000000'}
+
+[trace] iid=9864 0001628280-25-050291 accepted 2025-11-06 context 2025-11-03 cover=23,650,684,000 published stored=untested sheet=none None focus=Q3 (instrument balance-sheet rows, any accession: 0) -> fail
+    2025-01-01..2025-09-30: consistent; implied=23,259,259; {'EarningsPerShareBasic': '4.050000', 'NetIncomeLoss': '94,200,000.000000', 'SharesOutstandingBasic': '23,265,000.000000'}
+    2025-07-01..2025-09-30: dqc_short_period; implied=None; {'EarningsPerShareBasic': '0.820000', 'NetIncomeLoss': '19,400,000.000000', 'SharesOutstandingBasic': '23,526,000.000000'}
+
+[trace] iid=9864 0001628280-26-011753 accepted 2026-02-25 context 2026-02-23 cover=23,936,406 refused stored=untested sheet=none None focus=FY (instrument balance-sheet rows, any accession: 0) -> pass
+    2025-01-01..2025-12-31: consistent; implied=23,383,333; {'EarningsPerShareBasic': '6.000000', 'NetIncomeLoss': '140,300,000.000000', 'SharesOutstandingBasic': '23,389,000.000000'}
+
+[trace] iid=9864 0001628280-26-031397 accepted 2026-05-06 context 2026-05-04 cover=24,004,761 refused stored=untested sheet=none None focus=Q1 (instrument balance-sheet rows, any accession: 0) -> pass
+    2026-01-01..2026-03-31: consistent; implied=23,911,290; {'EarningsPerShareBasic': '2.480000', 'NetIncomeLoss': '59,300,000.000000', 'SharesOutstandingBasic': '23,937,000.000000'}
+
+[trace] iid=9864 0001628280-26-054477 accepted 2026-08-06 context 2026-08-03 cover=24,106,455 refused stored=untested sheet=none None focus=Q2 (instrument balance-sheet rows, any accession: 0) -> pass
+    2026-01-01..2026-06-30: consistent; implied=23,994,334; {'EarningsPerShareBasic': '3.530000', 'NetIncomeLoss': '84,700,000.000000', 'SharesOutstandingBasic': '23,997,000.000000'}
+    2026-04-01..2026-06-30: dqc_short_period; implied=None; {'EarningsPerShareBasic': '1.060000', 'NetIncomeLoss': '25,400,000.000000', 'SharesOutstandingBasic': '24,056,000.000000'}
+
+[trace] iid=10716 0001171843-24-003662 accepted 2024-06-26 context 2024-06-18 cover=334,430,713 refused stored=untested sheet=none None focus=Q2 (instrument balance-sheet rows, any accession: 4) -> pass
+    2023-12-01..2024-05-31: consistent; implied=343,114,286; {'EarningsPerShareBasic': '-0.070000', 'NetIncomeLoss': '-24,018,000.000000', 'SharesOutstandingBasic': '334,373,000.000000'}
+    2024-03-01..2024-05-31: dqc_short_period; implied=None; {'EarningsPerShareBasic': '-0.040000', 'NetIncomeLoss': '-13,700,000.000000', 'SharesOutstandingBasic': '334,380,000.000000'}
+
+[trace] iid=10716 0001171843-24-005458 accepted 2024-10-02 context 2024-09-25 cover=334,567,187 published stored=untested sheet=none None focus=Q3 (instrument balance-sheet rows, any accession: 4) -> pass
+    2023-12-01..2024-08-31: consistent; implied=316,009,091; {'EarningsPerShareBasic': '-0.110000', 'NetIncomeLoss': '-34,761,000.000000', 'SharesOutstandingBasic': '334,422,000.000000'}
+    2024-06-01..2024-08-31: dqc_short_period; implied=None; {'EarningsPerShareBasic': '-0.030000', 'NetIncomeLoss': '-10,743,000.000000', 'SharesOutstandingBasic': '334,520,000.000000'}
+
+[trace] iid=10716 0001171843-25-000387 accepted 2025-01-23 context 2025-01-13 cover=334,646,571 published stored=pass sheet=valid [Decimal('334567187.000000')] focus=FY (instrument balance-sheet rows, any accession: 4) -> n/a
+    2023-12-01..2024-11-30: identity_disagrees; implied=325,864,286; {'EarningsPerShareBasic': '-0.140000', 'NetIncomeLoss': '-45,621,000.000000', 'SharesOutstandingBasic': '334,458.000000'}
+
+[trace] iid=10716 0001171843-25-001347 accepted 2025-03-10 context 2025-01-13 cover=334,646,571 published stored=untested sheet=none None focus=None (instrument balance-sheet rows, any accession: 4) -> untested
+
+[trace] iid=10716 0001171843-25-001907 accepted 2025-04-01 context 2025-03-26 cover=334,646,571 published stored=untested sheet=none None focus=Q1 (instrument balance-sheet rows, any accession: 4) -> untested
+    2024-12-01..2025-02-28: identity_disagrees; implied=303,866,667; {'EarningsPerShareBasic': '-0.030000', 'NetIncomeLoss': '-9,116,000.000000', 'SharesOutstandingBasic': '334,642.000000'}
+
+[trace] iid=10716 0001171843-25-004095 accepted 2025-06-25 context 2025-06-30 cover=406,897,647 published stored=untested sheet=none None focus=Q2 (instrument balance-sheet rows, any accession: 4) -> pass
+    2024-12-01..2025-05-31: consistent; implied=333,636,842; {'EarningsPerShareBasic': '-0.190000', 'NetIncomeLoss': '-63,391,000.000000', 'SharesOutstandingBasic': '342,513,000.000000'}
+    2025-03-01..2025-05-31: dqc_short_period; implied=None; {'EarningsPerShareBasic': '-0.150000', 'NetIncomeLoss': '-54,275,000.000000', 'SharesOutstandingBasic': '350,213,000.000000'}
+
+[trace] iid=10716 0001171843-25-006209 accepted 2025-10-01 context 2025-09-26 cover=406,926,988 published stored=untested sheet=none None focus=Q3 (instrument balance-sheet rows, any accession: 4) -> pass
+    2024-12-01..2025-08-31: consistent; implied=359,259,091; {'EarningsPerShareBasic': '-0.220000', 'NetIncomeLoss': '-79,037,000.000000', 'SharesOutstandingBasic': '364,000,000.000000'}
+    2025-06-01..2025-08-31: dqc_short_period; implied=None; {'EarningsPerShareBasic': '-0.040000', 'NetIncomeLoss': '-15,646,000.000000', 'SharesOutstandingBasic': '406,508,000.000000'}
+
+[trace] iid=10716 0001171843-26-000374 accepted 2026-01-22 context 2026-01-16 cover=406,994,531 published stored=pass sheet=valid [Decimal('406932104.000000')] focus=FY (instrument balance-sheet rows, any accession: 4) -> n/a
+    2024-12-01..2025-11-30: consistent; implied=378,636,000; {'EarningsPerShareBasic': '-0.250000', 'NetIncomeLoss': '-94,659,000.000000', 'SharesOutstandingBasic': '374,702,000.000000'}
+
+[trace] iid=10716 0001171843-26-002142 accepted 2026-04-01 context 2026-03-27 cover=438,780,614 published stored=untested sheet=none None focus=Q1 (instrument balance-sheet rows, any accession: 4) -> pass
+    2025-12-01..2026-02-28: consistent; implied=385,875,000; {'EarningsPerShareBasic': '-0.040000', 'NetIncomeLoss': '-15,435,000.000000', 'SharesOutstandingBasic': '415,123,000.000000'}
+
+[trace] iid=10716 0001171843-26-004279 accepted 2026-06-24 context 2026-06-19 cover=438,780,614 published stored=untested sheet=none None focus=Q2 (instrument balance-sheet rows, any accession: 4) -> pass
+    2025-12-01..2026-05-31: consistent; implied=409,280,000; {'EarningsPerShareBasic': '-0.100000', 'NetIncomeLoss': '-40,928,000.000000', 'SharesOutstandingBasic': '427,081,000.000000'}
+    2026-03-01..2026-05-31: dqc_short_period; implied=None; {'EarningsPerShareBasic': '-0.060000', 'NetIncomeLoss': '-25,493,000.000000', 'SharesOutstandingBasic': '438,779,000.000000'}
+
+[trace] iid=10716 0001171843-26-006530 accepted 2026-10-08 context 2026-10-02 cover=438,815,994 published stored=untested sheet=none None focus=Q3 (instrument balance-sheet rows, any accession: 4) -> untested
+    2025-12-01..2026-08-31: identity_disagrees; implied=427,594; {'EarningsPerShareBasic': '-180.000000', 'NetIncomeLoss': '-76,967,000.000000', 'SharesOutstandingBasic': '431,011,000.000000'}
+    2026-06-01..2026-08-31: dqc_short_period; implied=None; {'EarningsPerShareBasic': '-80.000000', 'NetIncomeLoss': '-36,039,000.000000', 'SharesOutstandingBasic': '438,786,000.000000'}
+
+[trace] iid=1052454 0001193125-25-277834 accepted 2025-11-12 context 2025-11-07 cover=79,988,687 refused stored=pass sheet=valid [Decimal('79196710.000000')] focus=Q3 (instrument balance-sheet rows, any accession: 10) -> n/a
+    2025-01-01..2025-09-30: consistent; implied=14,675,963; {'EarningsPerShareBasic': '-6.490000', 'NetIncomeLoss': '-95,247,000.000000', 'SharesOutstandingBasic': '14,684,990.000000'}
+    2025-07-01..2025-09-30: dqc_short_period; implied=None; {'EarningsPerShareBasic': '-1.030000', 'NetIncomeLoss': '-44,757,000.000000', 'SharesOutstandingBasic': '43,491,085.000000'}
+
+[trace] iid=1052454 0001193125-26-094112 accepted 2026-03-05 context 2026-03-02 cover=80,032,823 published stored=pass sheet=valid [Decimal('79991768.000000')] focus=FY (instrument balance-sheet rows, any accession: 10) -> n/a
+    2025-01-01..2025-12-31: consistent; implied=31,173,023; {'EarningsPerShareBasic': '-4.300000', 'NetIncomeLoss': '-134,044,000.000000', 'SharesOutstandingBasic': '31,144,775.000000'}
+
+[trace] iid=1052454 0001193125-26-219829 accepted 2026-05-12 context 2026-05-07 cover=80,107,104 published stored=pass sheet=valid [Decimal('80088931.000000')] focus=Q1 (instrument balance-sheet rows, any accession: 10) -> n/a
+    2026-01-01..2026-03-31: consistent; implied=80,033; {'EarningsPerShareBasic': '-526.110000', 'NetIncomeLoss': '-42,106,000.000000', 'SharesOutstandingBasic': '80,032.000000'}
+
+[trace] iid=1052454 0001193125-26-344661 accepted 2026-08-11 context 2026-08-06 cover=80,174,267 published stored=pass sheet=valid [Decimal('80115002.000000')] focus=Q2 (instrument balance-sheet rows, any accession: 10) -> n/a
+    2026-01-01..2026-06-30: identity_disagrees; implied=80,072; {'EarningsPerShareBasic': '-1,230.890000', 'NetIncomeLoss': '-98,560,000.000000', 'SharesOutstandingBasic': '80,072,000.000000'}
+    2026-04-01..2026-06-30: dqc_short_period; implied=None; {'EarningsPerShareBasic': '-705.200000', 'NetIncomeLoss': '-56,454,000.000000', 'SharesOutstandingBasic': '80,054,000.000000'}
+
+rule 1 eligibility: (stored scale outcome, cohort, sheet comparator) -> accessions
+  ('fail', 'refused', 'valid'): 32
+  ('pass', 'published', 'valid'): 14,170
+  ('pass', 'refused', 'valid'): 13,265
+  ('untested', 'published', 'invalid'): 5
+  ('untested', 'published', 'none'): 4,070
+  ('untested', 'refused', 'invalid'): 4
+  ('untested', 'refused', 'none'): 2,389
+  ('untested', 'refused', 'none, invalid cover'): 9
+  ('untested', 'refused', 'valid, invalid cover'): 2
+
+wa: (scope, stored scale outcome, cohort, candidate outcome) -> accessions
+  ('fallback', 'untested', 'published', 'fail'): 40
+  ('fallback', 'untested', 'published', 'none'): 331
+  ('fallback', 'untested', 'published', 'pass'): 3,704
+  ('fallback', 'untested', 'refused', 'fail'): 50
+  ('fallback', 'untested', 'refused', 'none'): 517
+  ('fallback', 'untested', 'refused', 'pass'): 1,826
+  ('sheet none', 'untested', 'refused', 'none'): 9
+  ('sheet valid', 'fail', 'refused', 'fail'): 15
+  ('sheet valid', 'fail', 'refused', 'none'): 5
+  ('sheet valid', 'fail', 'refused', 'pass'): 12
+  ('sheet valid', 'pass', 'published', 'fail'): 103
+  ('sheet valid', 'pass', 'published', 'none'): 180
+  ('sheet valid', 'pass', 'published', 'pass'): 13,887
+  ('sheet valid', 'pass', 'refused', 'fail'): 200
+  ('sheet valid', 'pass', 'refused', 'none'): 625
+  ('sheet valid', 'pass', 'refused', 'pass'): 12,440
+  ('sheet valid', 'untested', 'refused', 'none'): 2
+
+implied: (scope, stored scale outcome, cohort, candidate outcome) -> accessions
+  ('fallback', 'untested', 'published', 'fail'): 5
+  ('fallback', 'untested', 'published', 'none'): 629
+  ('fallback', 'untested', 'published', 'pass'): 3,441
+  ('fallback', 'untested', 'refused', 'fail'): 17
+  ('fallback', 'untested', 'refused', 'none'): 668
+  ('fallback', 'untested', 'refused', 'pass'): 1,708
+  ('sheet none', 'untested', 'refused', 'none'): 9
+  ('sheet valid', 'fail', 'refused', 'fail'): 10
+  ('sheet valid', 'fail', 'refused', 'none'): 13
+  ('sheet valid', 'fail', 'refused', 'pass'): 9
+  ('sheet valid', 'pass', 'published', 'fail'): 7
+  ('sheet valid', 'pass', 'published', 'none'): 1,162
+  ('sheet valid', 'pass', 'published', 'pass'): 13,001
+  ('sheet valid', 'pass', 'refused', 'fail'): 22
+  ('sheet valid', 'pass', 'refused', 'none'): 1,818
+  ('sheet valid', 'pass', 'refused', 'pass'): 11,425
+  ('sheet valid', 'untested', 'refused', 'none'): 2
+
+rule: (scope, stored scale outcome, cohort, candidate outcome) -> accessions
+  ('fallback', 'untested', 'published', 'fail'): 2
+  ('fallback', 'untested', 'published', 'none'): 1,236
+  ('fallback', 'untested', 'published', 'pass'): 2,837
+  ('fallback', 'untested', 'refused', 'fail'): 10
+  ('fallback', 'untested', 'refused', 'none'): 984
+  ('fallback', 'untested', 'refused', 'pass'): 1,399
+  ('sheet none', 'untested', 'refused', 'none'): 9
+  ('sheet valid', 'fail', 'refused', 'fail'): 5
+  ('sheet valid', 'fail', 'refused', 'none'): 22
+  ('sheet valid', 'fail', 'refused', 'pass'): 5
+  ('sheet valid', 'pass', 'published', 'fail'): 1
+  ('sheet valid', 'pass', 'published', 'none'): 2,940
+  ('sheet valid', 'pass', 'published', 'pass'): 11,229
+  ('sheet valid', 'pass', 'refused', 'fail'): 13
+  ('sheet valid', 'pass', 'refused', 'none'): 3,556
+  ('sheet valid', 'pass', 'refused', 'pass'): 9,696
+  ('sheet valid', 'untested', 'refused', 'none'): 2
+
+period status (scope, status) -> periods or accessions:
+  ('fallback', 'consistent'): 4,248
+  ('fallback', 'dqc_short_period'): 2,982
+  ('fallback', 'identity_disagrees'): 923
+  ('fallback', 'no_weighted_average'): 848
+  ('fallback', 'operand_count'): 397
+  ('fallback', 'operand_invalid'): 43
+  ('sheet valid', 'consistent'): 20,965
+  ('sheet valid', 'dqc_short_period'): 13,305
+  ('sheet valid', 'focus_unknown'): 2
+  ('sheet valid', 'identity_disagrees'): 3,528
+  ('sheet valid', 'operand_count'): 1,783
+  ('sheet valid', 'operand_invalid'): 353
+
+cover context - consistent eligible period end, days: n=4,248 min=-59 max=403
+consistent eligible periods with m(weighted average / implied) > 10: 0
+
+('rule', 'fallback', 'untested', 'published', 'fail'): 2
+  iid=9864 0001628280-25-039014 accepted 2025-08-07 cover=23,544,479,000 vs ['23,133,000', '23,157,895']
+  iid=9864 0001628280-25-050291 accepted 2025-11-06 cover=23,650,684,000 vs ['23,265,000', '23,259,259']
+
+('rule', 'fallback', 'untested', 'refused', 'fail'): 10
+  iid=4387 0001410578-24-001252 accepted 2024-08-09 cover=519,358,323 vs ['2,439', '2,440']
+  iid=9026 0000950170-24-056495 accepted 2024-05-09 cover=626,290,204,000 vs ['616,199,000', '575,300,000']
+  iid=9026 0000950170-24-092450 accepted 2024-08-07 cover=629,715,867,000 vs ['616,649,000', '552,925,000']
+  iid=9864 0001628280-24-021732 accepted 2024-05-08 cover=22,270,177,000 vs ['22,250,000', '22,303,382']
+  iid=9864 0001628280-24-036214 accepted 2024-08-08 cover=22,449,929,000 vs ['22,267,000', '22,297,232']
+  iid=9864 0001628280-24-046369 accepted 2024-11-07 cover=22,780,819,000 vs ['22,346,000', '22,328,610']
+  iid=9864 0001628280-25-023220 accepted 2025-05-07 cover=23,327,358,000 vs ['22,957,000', '22,927,928']
+  iid=1050139 0000950170-24-127199 accepted 2024-11-14 cover=42,284,524,000 vs ['1,586,000', '1,577,372']
+  iid=1052341 0001410578-25-001388 accepted 2025-05-30 cover=26,014,633 vs ['100', '100']
+  iid=1052583 0001410578-24-001560 accepted 2024-08-26 cover=13,387,636 vs ['1', '1']
+
+('rule', 'sheet valid', 'fail', 'refused', 'fail'): 5
+  iid=9744 0001493152-24-018902 accepted 2024-05-13 cover=35,382 vs ['35,469,638', '35,697,368']
+  iid=1048011 0001104659-26-060333 accepted 2026-05-13 cover=36,710 vs ['36,530,284', '36,501,899']
+  iid=1049576 0001213900-26-073223 accepted 2026-06-29 cover=5,413,160,000 vs ['2,285,000', '2,284,951']
+  iid=1052514 0001193125-26-223273 accepted 2026-05-14 cover=161,489 vs ['16,278,177', '11,900,000']
+  iid=1052938 0001213900-25-076683 accepted 2025-08-14 cover=31,545,268 vs ['1,000', '1,000']
+
+('rule', 'sheet valid', 'pass', 'published', 'fail'): 1
+  iid=1052454 0001193125-26-219829 accepted 2026-05-12 cover=80,107,104 vs ['80,032', '80,033']
+
+('rule', 'sheet valid', 'pass', 'refused', 'fail'): 13
+  iid=1052 0001699350-25-000011 accepted 2025-09-09 cover=20,359,960 vs ['102,775', '102,779']
+  iid=6252 0001140361-26-014773 accepted 2026-04-15 cover=87,912,831 vs ['836,814', '836,851']
+  iid=11023 0001493152-26-016858 accepted 2026-04-15 cover=4,858,417 vs ['33,300', '33,300']
+  iid=11032 0001104659-26-043782 accepted 2026-04-15 cover=929,491,578 vs ['8,148,275', '8,151,057']
+  iid=1048888 0000022701-25-000005 accepted 2025-05-15 cover=3,406,614 vs ['32,766', '32,766']
+  iid=1050613 0001493152-26-014291 accepted 2026-03-31 cover=233,366 vs ['543', '543']
+  iid=1050723 0001493152-26-043608 accepted 2026-09-21 cover=4,581,917 vs ['23,329', '23,329']
+  iid=1051108 0001683168-24-005711 accepted 2024-08-14 cover=32,146,403 vs ['275,113', '275,159']
+  iid=1051207 0001213900-24-099697 accepted 2024-11-18 cover=14,234,210 vs ['67,182', '67,182']
+  iid=1051383 0001493152-25-023464 accepted 2025-11-14 cover=93,112,148 vs ['666,376', '666,279']
+  iid=1051748 0001213900-25-021260 accepted 2025-03-06 cover=1,751,906 vs ['13,221', '13,221']
+  iid=1051757 0001683168-25-005920 accepted 2025-08-12 cover=47,444,907 vs ['427,361', '427,441']
+  iid=1058156 0001699350-25-000011 accepted 2025-09-09 cover=20,359,960 vs ['102,775', '102,779']

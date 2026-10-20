@@ -1,0 +1,157 @@
+{
+ "source": "https://companiesmarketcap.com/chesapeake-utilities/marketcap/ chart series (data = [...]; m in units of $100,000)",
+ "retrieved": "2026-10-20T16:16Z",
+ "note": "weekly points stamped Saturday 00:00 UTC carry the previous Friday's close; the intraday point is excluded",
+ "symbols": {
+  "CPK": [
+   {
+    "stamp": "2026-02-07",
+    "market_cap_usd": 3071500000
+   },
+   {
+    "stamp": "2026-02-14",
+    "market_cap_usd": 3207000000
+   },
+   {
+    "stamp": "2026-02-21",
+    "market_cap_usd": 3178400000
+   },
+   {
+    "stamp": "2026-02-28",
+    "market_cap_usd": 3215800000
+   },
+   {
+    "stamp": "2026-03-07",
+    "market_cap_usd": 3127800000
+   },
+   {
+    "stamp": "2026-03-14",
+    "market_cap_usd": 3127300000
+   },
+   {
+    "stamp": "2026-03-21",
+    "market_cap_usd": 2957300000
+   },
+   {
+    "stamp": "2026-03-28",
+    "market_cap_usd": 2978000000
+   },
+   {
+    "stamp": "2026-04-04",
+    "market_cap_usd": 3105600000
+   },
+   {
+    "stamp": "2026-04-11",
+    "market_cap_usd": 3157000000
+   },
+   {
+    "stamp": "2026-04-18",
+    "market_cap_usd": 3035400000
+   },
+   {
+    "stamp": "2026-04-25",
+    "market_cap_usd": 3062000000
+   },
+   {
+    "stamp": "2026-05-02",
+    "market_cap_usd": 3045200000
+   },
+   {
+    "stamp": "2026-05-09",
+    "market_cap_usd": 3034700000
+   },
+   {
+    "stamp": "2026-05-16",
+    "market_cap_usd": 2995100000
+   },
+   {
+    "stamp": "2026-05-23",
+    "market_cap_usd": 3037100000
+   },
+   {
+    "stamp": "2026-05-30",
+    "market_cap_usd": 2960300000
+   },
+   {
+    "stamp": "2026-06-06",
+    "market_cap_usd": 2971300000
+   },
+   {
+    "stamp": "2026-06-13",
+    "market_cap_usd": 2965800000
+   },
+   {
+    "stamp": "2026-06-20",
+    "market_cap_usd": 2895000000
+   },
+   {
+    "stamp": "2026-06-27",
+    "market_cap_usd": 3022200000
+   },
+   {
+    "stamp": "2026-07-04",
+    "market_cap_usd": 3000600000
+   },
+   {
+    "stamp": "2026-07-11",
+    "market_cap_usd": 3093500000
+   },
+   {
+    "stamp": "2026-07-18",
+    "market_cap_usd": 3199600000
+   },
+   {
+    "stamp": "2026-07-25",
+    "market_cap_usd": 3259400000
+   },
+   {
+    "stamp": "2026-08-01",
+    "market_cap_usd": 3187400000
+   },
+   {
+    "stamp": "2026-08-08",
+    "market_cap_usd": 3213000000
+   },
+   {
+    "stamp": "2026-08-15",
+    "market_cap_usd": 3256800000
+   },
+   {
+    "stamp": "2026-08-22",
+    "market_cap_usd": 3233400000
+   },
+   {
+    "stamp": "2026-08-29",
+    "market_cap_usd": 3199200000
+   },
+   {
+    "stamp": "2026-09-05",
+    "market_cap_usd": 3198000000
+   },
+   {
+    "stamp": "2026-09-12",
+    "market_cap_usd": 3129500000
+   },
+   {
+    "stamp": "2026-09-19",
+    "market_cap_usd": 3167100000
+   },
+   {
+    "stamp": "2026-09-26",
+    "market_cap_usd": 3104200000
+   },
+   {
+    "stamp": "2026-10-03",
+    "market_cap_usd": 3216900000
+   },
+   {
+    "stamp": "2026-10-10",
+    "market_cap_usd": 3226300000
+   },
+   {
+    "stamp": "2026-10-17",
+    "market_cap_usd": 3338200000
+   }
+  ]
+ }
+}

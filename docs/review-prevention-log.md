@@ -13491,3 +13491,19 @@ neighbouring container and match it.**
 - Enforced in: `app/services/pit_market_cap_build.py::_UNIT_VALUES_SQL`;
   `tests/test_pit_market_cap_build_db.py::test_unit_values_reader_selects_the_latest_active_economic_report_then_qualifies`;
   `scripts/measure_3908_premise.py`; spec Amendment 2 in `docs/specs/fundamentals/2026-10-16-3841-pit-market-cap.md`.
+
+### A same-filing comparator chosen alone inherits that filing's tagging errors (#3925, 2026-10-20)
+
+- Symptom: #3841's scale check was `untested` whenever a cover count's accession had no balance-sheet count, so CPK's
+  ×1000 10-Q covers published and then refused its correct counts as `shares_discontinuity`. The obvious fallback,
+  the same filing's `WeightedAverageNumberOfSharesOutstandingBasic`, disagreed with a balance-sheet `pass` on 103 of
+  13,988 published accessions: the weighted average itself is often tagged in thousands or millions (iid 6104: 145.2
+  against 145M). Net income / EPS alone failed on mis-scaled EPS (HAL's 1,480,000).
+- Prevention: before adopting a fallback comparator, score it against the primary check's verdict on the population
+  where both exist, and expect the fallback concept to carry its own tagging errors. Accept a share-unit fact only
+  when a published identity ties it to facts in another unit (DQC_0227's EPS = income / weighted average, with its
+  one-cent tolerance and short-period minimums). Do the penny comparison in exact decimals: 101 / 100 − 1 exceeds
+  0.01 in float.
+- Enforced in: `app/services/pit_market_cap.py::period_status` and `weighted_average_scale`;
+  `tests/test_pit_market_cap_scale_fallback.py`; `scripts/measure_3925_premise.py` (the independent oracle);
+  `scripts/ab_3925_scale_fallback.py`; spec Amendment 3 in `docs/specs/fundamentals/2026-10-16-3841-pit-market-cap.md`.

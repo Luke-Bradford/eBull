@@ -16,7 +16,12 @@ from typing import Any
 import psycopg
 import pytest
 
-from app.services.pit_market_cap_build import _TRADES_SQL, _UNIT_VALUES_SQL, run_market_cap_pit_rebuild
+from app.services.pit_market_cap_build import (
+    _IDENTITY_FACTS_SQL,
+    _TRADES_SQL,
+    _UNIT_VALUES_SQL,
+    run_market_cap_pit_rebuild,
+)
 from tests.fixtures.ebull_test_db import STOCKS_TYPE_ID, seed_universe_anchor, test_database_url
 
 Conn = psycopg.Connection[Any]
@@ -214,6 +219,36 @@ def test_trades_reader_keeps_only_the_instruments_own_issuer(ebull_test_conn: Co
         _TRADES_SQL, {"ids": [1], "first": date(2024, 6, 1), "report_floor": date(2023, 6, 1)}
     ).fetchall()
     assert sorted(row[1] for row in rows) == ["F-OWN", "F-PRED"]
+
+
+def test_identity_reader_reads_by_cover_accession_without_the_context_filter(ebull_test_conn: Conn) -> None:
+    """Spec Amendment 3 (#3925): the EPS-identity operands of an accession holding a cover fact the build keeps,
+    whatever their period end; nothing from an accession without one, and no instant (start-less) or NaN row."""
+    conn = ebull_test_conn
+    _seed(conn)  # A-1 holds a cover fact dated 2026-07-25
+    rows = [
+        ("A-1", "WeightedAverageNumberOfSharesOutstandingBasic", "shares", "2022-01-01", "2022-12-31", "1000000"),
+        ("A-1", "EarningsPerShareBasic", "USD/shares", "2026-01-01", "2026-06-30", "1.50"),
+        ("A-1", "NetIncomeLoss", "USD", "2026-01-01", "2026-06-30", "NaN"),
+        ("A-1", "NetIncomeLoss", "USD", None, "2026-06-30", "1500000"),
+        ("A-1", "EarningsPerShareBasic", "USD", "2026-01-01", "2026-06-30", "1.50"),  # wrong unit
+        ("B-2", "NetIncomeLoss", "USD", "2026-01-01", "2026-06-30", "1500000"),  # no cover fact in B-2
+    ]
+    for accession, concept, unit, start, end, value in rows:
+        conn.execute(
+            "INSERT INTO financial_facts_raw (instrument_id, taxonomy, concept, unit, period_start, period_end, val, "
+            "accession_number, form_type, filed_date, fiscal_period) "
+            "VALUES (1, 'us-gaap', %s, %s, %s, %s, %s, %s, '10-Q', '2026-08-01', 'Q2')",
+            (concept, unit, start, end, value, accession),
+        )
+    conn.commit()
+
+    got = conn.execute(_IDENTITY_FACTS_SQL, {"ids": [1], "min_context": date(2023, 4, 1)}).fetchall()
+    assert sorted((r[1], r[2], str(r[4])) for r in got) == [
+        ("A-1", "EarningsPerShareBasic", "2026-06-30"),
+        ("A-1", "WeightedAverageNumberOfSharesOutstandingBasic", "2022-12-31"),
+    ]
+    assert {r[6] for r in got} == {"Q2"}
 
 
 def test_unit_values_reader_selects_the_latest_active_economic_report_then_qualifies(ebull_test_conn: Conn) -> None:

@@ -84,6 +84,7 @@ from app.services.pit_market_cap import (
     FloatFact,
     Gate1Quarter,
     Gate2Result,
+    IdentityFact,
     ShareFact,
     Step,
     Trade,
@@ -380,6 +381,20 @@ def timed_share_facts(
     return tuple(out), None
 
 
+def identity_facts(
+    rows: Iterable[tuple[str, str, date, date, Decimal, str | None]], index: SubmissionsIndex
+) -> dict[str, tuple[IdentityFact, ...]]:
+    """Each accession's EPS-identity operand rows (accession, concept, start, end, value, fiscal_period), a
+    predecessor's accession skipped as in ``timed_share_facts``. Timing is the selection's: only a selected (timed)
+    accession's rows are ever evaluated."""
+    predecessor = index.predecessor if isinstance(index, InstrumentIndex) else frozenset()
+    out: dict[str, list[IdentityFact]] = defaultdict(list)
+    for accession, concept, start, end, value, fiscal_period in rows:
+        if accession not in predecessor:
+            out[accession].append(IdentityFact(concept, start, end, value, fiscal_period))
+    return {accession: tuple(facts) for accession, facts in out.items()}
+
+
 def public_floats(rows: Iterable[FactRow], index: SubmissionsIndex) -> tuple[FloatFact, ...]:
     """Per context date, the value from the latest-accepted accession; skipped when that accession holds two values
     for it, or when no accession for it can be timed. In-scope forms only."""
@@ -444,11 +459,18 @@ def build_instrument(
     multiclass: bool,
     trades: Sequence[Trade],
     floats: Sequence[FloatFact],
+    identity: Mapping[str, Sequence[IdentityFact]] | None = None,
 ) -> tuple[tuple[Step, ...], dict[str, Counter[str]], dict[date, Gate1Quarter], tuple[Gate2Result, ...]]:
     """Steps for one instrument with Gates 1 and 2 applied (Gate 2 on Gate-1-applied steps), the gate tallies, and
     each gate's per-quarter / per-float results."""
     steps = build_steps(
-        facts, anchors, step_sessions, closes=closes, dollar_volume=dollar_volume, multiclass=multiclass
+        facts,
+        anchors,
+        step_sessions,
+        closes=closes,
+        dollar_volume=dollar_volume,
+        multiclass=multiclass,
+        identity=identity,
     )
     quarters, untested = gate1(trades, closes, anchors)
     steps = apply_gate1(steps, quarters)
@@ -507,6 +529,26 @@ _FACTS_SQL = """
         OR (f.taxonomy = 'dei' AND f.concept = 'EntityPublicFloat' AND f.unit = 'USD'))
       AND f.period_end >= %(min_context)s
       AND f.val IS NOT NULL AND f.val <> 'NaN'::numeric
+"""
+
+# Spec Amendment 3 (#3925): the EPS-identity operands of every accession holding a cover fact the read above keeps.
+# By accession, without the context filter: a period can end before the cover read's earliest context.
+_IDENTITY_FACTS_SQL = """
+    SELECT f.instrument_id, f.accession_number, f.concept, f.period_start, f.period_end, f.val, f.fiscal_period
+    FROM financial_facts_raw f
+    WHERE f.instrument_id = ANY(%(ids)s::bigint[])
+      AND f.taxonomy = 'us-gaap'
+      AND ((f.concept = 'WeightedAverageNumberOfSharesOutstandingBasic' AND f.unit = 'shares')
+        OR (f.concept = 'EarningsPerShareBasic' AND f.unit = 'USD/shares')
+        OR (f.concept IN ('NetIncomeLossAvailableToCommonStockholdersBasic', 'NetIncomeLoss') AND f.unit = 'USD'))
+      AND f.period_start IS NOT NULL AND f.period_start <= f.period_end
+      AND f.val IS NOT NULL AND f.val <> 'NaN'::numeric
+      AND EXISTS (
+          SELECT 1 FROM financial_facts_raw c
+          WHERE c.instrument_id = f.instrument_id AND c.accession_number = f.accession_number
+            AND c.taxonomy = 'dei' AND c.concept = 'EntityCommonStockSharesOutstanding' AND c.unit = 'shares'
+            AND c.period_end >= %(min_context)s
+      )
 """
 
 _BARS_SQL = """
@@ -716,6 +758,10 @@ def iter_instrument_builds(
             _FACTS_SQL, {**params, "min_context": min_context}
         ):
             facts_by[iid].append(FactRow(taxonomy, concept, accession, context, value))
+        identity_by: dict[int, list[tuple[str, str, date, date, Decimal, str | None]]] = defaultdict(list)
+        for iid, *identity_row in conn.execute(_IDENTITY_FACTS_SQL, {**params, "min_context": min_context}):
+            accession, concept, start, end, value, fiscal_period = identity_row
+            identity_by[iid].append((accession, concept, start, end, value, fiscal_period))
 
         closes_by: dict[int, dict[date, float]] = defaultdict(dict)
         bars_through: dict[int, date] = {}
@@ -807,6 +853,7 @@ def iter_instrument_builds(
                 multiclass=any(c in multiclass_ciks for c in (cik, *ciks)),
                 trades=resolve_amendments(trades_by.get(iid, ()), sessions[0]),
                 floats=public_floats(facts_by.get(iid, ()), index),
+                identity=identity_facts(identity_by.get(iid, ()), index),
             )
             tallies.update(submissions)
             results.append(
