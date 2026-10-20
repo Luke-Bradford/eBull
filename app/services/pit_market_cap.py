@@ -53,6 +53,8 @@ GATE1_MIN_DATES: Final = 2
 GATE2_FLOAT_RATIO: Final = 0.9
 # Rule 13f-1(a)(1): a 13F-HR is due within 45 days after the calendar quarter end.
 FILING_DUE_DAYS: Final = 45
+# Spec Amendment 2 (#3908): the table the anchors' 13F unit values are read from.
+ANCHOR_SOURCE: Final = "ownership_institutions_observations"
 # 10-K, 10-Q, their amendments and transition forms (``form_family``); FPI forms are out of scope.
 IN_SCOPE_FAMILIES: Final = frozenset({"10-K", "10-Q"})
 
@@ -109,6 +111,7 @@ def rule_version() -> str:
         "gate1": [*GATE1_BAND, GATE1_MIN_TRADES, GATE1_MIN_DATES],
         "gate2": GATE2_FLOAT_RATIO,
         "filing_due_days": FILING_DUE_DAYS,
+        "anchor_source": ANCHOR_SOURCE,
         "families": sorted(IN_SCOPE_FAMILIES),
         "max_shares_age_months": MAX_SHARES_AGE_MONTHS,
         "scale_tolerance": str(SCALE_TOLERANCE),
