@@ -127,9 +127,10 @@ def test_published_at_the_measured_factor(_seed: psycopg.Connection[Any], iid: i
     assert row["market_cap_live"] == cap
     assert float(row["fcf_yield"]) == pytest.approx(float(Decimal("5e10") / cap))
     assert float(row["p_fcf_ratio"]) == pytest.approx(float(cap / Decimal("5e10")))
-    # Legacy arm: EV and the revenue multiples stay structurally NULL; per-share P/B is unchanged.
+    # Legacy arm: EV and the revenue multiples stay structurally NULL. Since sql/509 (#3903) P/B divides the cap by the
+    # stored quarterly equity, none seeded here; tests/test_instrument_valuation_pb_total_form.py covers it.
     assert row["enterprise_value"] is None and row["price_sales"] is None
-    assert row["pb_ratio"] == 5
+    assert row["pb_ratio"] is None
     assert row["market_cap_pit"]["split_factor"] == float(iid == 102 and 2 or iid == 103 and 0.5 or 1)
     assert row["market_cap_pit"]["price_date"] == SESSION.isoformat()
 
@@ -177,8 +178,8 @@ def test_quote_after_the_session_does_not_price_the_cap(_seed: psycopg.Connectio
     assert row["current_price"] == 160
     assert row["valuation_price"] == 150
     assert row["market_cap_live"] == Decimal("1.5e11")
-    # Legacy P/B stays per-share on the selected price (#3903 left it there).
-    assert float(row["pb_ratio"]) == pytest.approx(160 / 30)
+    # Since sql/509 (#3903) no P/B is priced at current_price; with no stored quarterly equity it is NULL.
+    assert row["pb_ratio"] is None
 
 
 @pytest.mark.db

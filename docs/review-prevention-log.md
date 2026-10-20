@@ -13455,3 +13455,23 @@ neighbouring container and match it.**
 - Enforced in: `sql/508_financial_periods_ttm_dividend_window_guard.sql`,
   `tests/test_financial_periods_ttm_dividend_window_guard.py`, and `scripts/measure_3903_dividend_window_span.py`
   plus the acceptance script's increment and end-anchored checks. Spec Amendment 2 and its build note.
+
+### A source rule's validity window has two ends; citing one and deferring the other publishes stale values (#3903, 2026-10-20)
+
+- Symptom (#3903 `pb_ratio` build, acceptance 2026-10-20 12:13Z): PURR published a P/B of 2.96 against
+  stockanalysis's 0.96. The view read the stored Q3 2026-03-31 equity (743.5M). A stored FY 2026-06-30 row, filed
+  2026-08-27, carried 1,872.9M, and the market cap already used the post-issuance PIT count. The spec cited JKP's
+  `end_date = min(intnx(…next_start_date, -1…), intnx(…datadate, 18…))` in its source table. It applied the 18-month
+  end and recorded the next-value end as a departure. A first amendment then tried to waive the slot by attribution,
+  and Codex checkpoint 1 rejected it: the waiver divided out a price and dropped filed-figure verification.
+- Prevention: when a cited source rule bounds a value's validity, implement every bound it states, or refuse the
+  value while a bound is deferred to a follow-up. A departure that leaves a stale value published is a NULL, not a
+  note.
+- Prevention: an aggregator's P/B is not always cap ÷ equity. stockanalysis priced CD's book value per share on the
+  quarter-end balance-sheet count: 6.99 ÷ (46,767,178 ÷ 79,443,800) = 11.874, while its market cap used the later
+  cover count. Decompose a failing reference on the page's own definition, reproduced from filed figures. Never waive
+  it by re-pricing it.
+- Enforced in: `sql/509_instrument_valuation_pb_total_form.sql` (the later-period refusal),
+  `tests/test_instrument_valuation_pb_total_form.py::test_a_later_stored_period_ends_the_quarter_equity`, and
+  `scripts/measure_3903_pb_acceptance.py` (the rule-2 count exception with per-factor bands). Spec
+  `docs/specs/fundamentals/2026-10-20-3903-pb-total-form.md` Amendment 1.

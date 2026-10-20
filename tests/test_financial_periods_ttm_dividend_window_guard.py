@@ -198,6 +198,8 @@ def test_rollback_restores_sql_507(_seed: psycopg.Connection[Any]) -> None:
     _apply(_seed, SQL_507)
     prior = _state(_seed)
     _seed.rollback()
+    # sql/507's valuation body explicitly: a later migration (sql/509) replaces it in the test database.
+    _apply(_seed, SQL_507)
     _apply(_seed, SQL_508)
     forward = _state(_seed)
     _apply(_seed, ROLLBACK_508)
