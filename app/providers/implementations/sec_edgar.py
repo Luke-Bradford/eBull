@@ -120,7 +120,11 @@ _PREFETCH_BODY_CACHE: contextvars.ContextVar[dict[str, str] | None] = contextvar
 # all 253 stored DEF 14A cases sit there. Stripped at both raw body boundaries
 # (here and ``sec_pipelined_fetcher.prefetch_document_texts``) so stored
 # bodies and their hashes are the document as filed.
-_SEC_EDGE_SCRIPT_RE = re.compile(r'<script type="text/javascript"\s+src="/[^"<>]*"></script>(?=</(?i:body)>)')
+# The src is one root-relative path over the token alphabet every observed
+# token uses (letters, digits, ``_``, ``-``, ``/``): no query, no ``//`` host.
+_SEC_EDGE_SCRIPT_RE = re.compile(
+    r'<script type="text/javascript"\s+src="/(?!/)[A-Za-z0-9_/-]+"></script>(?=</(?i:body)>)'
+)
 
 
 def strip_sec_edge_script(text: str) -> str:

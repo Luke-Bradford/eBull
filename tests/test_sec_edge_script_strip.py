@@ -51,16 +51,16 @@ def test_a_rotated_token_strips_the_same() -> None:
 @pytest.mark.parametrize(
     "kept",
     [
-        # An absolute or query-bearing src is not the edge's root-relative shape.
-        '<script type="text/javascript"  src="https://example.com/x.js"></script>',
-        # A script with a body is not the edge's empty tag.
-        '<script type="text/javascript"  src="/a">alert(1)</script>',
+        # Each shape sits where the edge puts its tag, so only the shape decides.
+        '<script type="text/javascript"  src="https://example.com/x.js"></script></body>',
+        '<script type="text/javascript"  src="//example.com/asset.js"></script></body>',
+        '<script type="text/javascript"  src="/asset.js?v=1"></script></body>',
+        '<script type="text/javascript"  src="/a">alert(1)</script></body>',
         # SEC's own XBRL viewer script inside a .txt submission (R pages).
-        '<script type="text/javascript" src="Show.js">/* Do Not Remove This Comment */</script>',
+        '<script type="text/javascript" src="Show.js">/* Do Not Remove This Comment */</script></body>',
         # The edge's shape anywhere but immediately before </body> is not the edge's tag.
         '<p><script type="text/javascript"  src="/a"></script></p></body>',
-        # Text that merely mentions the word.
-        "<p>The script of the meeting is below.</p>",
+        "<p>The script of the meeting is below.</p></body>",
     ],
 )
 def test_strip_leaves_other_shapes_alone(kept: str) -> None:
@@ -90,6 +90,14 @@ def test_prefetch_document_texts_returns_the_stripped_body(monkeypatch: pytest.M
     monkeypatch.setattr(httpx.AsyncClient, "__init__", patched_init)
     url = "https://www.sec.gov/Archives/edgar/data/6955/x.htm"
     assert prefetch_document_texts([url], user_agent="test/1.0") == {url: _FILED}
+
+
+def test_every_known_token_is_stripped() -> None:
+    from scripts.repair_3899_sec_edge_script import _KNOWN_TOKENS
+
+    for token in _KNOWN_TOKENS:
+        injected = _INJECTED.replace("/-QOA/64Vm/ig/zTjS/gt8A/m1aEQkGLcNmQ4Q/XiUsWQ/Yl0/HHTAfbn4", token)
+        assert strip_sec_edge_script(injected) == _FILED
 
 
 def test_swept_hash_classification() -> None:
