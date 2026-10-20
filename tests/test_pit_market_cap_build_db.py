@@ -219,7 +219,8 @@ def test_trades_reader_keeps_only_the_instruments_own_issuer(ebull_test_conn: Co
 def test_unit_values_reader_selects_the_latest_active_economic_report_then_qualifies(ebull_test_conn: Conn) -> None:
     """Spec Amendment 2 (#3908): the anchors read ``ownership_institutions_observations``. Superseded rows and voting
     overlays are out before selection; the latest report is chosen over every exposure; only then do its EQUITY rows
-    qualify, so a newer options-only report removes the filer instead of reviving its older equity row."""
+    qualify, so a newer options-only report removes the filer instead of reviving its older equity row. ``NOW`` is the
+    module's fixed clock (defined above ``_seed``), used here as the superseded row's ``known_to``."""
     conn = ebull_test_conn
     _seed(conn)
     quarter = date(2026, 3, 31)

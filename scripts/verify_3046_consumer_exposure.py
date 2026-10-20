@@ -507,6 +507,8 @@ INVENTORY: tuple[Occurrence, ...] = (
     ),
     # --- #3841 point-in-time market cap ----------------------------------------
     Occurrence(
+        # Line 515 holds ``_BARS_SQL``'s ``FROM price_daily`` after #3908's docstring grew by three lines;
+        # ``tests/test_3046_consumer_inventory.py::test_inventory_lines_point_at_their_occurrence`` asserts it.
         "app/services/pit_market_cap_build.py",
         515,
         "_BARS_SQL closes and 21-bar mean dollar volume",
