@@ -336,8 +336,11 @@ def drive(base: Path, reference_path: Path) -> int:
                 continue
             covering = _covering(b_steps, [s["valid_from"] for s in b_steps], session)
             close = closes.get((iid, session))
-            if covering is None or close is None or covering["split_factor"] is None:
-                fail("6", f"{label}: no arm-B cap on {session}")
+            if close is None:  # Amendment 2's rule: no stored close makes the point uncomparable, not a pass
+                print(f"    {session} (point {point['stamp']}): uncomparable, no stored close")
+                continue
+            if covering is None or covering["split_factor"] is None:
+                fail("6", f"{label}: no arm-B cap on published session {session}")
                 continue
             cap = close * float(covering["selection"]["shares"]) * covering["split_factor"]
             ratio = cap / point["market_cap_usd"]
