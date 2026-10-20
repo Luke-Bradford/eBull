@@ -1,0 +1,77 @@
+arm imports /Users/lukebradford/Dev/.ebull-autonomy/app/services/pit_market_cap_build.py
+arm imports /tmp/ebull-3925-base/app/services/pit_market_cap_build.py
+snapshot 00000007-00006876-1; build_date 2026-10-20 (build 9); arm A 33360af2a201469ec8f8ba07677163342838eeaa; arm B bbcda57167f67097df728dd01708524518ef12ac
+
+fail 6, newly published counts against https://companiesmarketcap.com/chesapeake-utilities/marketcap/ chart series (data = [...]; m in units of $100,000) (retrieved 2026-10-20T16:16Z):
+  CPK iid=9864 0001628280-26-011753 shares 23936406.000000: 49 sessions 2026-02-26..2026-05-06; scale pass/weighted_average_basic
+    2026-02-27 (point 2026-02-28): B 3.2381B vs 3.2158B = 1.0069 ok
+    2026-03-06 (point 2026-03-07): B 3.1613B vs 3.1278B = 1.0107 ok
+    2026-03-13 (point 2026-03-14): B 3.1141B vs 3.1273B = 0.9958 ok
+    2026-03-20 (point 2026-03-21): B 2.9552B vs 2.9573B = 0.9993 ok
+    2026-03-27 (point 2026-03-28): B 2.9693B vs 2.9780B = 0.9971 ok
+    2026-04-02 (point 2026-04-04): B 3.0897B vs 3.1056B = 0.9949 ok
+    2026-04-10 (point 2026-04-11): B 3.1457B vs 3.1570B = 0.9964 ok
+    2026-04-17 (point 2026-04-18): B 3.0236B vs 3.0354B = 0.9961 ok
+    2026-04-24 (point 2026-04-25): B 3.0469B vs 3.0620B = 0.9951 ok
+    2026-05-01 (point 2026-05-02): B 3.0363B vs 3.0452B = 0.9971 ok
+  CPK iid=9864 0001628280-26-031397 shares 24004761.000000: 63 sessions 2026-05-07..2026-08-06; scale pass/weighted_average_basic
+    2026-05-08 (point 2026-05-09): uncomparable, no stored close
+    2026-05-15 (point 2026-05-16): B 2.9780B vs 2.9951B = 0.9943 ok
+    2026-05-22 (point 2026-05-23): B 3.0335B vs 3.0371B = 0.9988 ok
+    2026-05-29 (point 2026-05-30): B 2.9591B vs 2.9603B = 0.9996 ok
+    2026-06-05 (point 2026-06-06): B 2.9567B vs 2.9713B = 0.9951 ok
+    2026-06-12 (point 2026-06-13): B 2.9651B vs 2.9658B = 0.9998 ok
+    2026-06-18 (point 2026-06-20): B 2.8722B vs 2.8950B = 0.9921 ok
+    2026-06-26 (point 2026-06-27): B 3.0200B vs 3.0222B = 0.9993 ok
+    2026-07-02 (point 2026-07-04): B 2.9958B vs 3.0006B = 0.9984 ok
+    2026-07-10 (point 2026-07-11): B 3.0849B vs 3.0935B = 0.9972 ok
+    2026-07-17 (point 2026-07-18): B 3.1919B vs 3.1996B = 0.9976 ok
+    2026-07-24 (point 2026-07-25): B 3.2570B vs 3.2594B = 0.9993 ok
+    2026-07-31 (point 2026-08-01): B 3.1833B vs 3.1874B = 0.9987 ok
+  CPK iid=9864 0001628280-26-054477 shares 24106455.000000: 52 sessions 2026-08-07..2026-10-20; scale pass/weighted_average_basic
+    2026-08-07 (point 2026-08-08): B 3.2115B vs 3.2130B = 0.9995 ok
+    2026-08-14 (point 2026-08-15): B 3.2517B vs 3.2568B = 0.9984 ok
+    2026-08-21 (point 2026-08-22): B 3.2312B vs 3.2334B = 0.9993 ok
+    2026-08-28 (point 2026-08-29): B 3.1941B vs 3.1992B = 0.9984 ok
+    2026-09-04 (point 2026-09-05): B 3.1862B vs 3.1980B = 0.9963 ok
+    2026-09-11 (point 2026-09-12): B 3.1288B vs 3.1295B = 0.9998 ok
+    2026-09-18 (point 2026-09-19): B 3.1589B vs 3.1671B = 0.9974 ok
+    2026-09-25 (point 2026-09-26): B 3.1042B vs 3.1042B = 1.0000 ok
+    2026-10-02 (point 2026-10-03): B 3.0688B vs 3.2169B = 0.9539 ok
+    2026-10-09 (point 2026-10-10): B 3.0791B vs 3.2263B = 0.9544 ok
+    2026-10-16 (point 2026-10-17): B 3.1780B vs 3.3382B = 0.9520 ok
+
+scale outcomes by (comparator, outcome), steps:
+  A: {('None', 'fail'): 38, ('None', 'pass'): 73912, ('None', 'untested'): 22343}
+  B: {('None', 'untested'): 8014, ('balance_sheet', 'fail'): 38, ('balance_sheet', 'pass'): 73912, ('weighted_average_basic', 'fail'): 22, ('weighted_average_basic', 'pass'): 14307}
+
+transitions, all sessions: {
+ "published -> published": 1113621,
+ "published -> refused (shares_scale_conflict)": 138,
+ "refused -> published (shares_discontinuity)": 164,
+ "refused -> refused": 892050
+}
+transitions at 2026-10-20: {
+ "published -> published": 2846,
+ "refused -> published (shares_discontinuity)": 1,
+ "refused -> refused": 786
+}
+eligible untested sessions published in B with no effective discontinuity reference: 11,349
+
+traced cases (12):
+  [TRACE 10] CPK iid=9864 from 2025-08-08 (shares_scale_conflict): scale B fail/weighted_average_basic; discontinuity A {'outcome': 'untested', 'reference': None} B {'outcome': 'untested', 'reference': None}
+  [TRACE 10] CPK iid=9864 from 2025-10-31 (shares_scale_conflict): scale B fail/weighted_average_basic; discontinuity A {'outcome': 'untested', 'reference': None} B {'outcome': 'untested', 'reference': None}
+  [TRACE 10] CPK iid=9864 from 2025-11-03 (shares_scale_conflict): scale B fail/weighted_average_basic; discontinuity A {'outcome': 'untested', 'reference': None} B {'outcome': 'untested', 'reference': None}
+  [TRACE 10] CPK iid=9864 from 2025-11-07 (shares_scale_conflict): scale B fail/weighted_average_basic; discontinuity A {'outcome': 'pass', 'reference': {'accession': '0001628280-25-039014', 'context': '2025-08-04', 'shares': '23544479000.000000', 'split_factor': 1.0}} B {'outcome': 'untested', 'reference': None}
+  [TRACE 10] CPK iid=9864 from 2025-11-21 (shares_scale_conflict): scale B fail/weighted_average_basic; discontinuity A {'outcome': 'pass', 'reference': {'accession': '0001628280-25-039014', 'context': '2025-08-04', 'shares': '23544479000.000000', 'split_factor': 1.0}} B {'outcome': 'untested', 'reference': None}
+  [TRACE 10] CPK iid=9864 from 2025-11-24 (shares_scale_conflict): scale B fail/weighted_average_basic; discontinuity A {'outcome': 'pass', 'reference': {'accession': '0001628280-25-039014', 'context': '2025-08-04', 'shares': '23544479000.000000', 'split_factor': 1.0}} B {'outcome': 'untested', 'reference': None}
+  [TRACE 10] CPK iid=9864 from 2025-12-12 (shares_scale_conflict): scale B fail/weighted_average_basic; discontinuity A {'outcome': 'pass', 'reference': {'accession': '0001628280-25-039014', 'context': '2025-08-04', 'shares': '23544479000.000000', 'split_factor': 1.0}} B {'outcome': 'untested', 'reference': None}
+  [TRACE 10] CPK iid=9864 from 2025-12-15 (shares_scale_conflict): scale B fail/weighted_average_basic; discontinuity A {'outcome': 'pass', 'reference': {'accession': '0001628280-25-039014', 'context': '2025-08-04', 'shares': '23544479000.000000', 'split_factor': 1.0}} B {'outcome': 'untested', 'reference': None}
+  [TRACE 10] CPK iid=9864 from 2026-02-06 (shares_scale_conflict): scale B fail/weighted_average_basic; discontinuity A {'outcome': 'pass', 'reference': {'accession': '0001628280-25-039014', 'context': '2025-08-04', 'shares': '23544479000.000000', 'split_factor': 1.0}} B {'outcome': 'untested', 'reference': None}
+  [TRACE 10] CPK iid=9864 from 2026-02-09 (shares_scale_conflict): scale B fail/weighted_average_basic; discontinuity A {'outcome': 'pass', 'reference': {'accession': '0001628280-25-039014', 'context': '2025-08-04', 'shares': '23544479000.000000', 'split_factor': 1.0}} B {'outcome': 'untested', 'reference': None}
+  [TRACE 10] CPK iid=9864 from 2026-02-10 (shares_scale_conflict): scale B fail/weighted_average_basic; discontinuity A {'outcome': 'pass', 'reference': {'accession': '0001628280-25-039014', 'context': '2025-08-04', 'shares': '23544479000.000000', 'split_factor': 1.0}} B {'outcome': 'untested', 'reference': None}
+  [TRACE 10] CPK iid=9864 from 2026-02-11 (shares_scale_conflict): scale B fail/weighted_average_basic; discontinuity A {'outcome': 'pass', 'reference': {'accession': '0001628280-25-039014', 'context': '2025-08-04', 'shares': '23544479000.000000', 'split_factor': 1.0}} B {'outcome': 'untested', 'reference': None}
+
+structural failures: {}
+RESULT: PASS (pending traces)
+exit 0
