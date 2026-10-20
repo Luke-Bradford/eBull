@@ -13520,3 +13520,13 @@ neighbouring container and match it.**
 - Enforced in: `app/services/cusip_resolver.py::lock_cusip` / `try_lock_cusip`;
   `tests/test_cusip_resolver_openfigi.py::TestPromotionUnderTheCusipLock`; spec Amendment 1 in
   `docs/specs/etl/2026-10-20-2327-13dg-cusip-bridge.md`.
+
+### A new pre-step ahead of an existing job step can cost that step (#2327, 2026-10-20)
+
+- Symptom: #2327 put `ensure_window_lists` and the 13D/G bridge ahead of `backfill_cusip_coverage` in
+  `cusip_universe_backfill`, unguarded. An SEC 5xx or a bridge error would have aborted the job before the fuzzy pass,
+  while the code comment said a bridge refusal is an abstention (review bot, PR #3929).
+- Prevention: when adding a step ahead of an existing one in a job, decide whether its failure may cost the existing
+  step and say so in the code. If it may not, catch it, roll the connection back, run the existing step, then
+  re-raise so the run still records as failed.
+- Enforced in: `app/workers/scheduler.py::cusip_universe_backfill`; `tests/test_cusip_universe_backfill_job.py`.

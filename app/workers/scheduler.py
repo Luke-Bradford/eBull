@@ -10655,11 +10655,19 @@ def cusip_universe_backfill() -> None:
             # #2327 — the 13D/G bridge runs ahead of the fuzzy pass, which selects only instruments without a
             # `sec` CUSIP and so skips what the bridge mapped. A bridge refusal is an abstention; the other
             # routes run as before.
+            # A bridge failure must not cost the fuzzy pass: it is caught, the fuzzy pass runs, and the failure is
+            # re-raised after it so the run still records as failed.
             bridge: BridgeResult | None = None
+            bridge_error: Exception | None = None
             if settings.cusip_13dg_bridge_enabled:
-                lists = ensure_window_lists(conn)
-                conn.commit()  # the lists are raw SEC bodies; each bridge write is then its own transaction
-                bridge = bind_13dg_cusips(conn, lists=lists, job_run_id=tracker.run_id)
+                try:
+                    lists = ensure_window_lists(conn)
+                    conn.commit()  # the lists are raw SEC bodies; each bridge write is then its own transaction
+                    bridge = bind_13dg_cusips(conn, lists=lists, job_run_id=tracker.run_id)
+                except Exception as exc:  # noqa: BLE001 — re-raised below, after the fuzzy pass
+                    conn.rollback()
+                    logger.exception("cusip_universe_backfill: 13D/G bridge failed; running the fuzzy pass")
+                    bridge_error = exc
             result = backfill_cusip_coverage(conn)
 
         tracker.row_count = result.inserted + (sum(bridge.inserted.values()) if bridge is not None else 0)
@@ -10686,6 +10694,8 @@ def cusip_universe_backfill() -> None:
             result.sweep.promoted,
             result.sweep.rewashed,
         )
+        if bridge_error is not None:
+            raise bridge_error
 
 
 def sec_13f_quarterly_sweep(params: Mapping[str, Any]) -> None:
