@@ -1,27 +1,32 @@
-"""#3903 acceptance: ``instrument_valuation.dividend_yield`` as TTM cash dividends paid / market cap (sql/507).
+"""#3903 acceptance: ``instrument_valuation.dividend_yield`` as TTM cash dividends paid / market cap (sql/507, sql/508).
 
 Spec: ``docs/specs/fundamentals/2026-10-19-3903-dividend-yield-total-form.md`` ("Acceptance"). Each arm is a pair of
 TEMPORARY views, ``ttm_<arm>`` and ``val_<arm>``, the valuation body rewritten to read its own TTM view by name; the
 script asserts from ``pg_depend`` that each valuation arm depends on its own TTM arm and on no other. The control is
 sql/220's ``financial_periods_ttm`` and sql/506's ``instrument_valuation`` (``sql/rollback/507_…``, byte for byte),
 built from the files rather than read as deployed, because the pre-push smoke applies sql/507 to the dev database
-before this runs; the treatment is sql/507's two bodies. Everything is read in one REPEATABLE READ transaction that is
-rolled back: nothing is written. Run it after the 08:20Z PIT build and before the evening candle refresh (spec).
+before this runs. Amendment 2: the prior arm is sql/507's two bodies, and the treatment is sql/508's TTM body (the
+window guard on ``dividends_paid_ttm_observed``) with sql/507's valuation body. Everything is read in one REPEATABLE
+READ transaction that is rolled back: nothing is written. Run it after the 08:20Z PIT build and before the evening
+candle refresh (spec).
 
 Prints:
 
 1. wiring over the full population: both views' ordered columns and types per arm; the row sets; every treatment
    ``dividend_yield`` against ``proposed_yield`` (the premise script's construction over sql/220's window rebuilt
-   from ``financial_periods``) in ``Decimal``, NULL decisions included; every other column of both views against the
-   control;
+   from ``financial_periods``, with sql/508's conditions) in ``Decimal``, NULL decisions included; every other column
+   of both views against the control; the increment, prior against treatment on every row and column of both views,
+   ``dividends_paid_ttm_observed`` against an independent evaluation on every TTM row; and the end-anchored classes;
 2. the A/B: section 1's table of the premise script, today (control) against the treatment, with each NULL's cause;
 3. the input policy over every publication: the member check (``priority_value`` as of each member's filed date),
    the input defects (newly exposed ones marked), every publication further from the rebuilt common-only yield than
    today and outside [0.95, 1.05] traced to a member defect or to the concept priority, and every publication
    without a resolved comparison;
-4. independent values: GME and BJRI NULL by their causes; every zero publication with its members and member check;
+4. independent values: GME, BJRI and the Amendment 2 names NULL by their causes; every zero publication with its
+   members and member check;
    the external yields in ``REFERENCE`` per slot, with the exact identity
-   ours ÷ external = (P_x / V) × (N_f / N) × (D / C) × (C / (N_f · E)) and the spec's pass rule and minimum coverage;
+   ours ÷ external = (P_x / V) × (N_f / N) × (D / C) × (C / (N_f · E)) and the spec's pass rule and minimum coverage,
+   and the mandatory 364-day boundary slot;
 5. the ``ranking_pot_exposure.dividend_yield`` reader over the latest v1 and v2 snapshot universes, both arms;
 6. latency of per-instrument and bulk reads of both views, both arms.
 
@@ -53,7 +58,7 @@ from app.security.master_key import resolve_data_dir
 from app.services import ranking_pot_exposure as exposure
 from app.services.ranking_pot_rebalance import decode_snapshot
 from scripts.measure_3850_acceptance import REL_TOL, _best, _close, _dec, view_body
-from scripts.measure_3903_acceptance import diluted_shares, filed_count
+from scripts.measure_3903_acceptance import _days, _latest_fact, _units, diluted_shares, filed_count
 from scripts.measure_3903_dividend_premise import (
     _WINDOW,
     BAND,
@@ -75,6 +80,19 @@ _SQL: Final = Path(__file__).resolve().parents[1] / "sql"
 TTM_CONTROL: Final = _SQL / "220_ttm_strict_flow_sums.sql"
 VAL_CONTROL: Final = _SQL / "rollback" / "507_instrument_valuation_dividend_yield_total_form.sql"
 MIGRATION: Final = _SQL / "507_instrument_valuation_dividend_yield_total_form.sql"
+TTM_MIGRATION: Final = _SQL / "508_financial_periods_ttm_dividend_window_guard.sql"
+#: Amendment 2's causes, in sql/508's order.
+GUARD_CAUSES: Final = ("invalid member interval", "overlapping members", "window over one calendar year")
+#: Amendment 2: names expected NULL by a guard condition at the 2026-10-20 run.
+GUARD_NULLS: Final = (
+    ("KO", "window over one calendar year"),
+    ("HNI", "window over one calendar year"),
+    ("TILE", "window over one calendar year"),
+    ("FLXS", "invalid member interval"),
+    ("HUN", "overlapping members"),
+)
+BOUNDARY: Final = "boundary, 364-day window"
+BOUNDARY_SLOTS: Final = 2
 APPENDED: Final = ("dividends_paid_ttm_observed", "numeric")
 LATENCY_BOUND: Final = 2.0
 REFERENCE_TOLERANCE: Final = Decimal("0.15")
@@ -232,7 +250,45 @@ REFERENCE_PAGES: Final[dict[str, tuple[str, tuple[tuple[str, str], ...]]]] = {
             ("2026-09-11", "0.030"),
         ),
     ),
+    # Amendment 2: KO's replacement and the boundary category, read 2026-10-20 ~09:20Z (close 2026-10-19).
+    "XOM": (
+        "178.28",
+        (
+            ("2025-11-14", "1.030"),
+            ("2026-02-12", "1.030"),
+            ("2026-05-15", "1.030"),
+            ("2026-08-17", "1.030"),
+        ),
+    ),
+    "NVDA": (
+        "217.09",
+        (
+            ("2025-03-12", "0.010"),
+            ("2025-06-11", "0.010"),
+            ("2025-09-11", "0.010"),
+            ("2025-12-04", "0.010"),
+            ("2026-03-11", "0.010"),
+            ("2026-06-04", "0.250"),
+            ("2026-09-10", "0.250"),
+        ),
+    ),
+    "COST": (
+        "995.53",
+        (
+            ("2025-02-07", "1.160"),
+            ("2025-05-02", "1.300"),
+            ("2025-08-01", "1.300"),
+            ("2025-10-31", "1.300"),
+            ("2026-01-30", "1.300"),
+            ("2026-05-01", "1.470"),
+            ("2026-07-24", "1.470"),
+            ("2026-10-30", "1.470"),
+        ),
+    ),
 }
+#: The first ex-date each stored page list covers; a filing-lag E is computed only over a span the list covers.
+REFERENCE_LISTED_FROM: Final[dict[str, date]] = {"NVDA": date(2025, 1, 1), "COST": date(2025, 1, 1)}
+DEFAULT_LISTED_FROM: Final = date(2025, 9, 1)
 
 
 def external_ttm(events: tuple[tuple[str, str], ...], close: date) -> Decimal:
@@ -271,6 +327,31 @@ _SNAPSHOT_SQL: Final = """
     ORDER BY d.strategy_id
 """
 
+#: Amendment 2's end-anchored cross-check: per instrument, sql/220's window's last end, first (rn = 4) start and end,
+#: the preceding stored quarter's (rn = 5) end, and whether a filed fact's context runs from that start to that end.
+_ANCHOR_SQL: Final = """
+    WITH d AS (
+        SELECT DISTINCT ON (instrument_id, period_end_date) instrument_id, period_start_date, period_end_date
+        FROM financial_periods
+        WHERE period_type IN ('Q1','Q2','Q3','Q4') AND superseded_at IS NULL AND normalization_status = 'normalized'
+        ORDER BY instrument_id, period_end_date, filed_date DESC NULLS LAST
+    ), r AS (
+        SELECT *, ROW_NUMBER() OVER (PARTITION BY instrument_id ORDER BY period_end_date DESC) AS rn FROM d
+    ), a AS (
+        SELECT instrument_id,
+               MAX(period_end_date) FILTER (WHERE rn = 1) AS e,
+               MAX(period_start_date) FILTER (WHERE rn = 4) AS s,
+               MAX(period_end_date) FILTER (WHERE rn = 4) AS e4,
+               MAX(period_end_date) FILTER (WHERE rn = 5) AS e5
+        FROM r WHERE rn <= 5 GROUP BY instrument_id
+    )
+    SELECT a.*, EXISTS (
+        SELECT 1 FROM financial_facts_raw f
+        WHERE f.instrument_id = a.instrument_id AND f.period_start = a.s AND f.period_end = a.e4
+    ) AS start_filed
+    FROM a
+"""
+
 
 def ttm_body(path: Path) -> str:
     """The SELECT a migration file creates ``financial_periods_ttm`` as."""
@@ -285,6 +366,79 @@ def _same(a: Any, b: Any) -> bool:
     if isinstance(a, Decimal) and isinstance(b, Decimal) and a.is_nan() and b.is_nan():
         return True
     return a == b
+
+
+def filed_basic_shares(facts: dict[str, Any], end: date) -> tuple[Decimal, str] | None:
+    """N_f: ``diluted_shares`` for the basic count, else (Amendment 2 build note) its fiscal-Q4 rule with the
+    year-to-date leg widened to 240-290 days: a 12/12/12/16-week filer (COST) files a 36-week (252-day) year-to-date
+    context, which the nine-month leg's 260-285 days misses. Duration-weighted, as there."""
+    found = diluted_shares(facts, end, BASIC)
+    if found is not None:
+        return found
+    units = [f for f in _units(facts, "us-gaap", BASIC, "shares") if f.get("start")]
+    fy = _latest_fact([f for f in units if f["end"] == end.isoformat() and 350 <= _days(f) <= 380])
+    if fy is None:
+        return None
+    ytd = _latest_fact([f for f in units if f["start"] == fy["start"] and 240 <= _days(f) <= 290])
+    if ytd is None:
+        return None
+    d_fy, d_ytd = _days(fy), _days(ytd)
+    value = (Decimal(str(fy["val"])) * d_fy - Decimal(str(ytd["val"])) * d_ytd) / (d_fy - d_ytd)
+    return value, f"FY-{d_ytd}d duration-weighted"
+
+
+def _plus_one_year(d: date) -> date:
+    """Postgres ``date + INTERVAL '1 year'``: the same month and day a year on, 29 February clamped to the 28th."""
+    try:
+        return d.replace(year=d.year + 1)
+    except ValueError:
+        return d.replace(year=d.year + 1, day=28)
+
+
+def guard_cause(window: list[dict[str, Any]]) -> str | None:
+    """sql/508's conditions, in order, over a window that passes sql/507's (four observed, non-negative members); None
+    when all pass (spec Amendment 2). A zero total skips condition 3. A NaN total does not equal zero, as in SQL."""
+    if any(q["period_start_date"] is None or q["period_start_date"] > q["period_end_date"] for q in window):
+        return GUARD_CAUSES[0]
+    if any(window[k]["period_start_date"] <= window[k - 1]["period_end_date"] for k in range(1, len(window))):
+        return GUARD_CAUSES[1]
+    total = sum((q["dividends_paid"] for q in window), Decimal(0))
+    if total != 0 and not window[-1]["period_end_date"] < _plus_one_year(window[0]["period_start_date"]):
+        return GUARD_CAUSES[2]
+    return None
+
+
+def observed_ttm(window: list[dict[str, Any]]) -> tuple[Decimal | None, str]:
+    """``dividends_paid_ttm_observed`` evaluated independently from sql/220's window (``_WINDOW``, which returns only
+    windows passing the shape guard), with its NULL's cause. NaN is not negative: it sorts above every number."""
+    if len(window) != 4:
+        return None, "no window"
+    paid = [q["dividends_paid"] for q in window]
+    if any(p is None for p in paid):
+        return None, "fewer than four observed members" if any(p is not None for p in paid) else "no observed member"
+    if any(not p.is_nan() and p < 0 for p in paid):
+        return None, "a negative member"
+    cause = guard_cause(window)
+    if cause is not None:
+        return None, cause
+    return sum(paid, Decimal(0)), "published"
+
+
+def amended_yield(r: dict[str, Any], window: list[dict[str, Any]]) -> tuple[Decimal | None, str]:
+    """``proposed_yield`` (the construction) with sql/508's conditions applied after it."""
+    y, cause = proposed_yield(r, window)
+    if y is not None and (g := guard_cause(window)) is not None:
+        return None, g
+    return y, cause
+
+
+def anchor_class(a: dict[str, Any] | None) -> str:
+    """Amendment 2's end-anchored class of a positive publication's window."""
+    if a is None or a["e5"] is None:
+        return "no predecessor stored"
+    if a["e"] < _plus_one_year(a["e5"] + timedelta(days=1)):
+        return "within a year"
+    return "predecessor missing, start filed" if a["start_filed"] else "start unverified"
 
 
 def _columns(conn: psycopg.Connection[Any], view: str) -> list[tuple[str, str]]:
@@ -342,8 +496,8 @@ def _depends_on(conn: psycopg.Connection[Any], view: str) -> set[str]:
         JOIN pg_depend d ON d.objid = r.oid AND d.classid = 'pg_rewrite'::regclass
         JOIN pg_class c ON c.oid = d.refobjid
         WHERE r.ev_class = %s::regclass
-          AND d.refobjid IN ('pg_temp.ttm_control'::regclass, 'pg_temp.ttm_treatment'::regclass,
-                             'public.financial_periods_ttm'::regclass)
+          AND d.refobjid IN ('pg_temp.ttm_control'::regclass, 'pg_temp.ttm_prior'::regclass,
+                             'pg_temp.ttm_treatment'::regclass, 'public.financial_periods_ttm'::regclass)
         """,
         (f"pg_temp.{view}",),
     ).fetchall()
@@ -391,7 +545,8 @@ def main() -> int:
         probe = int(probe_row[0]) if probe_row else 0
         arms = {
             "control": _arm(conn, "control", ttm_body(TTM_CONTROL), view_body(VAL_CONTROL), eligible, probe),
-            "treatment": _arm(conn, "treatment", ttm_body(MIGRATION), view_body(MIGRATION), eligible, probe),
+            "prior": _arm(conn, "prior", ttm_body(MIGRATION), view_body(MIGRATION), eligible, probe),
+            "treatment": _arm(conn, "treatment", ttm_body(TTM_MIGRATION), view_body(MIGRATION), eligible, probe),
         }
         deps = {arm: _depends_on(conn, f"val_{arm}") for arm in arms}
         # Amendment 1, finding 1: while the deployed views are still sql/220 + sql/506 (no appended column), the file
@@ -417,6 +572,7 @@ def main() -> int:
             for q in cur.execute(_WINDOW).fetchall():
                 windows[int(q["instrument_id"])].append(q)
             snapshots = cur.execute(_SNAPSHOT_SQL).fetchall()
+            anchors = {int(a["instrument_id"]): a for a in cur.execute(_ANCHOR_SQL).fetchall()}
         conn.rollback()
 
     control, treat = arms["control"]["val"], arms["treatment"]["val"]
@@ -425,7 +581,8 @@ def main() -> int:
     # 1. wiring
     print("\n1. wiring")
     print(f"   pg_depend: val_control -> {sorted(deps['control'])}; val_treatment -> {sorted(deps['treatment'])}")
-    if deps != {"control": {"ttm_control"}, "treatment": {"ttm_treatment"}}:
+    print(f"   pg_depend: val_prior -> {sorted(deps['prior'])}")
+    if deps != {"control": {"ttm_control"}, "prior": {"ttm_prior"}, "treatment": {"ttm_treatment"}}:
         failures.append("pg_depend arms")
     val_same = arms["control"]["val_cols"] == arms["treatment"]["val_cols"]
     ttm_same = arms["treatment"]["ttm_cols"] == [*arms["control"]["ttm_cols"], APPENDED]
@@ -445,7 +602,7 @@ def main() -> int:
         if t["is_complete_ttm"] is not True:
             want: tuple[Decimal | None, str] = (None, "legacy arm")
         else:
-            want = proposed_yield(t, windows.get(iid, []))
+            want = amended_yield(t, windows.get(iid, []))
         expected[iid] = want
         if not _close(_dec(t["dividend_yield"]), want[0]):
             bad["dividend_yield off the independent evaluation"] += 1
@@ -472,6 +629,63 @@ def main() -> int:
     print(f"   failures {dict(bad) or 'none'}; relative tolerance {REL_TOL}")
     failures.extend(bad)
 
+    # Amendment 2: the increment, prior (sql/507) -> treatment (sql/508), on every row and column of both views.
+    ttm_p, val_p = arms["prior"]["ttm"], arms["prior"]["val"]
+    inc: Counter[str] = Counter()
+    if set(ttm_p) != set(ttm_t) or set(val_p) != set(treat):
+        inc["increment key sets differ"] += 1
+    if (
+        arms["prior"]["ttm_cols"] != arms["treatment"]["ttm_cols"]
+        or arms["prior"]["val_cols"] != arms["treatment"]["val_cols"]
+    ):
+        inc["increment columns differ"] += 1
+    guarded: dict[int, str] = {}
+    for iid, t in ttm_t.items():
+        prior_row = ttm_p.get(iid, {})
+        for col, value in prior_row.items():
+            if col != APPENDED[0] and not _same(value, t[col]):
+                inc["ttm column differing from prior"] += 1
+        want_ttm, ttm_cause = observed_ttm(windows.get(iid, []))
+        if not _same(t[APPENDED[0]], want_ttm):
+            inc["dividends_paid_ttm_observed off the independent evaluation"] += 1
+            if inc["dividends_paid_ttm_observed off the independent evaluation"] <= 5:
+                print("   increment mismatch", symbols.get(iid), t[APPENDED[0]], want_ttm, ttm_cause)
+        if ttm_cause in GUARD_CAUSES:
+            guarded[iid] = ttm_cause
+            if prior_row.get(APPENDED[0]) is None:
+                inc["guard cause on a value sql/507 left NULL"] += 1
+        elif not _same(prior_row.get(APPENDED[0]), t[APPENDED[0]]):
+            inc["dividends_paid_ttm_observed differing from prior without a guard cause"] += 1
+    lost: Counter[str] = Counter()
+    for iid, v in treat.items():
+        prior_row = val_p.get(iid, {})
+        for col, value in prior_row.items():
+            if col != "dividend_yield" and not _same(value, v[col]):
+                inc["valuation column differing from prior"] += 1
+        if iid in guarded:
+            if v["dividend_yield"] is not None:
+                inc["yield published under a guard cause"] += 1
+            if prior_row.get("dividend_yield") is not None:
+                lost[guarded[iid]] += 1
+        elif not _same(prior_row.get("dividend_yield"), v["dividend_yield"]):
+            inc["yield differing from prior without a guard cause"] += 1
+    print(
+        f"   increment (sql/507 -> sql/508): TTM values refused {dict(Counter(guarded.values()))}; "
+        f"publications lost {dict(lost)}; failures {dict(inc) or 'none'}"
+    )
+    failures.extend(inc)
+    classes: Counter[str] = Counter()
+    for iid, v in treat.items():
+        if (_dec(v["dividend_yield"]) or 0) > 0:
+            k = anchor_class(anchors.get(iid))
+            classes[k] += 1
+            if k != "within a year":
+                a = anchors.get(iid) or {}
+                print(f"      {k}: {symbols.get(iid)} first start {a.get('s')}, preceding end {a.get('e5')}")
+            if k in ("start unverified", "no predecessor stored"):
+                failures.append(f"end-anchored {k} {symbols.get(iid)}")
+    print(f"   end-anchored classes over positive publications: {dict(classes)}")
+
     # 2. A/B
     print("\n2. A/B, every complete-TTM row (today = control, proposed = treatment):")
     table: Counter[str] = Counter()
@@ -485,6 +699,7 @@ def main() -> int:
     for k, v in sorted(table.items()):
         print(f"   {k}: {v}")
     print("   spec 21:55Z: kept 572; gained 262 positive + 9 zero; lost 419 cap, 71 unobserved, 3 negative")
+    print("   Amendment 2 (2026-10-20 ~09:00Z): the guard refuses 46 TTM values and 42 publications")
 
     # 3. input policy (and the per-row material for 4)
     pub = {iid for iid, t in treat.items() if t["dividend_yield"] is not None}
@@ -645,6 +860,13 @@ def main() -> int:
         print(f"   expected NULL {s} ({cause}): {got} -> {'ok' if ok else 'FAIL'}")
         if not ok:
             failures.append(f"{s} expected NULL")
+    for s, cause in GUARD_NULLS:
+        iid = by_symbol.get(s)
+        got = None if iid is None else (treat[iid]["dividend_yield"], guard_cause(windows.get(iid, [])))
+        ok = got is not None and got == (None, cause)
+        print(f"   expected NULL {s} ({cause}, Amendment 2): {got} -> {'ok' if ok else 'FAIL'}")
+        if not ok:
+            failures.append(f"{s} expected NULL")
     zeros = sorted((i for i in pub if treat[i]["dividend_yield"] == 0), key=lambda i: symbols.get(i, ""))
     print(f"   zero publications: {len(zeros)}")
     for i in zeros:
@@ -676,10 +898,18 @@ def main() -> int:
     canonical = {i for i in pub if by_symbol.get(symbols.get(i, "")) == i}
     kept: dict[str, list[str]] = defaultdict(list)
     to_replace: list[tuple[str, str]] = []
+
+    def refusal(i: int | None) -> str | None:
+        """A named slot's refusal: its cap's reason, else an Amendment 2 guard cause."""
+        if i is None:
+            return None
+        cause = expected[i][1]
+        return treat[i]["market_cap_reason"] or (cause if cause in GUARD_CAUSES else None)
+
     for category, names_ in SLOTS.items():
         for s in names_:
             iid = by_symbol.get(s)
-            reason = None if iid is None else treat[iid]["market_cap_reason"]
+            reason = refusal(iid)
             if category != "panel payer" and iid is not None and not category_of[category](iid):
                 print(f"   slot {category} {s}: no longer meets the category's predicate")
                 to_replace.append((category, s))
@@ -691,8 +921,8 @@ def main() -> int:
                 else:
                     to_replace.append((category, s))
             else:
-                print(f"   slot {category} {s}: not published and its cap is not refused -> FAIL")
-                failures.append(f"named slot {s} unpublished without a cap refusal")
+                print(f"   slot {category} {s}: not published, and neither its cap nor a guard refused it -> FAIL")
+                failures.append(f"named slot {s} unpublished without a cap or guard refusal")
     taken = {s for names_ in kept.values() for s in names_} | {s for _, s in to_replace}
     slots: list[tuple[str, str]] = [(c, s) for c in SLOTS for s in kept[c]]
     for category, s in to_replace:
@@ -702,9 +932,10 @@ def main() -> int:
             reverse=True,
         )
         sub = symbols.get(pool[0]) if pool else None
-        iid = by_symbol.get(s)
-        print(f"   slot {category} {s}: replaced by {sub} ({None if iid is None else treat[iid]['market_cap_reason']})")
-        if sub is not None:
+        print(f"   slot {category} {s}: original outcome {refusal(by_symbol.get(s))}; replaced by {sub}")
+        if sub is None:
+            print(f"   slot {category} {s}: no replacement available; counts as unreconciled")
+        else:
             slots.append((category, sub))
             taken.add(sub)
     both = {
@@ -727,6 +958,20 @@ def main() -> int:
     for i in [i for i in untagged if symbols.get(i) not in taken][:UNTAGGED_SLOTS]:
         slots.append(("untagged, largest |log(today / proposed)|", symbols.get(i, str(i))))
         taken.add(symbols.get(i, str(i)))
+    # Amendment 2: the mandatory boundary slot, outside the 10 of 12: the largest-cap positive publication whose window
+    # spans 364 days (a 52/53-week filer the guard retains). It must reconcile.
+    # Build note: two names, at least one reconciled, as every other category is covered; a single name fails on any
+    # dividend change after its last filed quarter, which item 4 keeps in the residual (NVDA, 2026-10-20).
+    boundary_pool = sorted(
+        (i for i in canonical if positive(i) and span[i] == 364 and symbols.get(i) not in taken), key=cap, reverse=True
+    )
+    boundary = {symbols.get(i, str(i)) for i in boundary_pool[:BOUNDARY_SLOTS]}
+    if not boundary:
+        print("   boundary slots: no 364-day publication available -> FAIL")
+        failures.append("boundary slots unavailable")
+    for i in boundary_pool[:BOUNDARY_SLOTS]:
+        slots.append((BOUNDARY, symbols.get(i, str(i))))
+        taken.add(symbols.get(i, str(i)))
     print(f"   reference: {REFERENCE_SOURCE}; slots {slots}")
     reconciled: Counter[str] = Counter()
     reconciled_names: set[str] = set()
@@ -734,8 +979,8 @@ def main() -> int:
     for category, s in slots:
         iid = by_symbol.get(s)
         if iid is None or not positive(iid):
-            reason = "no complete-TTM row" if iid is None else treat[iid]["market_cap_reason"]
-            print(f"   {category} {s}: cap refused ({reason}); reported, not a failure")
+            reason = "no complete-TTM row" if iid is None else refusal(iid)
+            print(f"   {category} {s}: refused ({reason}); reported, not a failure")
             continue
         available.add(category)
         if s not in REFERENCE:
@@ -751,7 +996,7 @@ def main() -> int:
         ext = e / p_x * 100
         r = ours / ext
         facts = filings.get(iid, {})
-        nf = diluted_shares(facts, windows[iid][-1]["period_end_date"], BASIC) if facts else None
+        nf = filed_basic_shares(facts, windows[iid][-1]["period_end_date"]) if facts else None
         total, branches, _, unres = rebuilt.get(iid, (Decimal(0), [], set(), 1))
         c = total if not unres and total > 0 else None
         rebuild_state = "unresolved" if unres else "resolved zero" if total == 0 else "resolved"
@@ -835,12 +1080,27 @@ def main() -> int:
             if c is not None and dc > 0:
                 adj *= dc / c
             defect_residual = r * dc / d / adj if d else None
+        # Amendment 2 build note: a filing lag. D is the cash of a window that ends at the last filed quarter; when
+        # the page's amounts change after that end, E over the 365 days to the window's own end (E_w) is the external
+        # counterpart of D. Classified when E_w differs from E and ours x E / E_w (count divided out where valid) lies
+        # within the tolerance; never reconciled, never counted. Computed only where the stored list covers the span.
+        lag_residual = None
+        w_end = windows[iid][-1]["period_end_date"]
+        if w_end - timedelta(days=364) >= REFERENCE_LISTED_FROM.get(s, DEFAULT_LISTED_FROM):
+            e_w = external_ttm(REFERENCE_PAGES[s][1], w_end)
+            if e_w > 0 and e_w != e:
+                lag_residual = r * e / e_w / (count_f if count_valid else Decimal(1))
         if abs(residual - 1) <= REFERENCE_TOLERANCE:
             verdict = "accounted"
             reconciled[category] += 1
             reconciled_names.add(s)
         elif defect_residual is not None and abs(defect_residual - 1) <= REFERENCE_TOLERANCE:
             verdict = f"INPUT DEFECT (members corrected to the rule: residual {defect_residual:.4f}; 'Input policy')"
+        elif lag_residual is not None and abs(lag_residual - 1) <= REFERENCE_TOLERANCE:
+            verdict = (
+                f"FILING LAG (Amendment 2 build note): window ends {w_end}; E over the 365 days to it "
+                f"{external_ttm(REFERENCE_PAGES[s][1], w_end)} against E {e}; residual {lag_residual:.4f}"
+            )
         elif proxy_residual is not None and abs(proxy_residual - 1) <= REFERENCE_TOLERANCE:
             verdict = (
                 f"NUMERATOR PROXY DEFECT (Amendment 1): D / C_d {proxy[iid]:.4f} ({GENERIC} member, C_d "
@@ -850,14 +1110,17 @@ def main() -> int:
             verdict = "FAIL"
             failures.append(f"reference {s} unreconciled")
         print(f"      miss {r - 1:+.1%}; divided out {notes or 'none'}; residual {residual:.4f} -> {verdict}")
-    total_reconciled = len(reconciled_names)
-    uncovered = sorted(available - set(reconciled))
+    total_reconciled = len(reconciled_names - boundary)
+    uncovered = sorted(available - set(reconciled) - {BOUNDARY})
     print(
-        f"   reconciled {total_reconciled} of {len(slots)} slots; by category {dict(reconciled)}; "
-        f"categories with an available name not reconciled {uncovered}"
+        f"   reconciled {total_reconciled} of {sum(1 for c, _ in slots if c != BOUNDARY)} slots; by category "
+        f"{dict(reconciled)}; categories with an available name not reconciled {uncovered}"
     )
     if total_reconciled < MIN_RECONCILED or uncovered:
         failures.append("minimum coverage not met: rerun after the next 08:20Z build")
+    if boundary and not boundary & reconciled_names:
+        print(f"   boundary slots {sorted(boundary)}: none reconciled -> FAIL")
+        failures.append("boundary category not reconciled")
 
     # 5. readers
     print("\n5. ranking_pot_exposure.dividend_yield over the latest snapshot universes")

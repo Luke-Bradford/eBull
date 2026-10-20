@@ -13438,3 +13438,20 @@ neighbouring container and match it.**
   sum of the page's dated cash amounts in the trailing window, stored with their ex-dates.
 - Enforced in: `scripts/measure_3903_dividend_acceptance.py` (section 3's generic-concept screen, `external_ttm`),
   spec `docs/specs/fundamentals/2026-10-19-3903-dividend-yield-total-form.md` Amendment 1.
+
+### A four-quarter fiscal window can span more than a year, and a lumpy flow then counts one event twice (#3903, 2026-10-20)
+
+- Symptom (#3903 `dividend_yield`, timed acceptance 2026-10-20 08:30Z): KO's four latest quarters run 2025-03-29 to
+  2026-04-03, 371 days. The window holds the early-April payment of both years, so the stored cash paid was $10,971M
+  against FY2025's $8,779M, and the yield was 2.73% against an external 2.25%. sql/220's shape guard tests end dates
+  only (within 330 days). Across the population, 41 positive windows exceed a calendar year, 3 publications have
+  overlapping member intervals and 2 have invalid ones. The dry run missed it because KO's cap was refused then.
+- Prevention: a TTM of a lumpy flow (dividends, buybacks, specials) needs its span checked from the first member's
+  start, not from end dates: last end < first start + `INTERVAL '1 year'`, valid intervals, no overlap. A
+  continuous flow over 371 days is off by a small fraction; a quarterly payment can be off by a whole event.
+- Prevention: an acceptance slot with a mandatory pass must not be a single name when the rule keeps a known cause in
+  the residual. NVDA's dividend change after its last filed quarter fails any one-name slot. Cover the category with
+  two names, and classify the known cause (filing lag) without counting it.
+- Enforced in: `sql/508_financial_periods_ttm_dividend_window_guard.sql`,
+  `tests/test_financial_periods_ttm_dividend_window_guard.py`, and `scripts/measure_3903_dividend_window_span.py`
+  plus the acceptance script's increment and end-anchored checks. Spec Amendment 2 and its build note.
