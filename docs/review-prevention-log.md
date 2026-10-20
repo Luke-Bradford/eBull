@@ -13507,3 +13507,16 @@ neighbouring container and match it.**
 - Enforced in: `app/services/pit_market_cap.py::period_status` and `weighted_average_scale`;
   `tests/test_pit_market_cap_scale_fallback.py`; `scripts/measure_3925_premise.py` (the independent oracle);
   `scripts/ab_3925_scale_fallback.py`; spec Amendment 3 in `docs/specs/fundamentals/2026-10-16-3841-pit-market-cap.md`.
+
+### A per-key advisory lock shared with batch writers can deadlock them (#2327, 2026-10-20)
+
+- Symptom: the #2327 spec put one per-CUSIP `pg_advisory_xact_lock` around every `cusip` insert so the 13D/G bridge,
+  the Official-List fuzzy insert and the OpenFIGI promotion serialise per CUSIP. The fuzzy backfill holds its locks
+  until one commit at the end of the run and walks instruments; the OpenFIGI sweep holds them per batch and walks
+  CUSIPs. Two shared CUSIPs taken in opposite orders deadlock and abort a whole job transaction (Codex checkpoint 2).
+- Prevention: before adding a shared per-key lock, list every taker and how many keys each holds per transaction.
+  Only a taker holding one key may wait; a taker holding several takes `pg_try_advisory_xact_lock` and defers a busy
+  key to its next run. A savepoint does not release a transaction-scoped advisory lock.
+- Enforced in: `app/services/cusip_resolver.py::lock_cusip` / `try_lock_cusip`;
+  `tests/test_cusip_resolver_openfigi.py::TestPromotionUnderTheCusipLock`; spec Amendment 1 in
+  `docs/specs/etl/2026-10-20-2327-13dg-cusip-bridge.md`.

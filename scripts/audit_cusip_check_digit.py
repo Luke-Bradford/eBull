@@ -49,6 +49,7 @@ import psycopg
 from psycopg import sql
 
 from app.config import settings
+from app.services.cusip_check_digit import is_valid_cusip
 
 _RESET_SCOPE: Final[str] = "resolution_status = 'openfigi_unknown'\n   AND source IS NOT NULL"
 """The rows ``--reset-invalid`` is allowed to touch, as one predicate.
@@ -65,37 +66,6 @@ digit. ``unresolved_13f_cusips`` is shared by two producers, and a NULL
 selects nothing away today; run ``--census`` for the current split rather
 than trusting a figure written here.
 """
-
-_CHAR_VALUES: Final[dict[str, int]] = {
-    **{c: i for i, c in enumerate("0123456789")},
-    **{c: 10 + i for i, c in enumerate("ABCDEFGHIJKLMNOPQRSTUVWXYZ")},
-    "*": 36,
-    "@": 37,
-    "#": 38,
-}
-
-
-def cusip_check_digit(first_eight: str) -> int:
-    """Return the check digit the mod-10 rule requires for ``first_eight``.
-
-    Raises ``KeyError`` on a character outside the CUSIP alphabet — callers
-    that accept arbitrary stored text should use :func:`is_valid_cusip`.
-    """
-    total = 0
-    for position, char in enumerate(first_eight, start=1):
-        value = _CHAR_VALUES[char]
-        if position % 2 == 0:
-            value *= 2
-        total += value // 10 + value % 10
-    return (10 - total % 10) % 10
-
-
-def is_valid_cusip(cusip: str) -> bool:
-    """True when ``cusip`` is 9 characters in the CUSIP alphabet whose final
-    character is the digit the mod-10 rule requires."""
-    if len(cusip) != 9 or any(char not in _CHAR_VALUES for char in cusip):
-        return False
-    return cusip[8].isdigit() and cusip_check_digit(cusip[:8]) == int(cusip[8])
 
 
 def _census(conn: psycopg.Connection[tuple]) -> int:

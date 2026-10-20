@@ -53,6 +53,7 @@ middle on 2+-space gaps to recover issuer name + description.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import urllib.error
@@ -73,6 +74,7 @@ from app.services.cusip_resolver import (
     _normalise_name,
     _similarity,
     sweep_resolvable_unresolved_cusips,
+    try_lock_cusip,
 )
 from app.services.institutional_holdings import _calendar_quarter_end
 from app.services.sec_13f_filer_directory import _last_completed_quarter
@@ -221,6 +223,127 @@ def _store_raw_list(
         """,
         {"year": year, "quarter": quarter, "payload": payload, "url": url},
     )
+
+
+CUSIP_BRIDGE_WINDOW_START: Final[tuple[int, int]] = (2024, 4)
+"""First quarter of the #2327 bridge's list window: the quarter of the 13D/G XML mandate (2024-12-18) and of the 13F
+retention floor (2024-12-31). Fixed, not rolling, so a past dual listing never ages out (spec "Source rule")."""
+
+WINDOW_LIST_MIN_ROWS: Final[int] = 10_000
+"""A stored list parsing to fewer rows is a gap (spec "Construction" step 2): a truncated or wrong body, not a list."""
+
+
+@dataclass(frozen=True)
+class WindowList:
+    """One quarter of the #2327 bridge's list window.
+
+    ``share_cusips`` holds the list's share rows: ``status <> 'D'``, :func:`_is_common_share` and not
+    :func:`_is_put_call` (gate R4). A gap (``gap_reason`` set) carries no rows; ``sha256`` is set whenever a body is
+    stored, gap or not, so the provenance can name it.
+    """
+
+    quarter: str  # '2024q4'
+    sha256: str | None
+    share_cusips: frozenset[str]
+    gap_reason: str | None  # None | 'not_published' | 'too_few_rows' | 'duplicate_payload'
+
+    @property
+    def available(self) -> bool:
+        return self.gap_reason is None
+
+
+def _quarters_from(start: tuple[int, int], end: tuple[int, int]) -> list[tuple[int, int]]:
+    out: list[tuple[int, int]] = []
+    y, q = start
+    while (y, q) <= end:
+        out.append((y, q))
+        y, q = (y + 1, 1) if q == 4 else (y, q + 1)
+    return out
+
+
+def ensure_window_lists(
+    conn: psycopg.Connection[tuple],
+    *,
+    fetch: Callable[[int, int], tuple[str, str]] = fetch_13f_list_txt,
+    today: date | None = None,
+) -> list[WindowList]:
+    """Store every Official List of the #2327 window that is missing, then classify each window quarter.
+
+    The window runs from :data:`CUSIP_BRIDGE_WINDOW_START` to the latest published quarter, which follows
+    :func:`fetch_latest_published_list`'s grace rule. Raw body stored before parse (prevention log #914). A list is
+    available only if it parses to at least :data:`WINDOW_LIST_MIN_ROWS` rows and its SHA-256 differs from every other
+    stored quarter's: SEC serves 2025Q3's list byte-identical to 2025Q1's and nothing in the file says which quarter it
+    is, so both copies are gaps (spec "Duplicate lists"). A past quarter SEC 404s is a gap too.
+
+    Returns the window oldest first. Caller owns the transaction.
+    """
+    today_d = today if today is not None else date.today()
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT period_year, period_quarter FROM sec_reference_documents "
+            "WHERE document_kind = '13f_securities_list'"
+        )
+        stored = {(int(y), int(q)) for y, q in cur.fetchall()}
+
+    target = _last_completed_quarter(today_d)
+    if target in stored:
+        latest = target
+    else:
+        published = fetch_latest_published_list(today_d, fetch)
+        _store_raw_list(
+            conn,
+            year=published.year,
+            quarter=published.quarter,
+            payload=published.payload,
+            source_url=published.source_url,
+        )
+        latest = (published.year, published.quarter)
+        stored.add(latest)
+
+    window = _quarters_from(CUSIP_BRIDGE_WINDOW_START, latest)
+    for y, q in window:
+        if (y, q) in stored:
+            continue
+        try:
+            payload, source_url = fetch(y, q)
+        except urllib.error.HTTPError as err:
+            if err.code != 404:
+                raise
+            logger.warning("ensure_window_lists: %sQ%s Official List not served (404); the quarter is a gap", y, q)
+            continue
+        _store_raw_list(conn, year=y, quarter=q, payload=payload, source_url=source_url)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT period_year, period_quarter, payload
+              FROM sec_reference_documents
+             WHERE document_kind = '13f_securities_list'
+            """
+        )
+        payloads = {(int(y), int(q)): str(p) for y, q, p in cur.fetchall()}
+    # latin-1 round-trips the fetched bytes exactly (fetch_13f_list_txt decodes latin-1), so this is the file's hash.
+    sha = {k: hashlib.sha256(p.encode("latin-1")).hexdigest() for k, p in payloads.items()}
+    sha_count: dict[str, int] = defaultdict(int)
+    for h in sha.values():
+        sha_count[h] += 1
+
+    out: list[WindowList] = []
+    for y, q in window:
+        quarter = f"{y}q{q}"
+        if (y, q) not in payloads:
+            out.append(WindowList(quarter, None, frozenset(), "not_published"))
+            continue
+        rows = list(parse_13f_list(payloads[(y, q)]))
+        h = sha[(y, q)]
+        if len(rows) < WINDOW_LIST_MIN_ROWS:
+            out.append(WindowList(quarter, h, frozenset(), "too_few_rows"))
+        elif sha_count[h] > 1:
+            out.append(WindowList(quarter, h, frozenset(), "duplicate_payload"))
+        else:
+            shares = frozenset(s.cusip for s in rows if s.status != "D" and _is_common_share(s) and not _is_put_call(s))
+            out.append(WindowList(quarter, h, shares, None))
+    return out
 
 
 def parse_13f_list(payload: str) -> Iterator[ThirteenFSecurity]:
@@ -567,6 +690,8 @@ def _insert_external_identifier(
       * ``'already_mapped'`` — instrument already has a SEC CUSIP
         (from any path: curated, prior backfill run, concurrent
         writer). Counted as a no-op.
+      * ``'busy'`` — another writer holds the CUSIP lock (#2327); not
+        written, re-evaluated on the next run.
       * ``'conflict'`` — the CUSIP is already mapped to a DIFFERENT
         instrument. Existing row preserved; caller tombstones the
         instrument as ``'conflict'`` so an operator can audit.
@@ -609,8 +734,11 @@ def _insert_external_identifier(
         if cur.fetchone() is not None:
             return "already_mapped"
 
-    # 2. + 3. Per-row savepoint + ON CONFLICT RETURNING.
+    # 2. + 3. Per-row savepoint + ON CONFLICT RETURNING, under the per-CUSIP writer lock (#2327; try-lock, since
+    # this transaction holds many — see ``lock_cusip``).
     with conn.transaction():
+        if not try_lock_cusip(conn, cusip_norm):
+            return "busy"
         with conn.cursor(row_factory=psycopg.rows.tuple_row) as cur:
             cur.execute(
                 """
@@ -743,6 +871,8 @@ def backfill_cusip_coverage(
             inserted += 1
         elif outcome == "already_mapped":
             skipped_already_mapped += 1
+        elif outcome == "busy":
+            logger.info("cusip_universe_backfill: cusip=%s busy under another writer's lock; skipped", best.cusip)
         else:  # 'conflict'
             conflict += 1
             logger.warning(

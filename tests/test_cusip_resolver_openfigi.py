@@ -43,6 +43,8 @@ from app.services.cusip_resolver import (
     OPENFIGI_NEGATIVE_STATUSES,
     STATUS_OPENFIGI_INVALID_IDENTIFIER,
     OpenFigiSweepReport,
+    _promote_openfigi_mapping,
+    lock_cusip,
     record_unresolved_cusip_from_bulk,
     sweep_bulk_cusips_resolved_via_extid,
     sweep_unresolved_cusips_via_openfigi,
@@ -1400,3 +1402,46 @@ def test_fake_resolver_satisfies_protocol() -> None:
 def _unused_import_dance(arg: Any) -> None:  # pragma: no cover
     """Silence unused-import linter for the type-hint-only import."""
     del arg
+
+
+class TestPromotionUnderTheCusipLock:
+    def test_does_not_promote_a_cusip_another_instrument_holds_under_sec(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+    ) -> None:
+        """#2327: the per-provider unique index admits an ``openfigi`` row beside another instrument's ``sec`` row
+        (the 13D/G bridge's); the promotion's own check under the CUSIP lock refuses it."""
+        conn = ebull_test_conn
+        _seed_instrument(conn, instrument_id=232_711, symbol="BRG")
+        _seed_instrument(conn, instrument_id=232_712, symbol="OTH")
+        conn.execute(
+            "INSERT INTO external_identifiers (instrument_id, provider, identifier_type, identifier_value, is_primary) "
+            "VALUES (232711, 'sec', 'cusip', '925652109', FALSE)"
+        )
+        conn.commit()
+
+        assert _promote_openfigi_mapping(conn, cusip="925652109", instrument_id=232_712) == "skipped"
+        assert _promote_openfigi_mapping(conn, cusip="925652109", instrument_id=232_711) == "inserted"
+        conn.commit()
+        rows = conn.execute(
+            "SELECT provider, instrument_id FROM external_identifiers WHERE identifier_value = '925652109' ORDER BY 1"
+        ).fetchall()
+        conn.commit()
+        assert rows == [("openfigi", 232_711), ("sec", 232_711)]
+
+    def test_busy_cusip_is_skipped_without_waiting(
+        self,
+        ebull_test_conn: psycopg.Connection[tuple],
+    ) -> None:
+        """A batch writer never waits on the CUSIP lock (it holds others; waiting could deadlock)."""
+        from tests.fixtures.ebull_test_db import test_database_url
+
+        conn = ebull_test_conn
+        _seed_instrument(conn, instrument_id=232_713, symbol="BSY")
+        conn.commit()
+        with psycopg.connect(test_database_url()) as other:
+            lock_cusip(other, "925652109")  # held until `other` ends its transaction
+            assert _promote_openfigi_mapping(conn, cusip="925652109", instrument_id=232_713) == "skipped"
+            conn.rollback()
+        assert _promote_openfigi_mapping(conn, cusip="925652109", instrument_id=232_713) == "inserted"
+        conn.commit()

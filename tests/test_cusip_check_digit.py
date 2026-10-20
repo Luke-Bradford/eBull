@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.audit_cusip_check_digit import cusip_check_digit, is_valid_cusip
+from app.services.cusip_check_digit import cusip_check_digit, is_valid_cusip
 
 
 class TestCusipCheckDigit:

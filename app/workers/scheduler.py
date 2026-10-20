@@ -10647,17 +10647,30 @@ def cusip_universe_backfill() -> None:
     :func:`sweep_resolvable_unresolved_cusips` promotes previously-
     stranded 13F holdings into ``institutional_holdings``.
     """
-    from app.services.sec_13f_securities_list import backfill_cusip_coverage
+    from app.services.cusip_bridge_13dg import BridgeResult, bind_13dg_cusips
+    from app.services.sec_13f_securities_list import backfill_cusip_coverage, ensure_window_lists
 
     with _tracked_job(JOB_CUSIP_UNIVERSE_BACKFILL) as tracker:
         with connect_job() as conn:
+            # #2327 — the 13D/G bridge runs ahead of the fuzzy pass, which selects only instruments without a
+            # `sec` CUSIP and so skips what the bridge mapped. A bridge refusal is an abstention; the other
+            # routes run as before.
+            bridge: BridgeResult | None = None
+            if settings.cusip_13dg_bridge_enabled:
+                lists = ensure_window_lists(conn)
+                conn.commit()  # the lists are raw SEC bodies; each bridge write is then its own transaction
+                bridge = bind_13dg_cusips(conn, lists=lists, job_run_id=tracker.run_id)
             result = backfill_cusip_coverage(conn)
 
-        tracker.row_count = result.inserted
+        tracker.row_count = result.inserted + (sum(bridge.inserted.values()) if bridge is not None else 0)
+        notes: list[str] = []
         if result.unpublished_quarter is not None:
             # #3630 — publication lag, not a failure: say which list ran.
             uy, uq = result.unpublished_quarter
-            tracker.note = f"{uy}Q{uq} Official List not yet published; used the prior quarter's list"
+            notes.append(f"{uy}Q{uq} Official List not yet published; used the prior quarter's list")
+        if bridge is not None:
+            notes.append(bridge.note())
+        tracker.note = "; ".join(notes) or None
         logger.info(
             "cusip_universe_backfill: list_rows=%d instruments_seen=%d "
             "inserted=%d already_mapped=%d unresolvable=%d ambiguous=%d "
