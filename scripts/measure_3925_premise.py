@@ -152,7 +152,8 @@ def period_status(
     if not all(math.isfinite(float(x)) for x in (w, e, n)) or w <= 0 or e == 0 or n == 0 or (n > 0) != (e > 0):
         return "operand_invalid", None, None
     with localcontext() as context:
-        context.prec = 60  # exact for any stored numeric(..., 6) operands
+        exponents = [int(x.as_tuple().exponent) for x in (w, e, n)]
+        context.prec = sum(len(x.as_tuple().digits) for x in (w, e, n)) + max(exponents) - min(exponents) + 4
         within_penny = abs(n - e * w) <= PER_SHARE_TOLERANCE * w
         implied = n / e
     if not within_penny or not math.isfinite(float(implied)):

@@ -7,7 +7,7 @@ expected outcome in its name. Pure: no database.
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, localcontext
 
 import pytest
 
@@ -238,6 +238,21 @@ def test_penny_threshold_is_exact_for_the_widest_stored_operands() -> None:
     expected = oracle.period_status(90, "Q1", {oracle.WA: {Decimal(w)}, oracle.EPS: {Decimal(1)},
                                                oracle.NET_INCOME: {Decimal(n)}})  # fmt: skip
     assert expected[0] == "identity_disagrees"
+
+
+def test_penny_threshold_is_exact_beyond_sixty_digits() -> None:
+    # The pure function sizes its precision from the operands, so it stays exact past numeric(30, 6) (review bot).
+    with localcontext() as context:
+        context.prec = 200  # the fixture values themselves must not round
+        w = Decimal(10**80) + Decimal("0.123456")
+        exact = w * Decimal("1.01")  # a gap of exactly 0.01 x W: passes
+        over = exact + Decimal("0.000001")
+    assert period_status(90, "Q1", {WEIGHTED_AVERAGE: {w}, EPS_BASIC: {Decimal(1)}, NET_INCOME: {exact}})[0] is (
+        PeriodStatus.CONSISTENT
+    )
+    assert period_status(90, "Q1", {WEIGHTED_AVERAGE: {w}, EPS_BASIC: {Decimal(1)}, NET_INCOME: {over}})[0] is (
+        PeriodStatus.IDENTITY_DISAGREES
+    )
 
 
 def test_hundredfold_bound_on_the_implied_count_at_eps_one_cent() -> None:

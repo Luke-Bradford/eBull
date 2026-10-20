@@ -438,6 +438,11 @@ def _finite_decimal(value: Decimal) -> bool:
     return value.is_finite() and math.isfinite(float(value))
 
 
+def _exponent_spread(*values: Decimal) -> int:
+    exponents = [int(v.as_tuple().exponent) for v in values]
+    return max(exponents) - min(exponents)
+
+
 def period_status(
     days: int, focus: str | None, operands: Mapping[str, set[Decimal]]
 ) -> tuple[PeriodStatus, Decimal | None, Decimal | None]:
@@ -456,7 +461,9 @@ def period_status(
     if not all(_finite_decimal(x) for x in (w, e, n)) or w <= 0 or e == 0 or n == 0 or (n > 0) != (e > 0):
         return PeriodStatus.OPERAND_INVALID, None, None
     with localcontext() as context:
-        context.prec = 60  # wide enough that N - E x W and 0.01 x W are exact for any stored numeric(…, 6) operands
+        # Exact whatever the operands' size (financial_facts_raw.val is numeric(30, 6), but this function is pure):
+        # E x W needs at most the sum of both coefficients' digits, and the exponent spread can add the rest.
+        context.prec = sum(len(x.as_tuple().digits) for x in (w, e, n)) + _exponent_spread(w, e, n) + 4
         within_penny = abs(n - e * w) <= PER_SHARE_TOLERANCE * w
         implied = n / e
     if not within_penny or not _finite_decimal(implied):
