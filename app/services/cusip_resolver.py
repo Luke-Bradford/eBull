@@ -246,6 +246,32 @@ class _Match:
 BulkCusipSource = Literal["bulk_13f_dataset", "bulk_nport_dataset"]
 
 
+def _cusip_lock_key(cusip: str) -> str:
+    # Normalised here, as every writer stores the value, so no caller's spelling can split one CUSIP's lock.
+    return f"external_identifiers.cusip:{cusip.strip().upper()}"
+
+
+def lock_cusip(conn: psycopg.Connection[Any], cusip: str) -> None:
+    """Wait for the transaction-scoped writer lock on one CUSIP's ``external_identifiers`` rows (#2327).
+
+    Every writer of a ``cusip`` row takes this lock before its insert. The unique index is per provider, so without
+    it a ``sec`` and an ``openfigi`` insert of one CUSIP for two instruments can both commit. Held until the caller's
+    transaction ends.
+
+    ⚠ Only a writer that holds no other CUSIP lock may WAIT: the 13D/G bridge, whose every write is its own
+    transaction. The batch writers (Official-List fuzzy insert, legacy fuzzy promotion, OpenFIGI promotion) hold
+    many CUSIP locks in one transaction and walk them in different orders, so a wait there can deadlock; they use
+    :func:`try_lock_cusip` and leave a busy CUSIP for their next run.
+    """
+    conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (_cusip_lock_key(cusip),))
+
+
+def try_lock_cusip(conn: psycopg.Connection[Any], cusip: str) -> bool:
+    """Take :func:`lock_cusip`'s lock without waiting; ``False`` when another transaction holds it."""
+    row = conn.execute("SELECT pg_try_advisory_xact_lock(hashtext(%s))", (_cusip_lock_key(cusip),)).fetchone()
+    return bool(row and row[0])
+
+
 def load_bulk_cusip_map(conn: psycopg.Connection[Any]) -> dict[str, int]:
     """Preload all CUSIP → instrument_id mappings (SEC + OpenFIGI) into a dict.
 
@@ -759,6 +785,8 @@ def _promote_to_external_identifier(
       * ``"already_resolved"`` — the CUSIP was already mapped to
         the SAME instrument_id (another path beat us to it). Source
         row deleted; not counted as a new promotion.
+      * ``"busy"`` — another writer holds the CUSIP lock (#2327); the
+        source row stays pending for the next run.
       * ``"conflict"`` — the CUSIP was already mapped to a
         DIFFERENT instrument_id. The existing mapping is preserved
         (we never silently overwrite), the resolver does NOT delete
@@ -772,6 +800,8 @@ def _promote_to_external_identifier(
     resolver only adds entries that were missing entirely.
     """
     cusip_norm = cusip.strip().upper()
+    if not try_lock_cusip(conn, cusip_norm):
+        return "busy"
 
     # Two-step: probe first, write second. ON CONFLICT ... DO NOTHING
     # would silently swallow the conflict and we couldn't distinguish
@@ -966,6 +996,9 @@ def resolve_unresolved_cusips(
             )
         elif outcome == "already_resolved":
             already_resolved += 1
+        elif outcome == "busy":
+            # #2327: another writer holds the CUSIP lock. The row stays pending for the next run.
+            logger.info("13F CUSIP resolver: %s busy under another writer's lock; left pending", cusip)
         else:  # 'conflict'
             _tombstone(conn, cusip=cusip, status="conflict")
             conflict += 1
@@ -1444,14 +1477,19 @@ def _promote_openfigi_mapping(
     *,
     cusip: str,
     instrument_id: int,
-) -> bool:
+) -> Literal["inserted", "present", "skipped"]:
     """Insert the OpenFIGI mapping into ``external_identifiers``.
 
-    Returns True iff a new row was inserted. ON CONFLICT DO NOTHING
-    against the ``(provider, identifier_type, identifier_value)``
-    UNIQUE — a re-run that sees a prior OpenFIGI row already in place
-    returns False so the caller can record the difference between
-    "promoted now" and "was already promoted".
+    Returns ``"inserted"`` for a new row and ``"present"`` when a prior
+    OpenFIGI row was already in place (ON CONFLICT DO NOTHING against the
+    ``(provider, identifier_type, identifier_value)`` UNIQUE), so the
+    caller can tell "promoted now" from "was already promoted". Both
+    leave the CUSIP mapped. ``"skipped"`` (#2327) leaves it unmapped and
+    its bulk rows pending: another writer holds the CUSIP lock (retried
+    next pass), or another instrument already holds the CUSIP under any
+    provider (the 13D/G bridge's ``sec`` row, which the per-provider
+    unique index cannot see; ``sweep_bulk_cusips_resolved_via_extid``
+    then re-labels the rows).
 
     ``is_primary=FALSE`` because OpenFIGI is the FALLBACK provider —
     the SEC curated mapping (``provider='sec'``) is authoritative when
@@ -1461,7 +1499,27 @@ def _promote_openfigi_mapping(
     identifier_type) triple anyway, so primary-FALSE is the safe
     default.
     """
+    if not try_lock_cusip(conn, cusip):
+        logger.info("openfigi sweep: cusip %s busy under another writer's lock; left pending", cusip)
+        return "skipped"
     with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT 1 FROM external_identifiers
+             WHERE identifier_type = 'cusip'
+               AND identifier_value = %(cusip)s
+               AND instrument_id <> %(instrument_id)s
+             LIMIT 1
+            """,
+            {"instrument_id": instrument_id, "cusip": cusip},
+        )
+        if cur.fetchone() is not None:
+            logger.warning(
+                "openfigi sweep: cusip %s already mapped to another instrument; not promoting to instrument_id=%d",
+                cusip,
+                instrument_id,
+            )
+            return "skipped"
         # ON CONFLICT inference against the partial unique index
         # ``uq_external_identifiers_provider_value_non_cik`` (sql/143).
         # The partial index has a WHERE predicate
@@ -1487,7 +1545,7 @@ def _promote_openfigi_mapping(
             """,
             {"instrument_id": instrument_id, "cusip": cusip},
         )
-        return cur.rowcount == 1
+        return "inserted" if cur.rowcount == 1 else "present"
 
 
 def _tombstone_bulk_rows_for_cusip(
@@ -1721,11 +1779,14 @@ def _sweep_pass(
                     cusip,
                 )
             continue
-        inserted = _promote_openfigi_mapping(
+        promotion = _promote_openfigi_mapping(
             conn,
             cusip=cusip,
             instrument_id=instrument_id,
         )
+        if promotion == "skipped":
+            continue
+        inserted = promotion == "inserted"
         if inserted:
             promoted_count += 1
         # Tombstone all bulk rows for this CUSIP either way — even when

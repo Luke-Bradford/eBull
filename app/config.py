@@ -131,6 +131,11 @@ class Settings(BaseSettings):
     # SEC EDGAR requires no API key (public API, 10 req/s fair-use limit)
     sec_user_agent: str = "eBull dev@example.com"
 
+    # #2327 — the Schedule 13D/G issuer-CUSIP bridge in ``cusip_universe_backfill``. Off by default: the job has
+    # ``catch_up_on_boot``, and the spec's deploy needs the A/B and the observation before-image taken before its
+    # first write. Setting it false again is rollback step 1 (spec "Rollback").
+    cusip_13dg_bridge_enabled: bool = False
+
     # Yahoo Finance per-ticker RSS news feed (#1750) rejects the default
     # httpx User-Agent; a browser-like UA is required (verified). No API key.
     news_rss_user_agent: str = "Mozilla/5.0 (compatible; eBull/1.0; +research)"
