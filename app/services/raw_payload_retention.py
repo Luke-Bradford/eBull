@@ -26,7 +26,9 @@ stored. Server-side ``encode(sha256(convert_to(payload, 'UTF8')), 'hex')``
 equals Python ``hashlib.sha256(text.encode('utf-8')).hexdigest()``
 (verified on dev PG 17, 2026-06-10) — so the sweep never ships
 multi-MB payloads to the client, and the re-fetch verifier hashes the
-decoded text, immune to transfer-encoding/charset variance.
+decoded text, immune to transfer-encoding/charset variance. The text is
+the provider's canonical body: ``fetch_document_text`` strips the SEC
+edge's injected script (#3899), which otherwise breaks every match.
 """
 
 from __future__ import annotations

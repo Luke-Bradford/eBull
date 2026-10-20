@@ -13532,3 +13532,19 @@ neighbouring container and match it.**
   re-raise so the run still records as failed. If the existing step then fails too, raise one error naming both:
   `job_runs.error_msg` is `str(exc)`, so the later failure otherwise hides the earlier one.
 - Enforced in: `app/workers/scheduler.py::cusip_universe_backfill`; `tests/test_cusip_universe_backfill_job.py`.
+
+### A re-fetched EDGAR HTML body is not the stored body: the SEC edge injects a rotating script (#3899, 2026-10-20)
+
+- Symptom: #3899 planned to sweep DEF 14A bodies on the premise that `rehydrate_raw_document` re-fetches and verifies
+  by sha256. A live round-trip failed 72 of 76 sampled bodies. Since bodies fetched 2026-09-20, www.sec.gov's edge
+  appends `<script type="text/javascript"  src="/<token>"></script>` near `</body>`, and the token rotates. So no
+  pre-onset body matches a re-fetch, and a post-onset hash stops matching at the next rotation. 253 stored DEF 14A
+  bodies carried it; parse outputs were identical with and without it (253 of 253).
+- Prevention: before any retention or rehydrate change rests on "re-fetch reproduces the bytes", run a live
+  round-trip on a sample spanning years and record the mismatch count. Strip transport artefacts at the raw body
+  boundary (`fetch_document_text`, `prefetch_document_texts`), never in a parser, so stored bytes and hashes are the
+  document as filed. A strip rule must exclude SEC's own content: XBRL viewer pages in `.txt` submissions carry
+  `<script src="Show.js">` (1,896 stored rows), which the edge's empty, root-relative shape does not match.
+- Enforced in: `app/providers/implementations/sec_edgar.py::strip_sec_edge_script`;
+  `app/services/sec_pipelined_fetcher.py::prefetch_document_texts`; `tests/test_sec_edge_script_strip.py`;
+  `scripts/repair_3899_sec_edge_script.py` (stored-body repair, `--parse-ab`).

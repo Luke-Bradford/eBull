@@ -34,6 +34,7 @@ import httpx
 
 from app.providers.implementations.sec_edgar import (
     SubmissionsPageResult,
+    strip_sec_edge_script,
 )
 from app.providers.sec_throttle_metrics import incr_sec_429
 
@@ -315,7 +316,8 @@ def prefetch_document_texts(
                     out[key] = None
                     continue
                 if 200 <= resp.status_code < 300:
-                    out[key] = resp.text
+                    # #3899 — same canonical body as the sync fetch.
+                    out[key] = strip_sec_edge_script(resp.text)
                 # Else: omit from cache.
         return out
 

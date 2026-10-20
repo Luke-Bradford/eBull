@@ -103,6 +103,7 @@ _ALLOWED_CALLER_FILES: frozenset[str] = frozenset(
         "tests/test_insider_form3_ingest.py",
         "tests/test_eight_k_events_ingest.py",
         "tests/test_concurrent_fetch.py",
+        "tests/test_sec_edge_script_strip.py",  # #3899 provider strip, no new service caller
         "tests/test_institutional_holdings_ingester.py",
         "tests/test_def14a_ingest.py",
         "tests/test_ncen_classifier.py",
