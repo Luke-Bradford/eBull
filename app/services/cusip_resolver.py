@@ -247,7 +247,8 @@ BulkCusipSource = Literal["bulk_13f_dataset", "bulk_nport_dataset"]
 
 
 def _cusip_lock_key(cusip: str) -> str:
-    return f"external_identifiers.cusip:{cusip}"
+    # Normalised here, as every writer stores the value, so no caller's spelling can split one CUSIP's lock.
+    return f"external_identifiers.cusip:{cusip.strip().upper()}"
 
 
 def lock_cusip(conn: psycopg.Connection[Any], cusip: str) -> None:

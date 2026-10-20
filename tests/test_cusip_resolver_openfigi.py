@@ -1440,7 +1440,7 @@ class TestPromotionUnderTheCusipLock:
         _seed_instrument(conn, instrument_id=232_713, symbol="BSY")
         conn.commit()
         with psycopg.connect(test_database_url()) as other:
-            lock_cusip(other, "925652109")  # held until `other` ends its transaction
+            lock_cusip(other, " 925652109\n")  # held until `other` ends; the key is normalised, so it still collides
             assert _promote_openfigi_mapping(conn, cusip="925652109", instrument_id=232_713) == "skipped"
             conn.rollback()
         assert _promote_openfigi_mapping(conn, cusip="925652109", instrument_id=232_713) == "inserted"

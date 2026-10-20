@@ -13516,7 +13516,8 @@ neighbouring container and match it.**
   CUSIPs. Two shared CUSIPs taken in opposite orders deadlock and abort a whole job transaction (Codex checkpoint 2).
 - Prevention: before adding a shared per-key lock, list every taker and how many keys each holds per transaction.
   Only a taker holding one key may wait; a taker holding several takes `pg_try_advisory_xact_lock` and defers a busy
-  key to its next run. A savepoint does not release a transaction-scoped advisory lock.
+  key to its next run. A savepoint does not release a transaction-scoped advisory lock. Normalise the key inside the
+  lock helper, as the identifier is stored, so a caller's spelling cannot split one key's lock (bot, PR #3929).
 - Enforced in: `app/services/cusip_resolver.py::lock_cusip` / `try_lock_cusip`;
   `tests/test_cusip_resolver_openfigi.py::TestPromotionUnderTheCusipLock`; spec Amendment 1 in
   `docs/specs/etl/2026-10-20-2327-13dg-cusip-bridge.md`.
