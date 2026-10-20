@@ -90,10 +90,11 @@ _FROM_PRICE_DAILY = re.compile(r"(?i)\bfrom\s+price_daily\b")
 # 1. The inventory
 # ---------------------------------------------------------------------------
 #
-# One entry per ``FROM price_daily`` occurrence under ``app/``. Line numbers are
-# for navigation and are NOT asserted — they churn on every unrelated edit. The
-# guard asserts per-file OCCURRENCE COUNTS, which is a drift detector on the file
-# set and nothing stronger (see :func:`guard_inventory`).
+# One entry per ``FROM price_daily`` occurrence under ``app/``. The guard asserts
+# per-file OCCURRENCE COUNTS, a drift detector on the file set and nothing stronger
+# (see :func:`guard_inventory`). Line numbers are asserted separately: each must hold
+# a ``FROM price_daily`` (``tests/test_3046_consumer_inventory.py::
+# test_inventory_lines_point_at_their_occurrence``), not that it is the labelled query.
 
 
 @dataclass(frozen=True)
@@ -507,8 +508,6 @@ INVENTORY: tuple[Occurrence, ...] = (
     ),
     # --- #3841 point-in-time market cap ----------------------------------------
     Occurrence(
-        # Line 515 holds ``_BARS_SQL``'s ``FROM price_daily`` after #3908's docstring grew by three lines;
-        # ``tests/test_3046_consumer_inventory.py::test_inventory_lines_point_at_their_occurrence`` asserts it.
         "app/services/pit_market_cap_build.py",
         515,
         "_BARS_SQL closes and 21-bar mean dollar volume",
