@@ -360,6 +360,7 @@ def bind_13dg_cusips(
         iid, cik = d.instrument_id, d.issuer_cik
         with conn.transaction():
             lock_cusip(conn, cusip)
+            # siblings_for_issuer_cik returns list[int] ordered by instrument_id; R3 holds iff it is exactly [iid].
             if siblings_for_issuer_cik(conn, cik) != [iid]:
                 result.raced["R3"] += 1
                 continue

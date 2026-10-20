@@ -110,3 +110,21 @@ def test_enabled_bridge_runs_before_the_fuzzy_pass(harness: SimpleNamespace, mon
     assert harness.calls == ["lists", ("bind", 7), "fuzzy"]
     assert harness.tracker.row_count == 5
     assert harness.tracker.note is not None and "13dg-bridge-v1" in harness.tracker.note
+
+
+def test_both_failures_reach_the_recorded_error(harness: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(scheduler.settings, "cusip_13dg_bridge_enabled", True)
+
+    def boom(conn: Any) -> Any:
+        raise RuntimeError("SEC 503")
+
+    def fuzzy_boom(conn: Any) -> Any:
+        raise ValueError("fuzzy broke")
+
+    monkeypatch.setattr(sec_13f_securities_list, "ensure_window_lists", boom)
+    monkeypatch.setattr(sec_13f_securities_list, "backfill_cusip_coverage", fuzzy_boom)
+
+    with pytest.raises(RuntimeError) as info:
+        scheduler.cusip_universe_backfill()
+
+    assert "fuzzy broke" in str(info.value) and "SEC 503" in str(info.value)

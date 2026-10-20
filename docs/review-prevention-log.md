@@ -13528,5 +13528,6 @@ neighbouring container and match it.**
   while the code comment said a bridge refusal is an abstention (review bot, PR #3929).
 - Prevention: when adding a step ahead of an existing one in a job, decide whether its failure may cost the existing
   step and say so in the code. If it may not, catch it, roll the connection back, run the existing step, then
-  re-raise so the run still records as failed.
+  re-raise so the run still records as failed. If the existing step then fails too, raise one error naming both:
+  `job_runs.error_msg` is `str(exc)`, so the later failure otherwise hides the earlier one.
 - Enforced in: `app/workers/scheduler.py::cusip_universe_backfill`; `tests/test_cusip_universe_backfill_job.py`.

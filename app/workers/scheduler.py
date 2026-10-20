@@ -10668,7 +10668,15 @@ def cusip_universe_backfill() -> None:
                     conn.rollback()
                     logger.exception("cusip_universe_backfill: 13D/G bridge failed; running the fuzzy pass")
                     bridge_error = exc
-            result = backfill_cusip_coverage(conn)
+            try:
+                result = backfill_cusip_coverage(conn)
+            except Exception as exc:
+                if bridge_error is None:
+                    raise
+                # job_runs.error_msg is str(exc): name both failures, or the fuzzy one hides the bridge's.
+                raise RuntimeError(
+                    f"fuzzy pass failed: {exc!r}; the 13D/G bridge had already failed: {bridge_error!r}"
+                ) from exc
 
         tracker.row_count = result.inserted + (sum(bridge.inserted.values()) if bridge is not None else 0)
         notes: list[str] = []
