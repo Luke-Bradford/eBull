@@ -45,6 +45,7 @@ def test_a_zero_total_skips_the_span_test() -> None:
 def test_a_nan_total_is_not_zero_and_takes_the_span_test() -> None:
     # SQL: SUM(...) = 0 is false for NaN, so the date comparison decides, as for a positive total.
     assert guard_cause(_window(_LONG, ["1", "NaN", "1", "1"])) == "window over one calendar year"
+    assert observed_ttm(_window(_LONG, ["1", "NaN", "1", "1"])) == (None, "window over one calendar year")
     value, cause = observed_ttm(_window(_STANDARD, ["1", "NaN", "1", "1"]))
     assert value is not None and value.is_nan() and cause == "published"  # NaN sorts above 0: not a negative member
 
