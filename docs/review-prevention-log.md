@@ -13475,3 +13475,19 @@ neighbouring container and match it.**
   `tests/test_instrument_valuation_pb_total_form.py::test_a_later_stored_period_ends_the_quarter_equity`, and
   `scripts/measure_3903_pb_acceptance.py` (the rule-2 count exception with per-factor bands). Spec
   `docs/specs/fundamentals/2026-10-20-3903-pb-total-form.md` Amendment 1.
+
+### A derived metric read the legacy 13F table, not the canonical observation layer (#3908, 2026-10-20)
+
+- Symptom: #3841's PIT market cap read its 13F anchor unit values from `institutional_holdings`, which data-engineer
+  SKILL.md classes as a legacy typed table that rollups no longer read. History restored by the bulk 13F drain after a
+  late CUSIP mapping lands only in `ownership_institutions_observations` (#2328). GOOGL showed 21–69 filers per
+  quarter in the legacy table against 4,993–5,731 in the observation layer. 74 left anchors were refused as `thin`
+  while the canonical layer held ≥ 20 filers. The refusal was read as a small-cap coverage gap and ticketed as
+  research for a second price anchor.
+- Prevention: before a new reader picks an ownership table, check the data-engineer two-layer rule and read the
+  canonical layer. When a refusal looks like source thinness, first compare the reader's table against the
+  canonical layer on one large name. Before designing around a coverage gap, break the refused population down by
+  cause, for example "has a CUSIP at all": in #3908, 279 of 771 refusals had no CUSIP mapped (#2327).
+- Enforced in: `app/services/pit_market_cap_build.py::_UNIT_VALUES_SQL`;
+  `tests/test_pit_market_cap_build_db.py::test_unit_values_reader_selects_the_latest_active_economic_report_then_qualifies`;
+  `scripts/measure_3908_premise.py`; spec Amendment 2 in `docs/specs/fundamentals/2026-10-16-3841-pit-market-cap.md`.

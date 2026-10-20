@@ -16,7 +16,7 @@ from typing import Any
 import psycopg
 import pytest
 
-from app.services.pit_market_cap_build import _TRADES_SQL, run_market_cap_pit_rebuild
+from app.services.pit_market_cap_build import _TRADES_SQL, _UNIT_VALUES_SQL, run_market_cap_pit_rebuild
 from tests.fixtures.ebull_test_db import STOCKS_TYPE_ID, seed_universe_anchor, test_database_url
 
 Conn = psycopg.Connection[Any]
@@ -214,3 +214,70 @@ def test_trades_reader_keeps_only_the_instruments_own_issuer(ebull_test_conn: Co
         _TRADES_SQL, {"ids": [1], "first": date(2024, 6, 1), "report_floor": date(2023, 6, 1)}
     ).fetchall()
     assert sorted(row[1] for row in rows) == ["F-OWN", "F-PRED"]
+
+
+def test_unit_values_reader_selects_the_latest_active_economic_report_then_qualifies(ebull_test_conn: Conn) -> None:
+    """Spec Amendment 2 (#3908): the anchors read ``ownership_institutions_observations``. Superseded rows and voting
+    overlays are out before selection; the latest report is chosen over every exposure; only then do its EQUITY rows
+    qualify, so a newer options-only report removes the filer instead of reviving its older equity row."""
+    conn = ebull_test_conn
+    _seed(conn)
+    quarter = date(2026, 3, 31)
+    rows = (
+        # (filer, accession, filed, exposure, shares, value, nature, known_to). Filer 12's latest report holds
+        # no equity; filer 14's row is a voting overlay, not a position.
+        (
+            "0000000011",
+            "0000000011-26-000001",
+            "2026-05-01",
+            "EQUITY",
+            100,
+            1000,
+            "economic",
+            None,
+        ),  # replaced by its amendment
+        ("0000000011", "0000000011-26-000002", "2026-05-10", "EQUITY", 100, 1200, "economic", None),
+        ("0000000012", "0000000012-26-000001", "2026-05-01", "EQUITY", 100, 1000, "economic", None),
+        (
+            "0000000012",
+            "0000000012-26-000002",
+            "2026-05-10",
+            "PUT",
+            50,
+            600,
+            "economic",
+            None,
+        ),  # latest report holds no equity
+        ("0000000013", "0000000013-26-000001", "2026-05-01", "EQUITY", 100, 1000, "economic", None),
+        ("0000000013", "0000000013-26-000009", "2026-05-20", "EQUITY", 100, 9900, "economic", NOW),  # superseded
+        (
+            "0000000014",
+            "0000000014-26-000001",
+            "2026-05-01",
+            "EQUITY",
+            100,
+            5000,
+            "voting",
+            None,
+        ),  # overlay, not a position
+    )
+    for filer, accession, filed, exposure, shares, value, nature, known_to in rows:
+        conn.execute(
+            "INSERT INTO ownership_institutions_observations (instrument_id, filer_cik, filer_name, ownership_nature, "
+            "source, source_document_id, source_accession, filed_at, period_end, known_to, ingest_run_id, shares, "
+            "market_value_usd, exposure_kind) VALUES (1, %s, %s, %s, '13f', %s, %s, %s, %s, %s, gen_random_uuid(), "
+            "%s, %s, %s)",
+            (filer, f"Filer {filer}", nature, accession, accession, filed, quarter, known_to, shares, value, exposure),
+        )
+    conn.commit()
+
+    got = {
+        filer: (unit_value, accessions)
+        for _iid, _q, filer, unit_value, accessions, _filed in conn.execute(
+            _UNIT_VALUES_SQL, {"ids": [1], "quarters": [quarter]}
+        ).fetchall()
+    }
+    assert got == {
+        "0000000011": (12.0, ["0000000011-26-000002"]),
+        "0000000013": (10.0, ["0000000013-26-000001"]),
+    }

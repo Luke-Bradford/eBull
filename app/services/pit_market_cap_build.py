@@ -20,11 +20,14 @@ Readers, each fixed by its source rule:
   share-count fact whose accession the index cannot time, is refused whole (``CikRefusal``) rather than published on
   the counts it can time: a newer count it cannot time may already have been public. A fact whose accession only a
   non-primary CIK lists is a predecessor registrant's own filing and is dropped before selection;
-* 13F unit values -- per (instrument, quarter, filer): the filer's latest-filed report for the quarter that holds the
-  instrument (an amendment replaces it), the median value / shares over rows with finite shares > 0, value > 0 and no
-  put/call. The latest report is chosen per instrument, not per filer and quarter, because a 13F-HR/A is either a
-  RESTATEMENT (replaces) or NEW HOLDINGS (adds rows and leaves the original standing) and ``institutional_holdings``
-  does not store which. Per filer and quarter would drop every original that a NEW HOLDINGS amendment followed;
+* 13F unit values -- read from the canonical observation layer, ``ownership_institutions_observations`` (spec
+  Amendment 2, #3908): active economic 13F rows (``source = '13f'``, ``ownership_nature = 'economic'``, ``known_to IS
+  NULL``). Per (instrument, quarter, filer CIK): the filer's latest-filed report for the quarter that holds the
+  instrument (an amendment replaces it), the median value / shares over its EQUITY rows with shares > 0 and value > 0.
+  The legacy ``institutional_holdings`` table lacks the history the bulk 13F drain restores after a late CUSIP mapping
+  (#2328). The latest report is chosen per instrument, not per filer and quarter, because a 13F-HR/A is either a
+  RESTATEMENT (replaces) or NEW HOLDINGS (adds rows and leaves the original standing) and neither table stores
+  which. Per filer and quarter would drop every original that a NEW HOLDINGS amendment followed;
   per instrument keeps a restated-away holding's original row as that filer's value (an accepted limit: one filer
   among the >= 20 in the median);
 * dollar volume -- the mean close x volume over the 21 stored bars ending at the session, only when all 21 carry one;
@@ -517,19 +520,23 @@ _BARS_SQL = """
 # The premise script's shape (``scripts/measure_3841_premise.py``): GROUP BY ... max(filed_at) picks each filer's
 # latest report for the quarter in about a minute where DISTINCT ON took over 20.
 _UNIT_VALUES_SQL = """
-    WITH latest AS (
-        SELECT h.filer_id, h.instrument_id, h.period_of_report, max(h.filed_at) AS filed_at
-        FROM institutional_holdings h
-        WHERE h.instrument_id = ANY(%(ids)s::bigint[]) AND h.period_of_report = ANY(%(quarters)s::date[])
-        GROUP BY 1, 2, 3
+    WITH active AS (
+        SELECT o.filer_cik, o.instrument_id, o.period_end, o.source_accession, o.filed_at, o.exposure_kind,
+               o.shares, o.market_value_usd
+        FROM ownership_institutions_observations o
+        WHERE o.instrument_id = ANY(%(ids)s::bigint[]) AND o.period_end = ANY(%(quarters)s::date[])
+          AND o.source = '13f' AND o.ownership_nature = 'economic' AND o.known_to IS NULL
+    ),
+    latest AS (
+        SELECT filer_cik, instrument_id, period_end, max(filed_at) AS filed_at FROM active GROUP BY 1, 2, 3
     )
-    SELECT h.instrument_id, h.period_of_report, h.filer_id,
-           percentile_cont(0.5) WITHIN GROUP (ORDER BY (h.market_value_usd / h.shares)::double precision),
-           array_agg(DISTINCT h.accession_number), max(h.filed_at)
-    FROM institutional_holdings h
-    JOIN latest l USING (filer_id, instrument_id, period_of_report, filed_at)
-    WHERE h.is_put_call IS NULL AND h.shares > 0 AND h.market_value_usd > 0
-      AND h.shares <> 'NaN'::numeric AND h.market_value_usd <> 'NaN'::numeric
+    SELECT a.instrument_id, a.period_end, a.filer_cik,
+           percentile_cont(0.5) WITHIN GROUP (ORDER BY (a.market_value_usd / a.shares)::double precision),
+           array_agg(DISTINCT a.source_accession), max(a.filed_at)
+    FROM active a
+    JOIN latest l USING (filer_cik, instrument_id, period_end, filed_at)
+    WHERE a.exposure_kind = 'EQUITY' AND a.shares > 0 AND a.market_value_usd > 0
+      AND a.shares <> 'NaN'::numeric AND a.market_value_usd <> 'NaN'::numeric
     GROUP BY 1, 2, 3
 """
 
