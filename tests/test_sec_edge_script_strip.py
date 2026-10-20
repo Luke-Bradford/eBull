@@ -103,3 +103,8 @@ def test_swept_hash_classification() -> None:
     assert classify_swept(_sha(_INJECTED.replace("HHTAfbn4", "unknown")), _FILED) == "unverifiable"
     assert classify_swept(_sha(_FILED), None) == "gone"
     assert _with_token("plain text, no body tag", _KNOWN_TOKENS[0]) is None
+    # Reconstruction inserts exactly where the strip removes, in either case.
+    for body in (_FILED, _FILED.replace("</body>", "</BODY>")):
+        for token in _KNOWN_TOKENS:
+            injected = _with_token(body, token)
+            assert injected is not None and strip_sec_edge_script(injected) == body

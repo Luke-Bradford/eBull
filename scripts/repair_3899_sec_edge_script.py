@@ -35,10 +35,12 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import re
 import sys
 from collections import Counter
 from typing import Any
 
+import httpx
 import psycopg
 
 from app.config import settings
@@ -72,11 +74,19 @@ def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+_BODY_CLOSE_RE = re.compile(r"</(?i:body)>")
+
+
 def _with_token(body: str, token: str) -> str | None:
-    """``body`` with the edge tag re-inserted before its last ``</body>``, or None without one."""
-    at = body.lower().rfind("</body")
-    if at < 0:
+    """``body`` with the edge tag re-inserted before its last ``</body>``, or None without one.
+
+    The same anchor ``strip_sec_edge_script`` removes at (pinned by
+    ``strip_sec_edge_script(_with_token(b, t)) == b`` in the tests).
+    """
+    closes = list(_BODY_CLOSE_RE.finditer(body))
+    if not closes:
         return None
+    at = closes[-1].start()
     return f'{body[:at]}<script type="text/javascript"  src="{token}"></script>{body[at:]}'
 
 
@@ -173,7 +183,7 @@ def _swept(conn: psycopg.Connection[Any], *, apply: bool) -> int:
         for accession, kind, url, recorded in rows:
             try:
                 canonical = provider.fetch_document_text(str(url))
-            except Exception as exc:  # noqa: BLE001 — one 5xx/429 must not abort a census of thousands
+            except httpx.HTTPError as exc:  # one 5xx/429 or transport failure must not abort the census
                 print(f"  fetch error {accession} {kind}: {type(exc).__name__}: {exc}")
                 tally[(kind, "error")] += 1
                 continue
