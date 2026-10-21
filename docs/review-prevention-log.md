@@ -13656,3 +13656,17 @@ neighbouring container and match it.**
   names.
 - Enforced in: `tests/test_schedule13_adapter.py::test_adapter_parses_the_mm_dd_yyyy_date_sec_ships`;
   `app/services/rewash_filings.py` (the 13D/G spec imports `_PARSER_VERSION_13DG`); `scripts/ab_3948_13dg_date_of_event.py`.
+
+### A value companyfacts agrees with can still be wrong: read the inline display before blaming the parser (#3947, 2026-10-21)
+
+- First seen in: #3947 (spec PR, 2026-10-21). EFC's stored DPS of 390 for $0.39 looked like a parser scale bug. SEC
+  companyfacts serves 390 too, because the filer's iXBRL tags the displayed `0.39` with `scale="3"` and Inline XBRL
+  multiplies the display by 10^scale. XBRL US DQC.US.0179.10141 flags exactly this. A sibling class (FMBH tags `98`
+  for $0.98 with no scale) has no published rule, and three measured ratio discriminators failed to isolate it.
+- Prevention: when a stored XBRL value looks mis-scaled, compare it with companyfacts first, then open the filing's
+  inline document and read the element's `scale`, `sign` and `format` before touching our parser. Read every
+  document in the accession's inline document set: a filing can carry its statements in an exhibit (WSO's 10-K puts
+  them in EX-13), so the primary document alone can show "no fact". A DQC rule is a warning, so a correction built
+  on one is a declared policy with every case listed, not a proof.
+- Enforced in: `docs/specs/fundamentals/2026-10-21-3947-dps-inline-scale.md`;
+  `scripts/measure_3947_dps_inline_scale.py`.
