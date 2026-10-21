@@ -30,9 +30,11 @@ Key invariants:
   via a closed mapping (KeyError on unknown form — loud, not silent;
   Codex 1b HIGH).
 * ``date_of_event`` (13D) / ``event_date`` (13G) is dispatched on
-  source. The dict value is a string; we attempt ISO parse and fall
-  back to ``None`` on ``ValueError`` (legacy fixtures use
-  ``MM/DD/YYYY`` which the in-house parser tolerated).
+  source. edgartools passes the XML text through unparsed, and the
+  Schedule 13D/G XML ships ``<dateOfEvent>`` and
+  ``<eventDateRequiresFilingThisStatement>`` as ``MM/DD/YYYY``
+  (``data-sources/sec-edgar.md`` date-format table), so the value is
+  parsed with the in-house parser's ``_parse_date_loose`` (#3948).
 * Share-power / aggregate / percent fields are coerced to ``Decimal``
   for NUMERIC fidelity (NUMERIC schema columns; edgartools returns
   int / float).
@@ -49,6 +51,7 @@ from app.providers.implementations.sec_13dg import (
     BlockholderReportingPerson,
     Status,
     SubmissionType,
+    _parse_date_loose,
     extract_filer_cik_from_primary_doc,
     extract_issuer_identity_from_primary_doc,
 )
@@ -111,22 +114,14 @@ def _to_decimal(value: Any) -> Decimal | None:
 
 
 def _parse_date_or_none(value: Any) -> date | None:
-    """Parse an ISO date string into ``date``; return ``None`` for
-    empty / malformed input. Legacy fixtures use ``MM/DD/YYYY`` which
-    ``date.fromisoformat`` rejects with ``ValueError`` — we catch and
-    return ``None`` rather than crash. The in-house parser handled
-    MM/DD/YYYY; the cutover to edgartools-backed parsing accepts the
-    behaviour change because every retention-window filing is
-    post-2024-12-18 (XML-mandate floor) and SEC's structured XML uses
-    ISO dates in modern filings."""
-    if not value:
+    """Parse the cover's event date (``MM/DD/YYYY`` as filed; the dash and
+    ISO forms ``_parse_date_loose`` also accepts); ``None`` for an empty,
+    non-string or unparseable value. Until #3948 this accepted ISO only,
+    on the false premise that modern XML ships ISO dates, and stored NULL
+    on every row."""
+    if not isinstance(value, str) or not value.strip():
         return None
-    if not isinstance(value, str):
-        return None
-    try:
-        return date.fromisoformat(value)
-    except ValueError:
-        return None
+    return _parse_date_loose(value.strip())
 
 
 # ---------------------------------------------------------------------------

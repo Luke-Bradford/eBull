@@ -89,7 +89,7 @@ def test_adapter_returns_blockholder_filing_for_13d_dict() -> None:
     assert filing.issuer_cusip == "518439104"
     assert filing.securities_class_title == "Class A Common Stock, par value $.01 per share"
 
-    # date_of_event: ISO-parsed when well-formed
+    # date_of_event: the fixture's ISO form also parses (#3948 covers MM/DD/YYYY)
     from datetime import date
 
     assert filing.date_of_event == date(2025, 11, 3)
@@ -244,18 +244,44 @@ def test_adapter_raises_on_unknown_manifest_form() -> None:
 
 
 # ---------------------------------------------------------------------------
-# MM/DD/YYYY date_of_event defensive handling
+# The cover's event date (#3948)
 # ---------------------------------------------------------------------------
 
 
-def test_adapter_yields_none_date_of_event_for_malformed_string() -> None:
-    """``date.fromisoformat`` raises on ``MM/DD/YYYY`` — adapter
-    catches ``ValueError`` and yields ``None`` rather than crashing.
-    Existing legacy fixtures use MM/DD/YYYY; the in-house parser
-    handled it, the edgartools-backed path falls back to ``None``."""
+@pytest.mark.parametrize(
+    ("source", "xml", "tag", "iso"),
+    [
+        ("sec_13d", _FIXTURE_13D_XML, "dateOfEvent", "2025-11-03"),
+        ("sec_13g", _FIXTURE_13G_XML, "eventDateRequiresFilingThisStatement", "2025-09-30"),
+    ],
+)
+def test_adapter_parses_the_mm_dd_yyyy_date_sec_ships(source: str, xml: str, tag: str, iso: str) -> None:
+    """SEC's 13D/G XML ships the event date as ``MM/DD/YYYY`` (stored primary doc of
+    ``0001193125-26-427249``: ``<dateOfEvent>09/15/2026</dateOfEvent>``), and edgartools passes it
+    through unparsed. Until #3948 the adapter accepted ISO only and stored NULL on every row."""
+    from datetime import date
+
+    from edgar.beneficial_ownership.schedule13 import Schedule13D, Schedule13G
+
+    y, m, d = iso.split("-")
+    body = xml.replace(f"<{tag}>{iso}</{tag}>", f"<{tag}>{m}/{d}/{y}</{tag}>")
+    assert f"{m}/{d}/{y}" in body
+    parsed = (Schedule13D if source == "sec_13d" else Schedule13G).parse_xml(body)
+
+    filing = build_filing_from_edgartools_dict(
+        parsed,
+        source=source,  # type: ignore[arg-type]
+        manifest_form="SC 13D" if source == "sec_13d" else "SC 13G",
+        manifest_filer_cik="0002093607",
+    )
+
+    assert filing.date_of_event == date(int(y), int(m), int(d))
+
+
+@pytest.mark.parametrize("value", ["not a date", "13/45/2025", "2025-13-45", "  ", None, 20251103])
+def test_adapter_yields_none_date_of_event_for_unparseable_values(value: object) -> None:
     parsed = _parsed_13d()
-    # Replace the parsed date string with a non-ISO format.
-    parsed["date_of_event"] = "11/03/2025"
+    parsed["date_of_event"] = value
 
     filing = build_filing_from_edgartools_dict(
         parsed,

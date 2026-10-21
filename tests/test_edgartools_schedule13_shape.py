@@ -43,9 +43,8 @@ from edgar.beneficial_ownership.schedule13 import Schedule13D, Schedule13G
 # element (NOT the in-house parser's ``<coverPage>``; edgartools requires
 # the mandated element name per the parse_xml source at
 # .venv/lib/.../schedule13.py:163-166 — "Invalid XML: missing
-# <coverPageHeader>"). Date format is ISO so the adapter's
-# ``date.fromisoformat`` path is exercised; the production fixture
-# tolerates MM/DD/YYYY by catching ``ValueError`` upstream.
+# <coverPageHeader>"). The date is ISO here; SEC ships MM/DD/YYYY, which
+# ``tests/test_schedule13_adapter.py`` substitutes in (#3948).
 _FIXTURE_13D_XML = """<?xml version="1.0" encoding="UTF-8"?>
 <edgarSubmission xmlns="http://www.sec.gov/edgar/schedule13D">
   <headerData>

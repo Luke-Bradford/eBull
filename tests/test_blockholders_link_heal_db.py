@@ -3,8 +3,9 @@
 `ON CONFLICT DO NOTHING` made a NULL `instrument_id` permanent: a later,
 successful re-ingest that DID resolve the issuer could not repair the link
 written by an earlier one that could not. The action is now a conditional
-`DO UPDATE` restricted to exactly one transition — `instrument_id`
-NULL -> non-NULL — with every other column still immutable on re-ingest.
+`DO UPDATE` restricted to two transitions — `instrument_id` and (#3948)
+`date_of_event`, each NULL -> non-NULL — with every other column still
+immutable on re-ingest.
 
 These drive REAL PostgreSQL deliberately. The return contract rests on
 `RETURNING (xmax = 0)` distinguishing an inserted tuple from one this
@@ -15,7 +16,7 @@ all. That is MVCC behaviour, not something a mocked cursor can pin
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import psycopg
@@ -69,6 +70,7 @@ def _write(
     accession: str = _ACCESSION,
     issuer_cusip: str = "111111111",
     securities_class_title: str | None = "COMMON STOCK",
+    date_of_event: date | None = None,
 ) -> bool:
     return _upsert_filing_row(
         conn,
@@ -80,7 +82,7 @@ def _write(
         issuer_cik="0000999888",
         issuer_cusip=issuer_cusip,
         securities_class_title=securities_class_title,
-        date_of_event=None,
+        date_of_event=date_of_event,
         filed_at=datetime(2026, 6, 14, 12, 44, tzinfo=UTC),
         person=person,
     )
@@ -91,7 +93,7 @@ def _row(conn: psycopg.Connection[tuple], accession: str = _ACCESSION) -> dict[s
         """
         SELECT filing_id, instrument_id, issuer_cusip, securities_class_title,
                aggregate_amount_owned, percent_of_class, submission_type, status,
-               reporter_name, filed_at, fetched_at
+               reporter_name, filed_at, fetched_at, date_of_event
         FROM blockholder_filings WHERE accession_number = %s
         """,
         (accession,),
@@ -161,6 +163,7 @@ def test_heal_touches_no_other_column(ebull_test_conn: psycopg.Connection[tuple]
         "filed_at",
         "fetched_at",
         "filing_id",
+        "date_of_event",
     ):
         assert after[column] == before[column], f"{column} moved on a heal"
 
@@ -246,3 +249,80 @@ def test_a_changed_reporter_identity_inserts_and_leaves_the_old_row_stranded(
         (_ACCESSION,),
     )
     assert cur.fetchall() == [("ACME L.P.", 930007), ("ACME LP", None)]
+
+
+# ---------------------------------------------------------------------------
+# #3948 — the event date: NULL -> non-NULL on re-ingest, never overwritten
+# ---------------------------------------------------------------------------
+
+
+def test_null_event_date_is_filled_by_a_later_reingest_and_nothing_else_moves(
+    ebull_test_conn: psycopg.Connection[tuple],
+) -> None:
+    """The ISO-only adapter stored NULL; a re-drain through the fixed adapter fills it."""
+    conn = ebull_test_conn
+    _seed_instrument(conn, 930101, "DATE")
+    _seed_instrument(conn, 930102, "DAT2")
+    filer_id = _upsert_filer(conn, cik="0000999888", name="FILER CO")
+
+    assert _write(conn, filer_id=filer_id, instrument_id=930101, person=_person()) is True
+    before = _row(conn)
+    assert before["date_of_event"] is None
+
+    # Every other column differs on the re-ingest, the resolved link included.
+    assert (
+        _write(
+            conn,
+            filer_id=filer_id,
+            instrument_id=930102,
+            person=_person(aggregate="999999"),
+            issuer_cusip="222222222",
+            securities_class_title="CLASS B",
+            date_of_event=date(2026, 9, 15),
+        )
+        is False
+    )
+    after = _row(conn)
+    assert after["date_of_event"] == date(2026, 9, 15)
+    for column in before.keys() - {"date_of_event"}:
+        assert after[column] == before[column], f"{column} moved on a date fill"
+
+
+def test_a_stored_event_date_is_never_overwritten(ebull_test_conn: psycopg.Connection[tuple]) -> None:
+    conn = ebull_test_conn
+    filer_id = _upsert_filer(conn, cik="0000999888", name="FILER CO")
+    person = _person()
+
+    assert _write(conn, filer_id=filer_id, instrument_id=None, person=person, date_of_event=date(2026, 1, 2)) is True
+    assert _write(conn, filer_id=filer_id, instrument_id=None, person=person, date_of_event=date(2026, 3, 4)) is False
+    assert _row(conn)["date_of_event"] == date(2026, 1, 2)
+
+
+def test_link_and_event_date_fill_together_and_each_alone(ebull_test_conn: psycopg.Connection[tuple]) -> None:
+    conn = ebull_test_conn
+    _seed_instrument(conn, 930103, "BOTH")
+    filer_id = _upsert_filer(conn, cik="0000999888", name="FILER CO")
+    both, link_only = "9999999999-26-000101", "9999999999-26-000102"
+
+    assert _write(conn, filer_id=filer_id, instrument_id=None, person=_person(), accession=both) is True
+    assert (
+        _write(
+            conn,
+            filer_id=filer_id,
+            instrument_id=930103,
+            person=_person(),
+            accession=both,
+            date_of_event=date(2026, 5, 6),
+        )
+        is False
+    )
+    assert (_row(conn, both)["instrument_id"], _row(conn, both)["date_of_event"]) == (930103, date(2026, 5, 6))
+
+    # A dated row with a NULL link still heals the link, and a NULL date on the re-ingest keeps the stored one.
+    kept = date(2026, 7, 8)
+    assert (
+        _write(conn, filer_id=filer_id, instrument_id=None, person=_person(), accession=link_only, date_of_event=kept)
+        is True
+    )
+    assert _write(conn, filer_id=filer_id, instrument_id=930103, person=_person(), accession=link_only) is False
+    assert (_row(conn, link_only)["instrument_id"], _row(conn, link_only)["date_of_event"]) == (930103, kept)

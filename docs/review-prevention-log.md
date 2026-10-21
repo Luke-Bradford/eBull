@@ -13639,3 +13639,16 @@ neighbouring container and match it.**
   case through the handler, asserting both the output and that the gated read was not called.
 - Enforced in: `app/api/instruments.py` (the comment above `_build_local_stats(valuation_ratios)`),
   `tests/test_api_instrument_summary.py::test_no_sec_cik_publishes_no_key_stats`.
+
+### A column that is NULL on every row is a parse failure until a stored body says otherwise (#3948, 2026-10-21)
+
+- Symptom: `blockholder_filings.date_of_event` was NULL on all 122,141 rows. The edgartools adapter accepted ISO
+  dates only. Its docstring assumed that "SEC's structured XML uses ISO dates in modern filings", but SEC ships
+  `MM/DD/YYYY`, sometimes with a one-digit month. `data-sources/sec-edgar.md` already recorded this. The adapter's
+  own test fixtures used ISO, so they passed. A second defect sat beside it: the 13D/G rewash spec registered
+  `13dg-primary-v1` while the ingest wrote `13dg-primary-v3`, so every stored body read as stale for the rewash.
+- Prevention: before writing a format assumption into a parser, run it on one stored body and check the skill's date
+  table. A fixture is evidence only if it was copied from a real body. When a new column is 100% NULL, re-parse a
+  real body before you call it a data gap. Register a raw kind's parser version once and import it everywhere.
+- Enforced in: `tests/test_schedule13_adapter.py::test_adapter_parses_the_mm_dd_yyyy_date_sec_ships`;
+  `app/services/rewash_filings.py` (the 13D/G spec imports `_PARSER_VERSION_13DG`); `scripts/ab_3948_13dg_date_of_event.py`.

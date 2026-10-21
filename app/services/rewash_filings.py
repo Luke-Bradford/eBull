@@ -58,6 +58,7 @@ import psycopg
 import psycopg.rows
 
 from app.services import raw_filings
+from app.services.blockholders import _PARSER_VERSION_13DG
 from app.services.def14a_ingest import _PARSER_VERSION_DEF14A
 from app.services.institutional_holdings import acquire_13f_accession_write_lock
 from app.services.raw_filings import DocumentKind, RawFilingDocument
@@ -1517,7 +1518,9 @@ def _apply_blockholders(
 register_parser(
     ParserSpec(
         document_kind="primary_doc_13dg",
-        current_version="13dg-primary-v1",
+        # The ingest's own constant (#3948): a separate literal here had drifted to
+        # v1 while the ingest wrote v2/v3, so every stored body read as stale.
+        current_version=_PARSER_VERSION_13DG,
         apply_fn=_apply_blockholders,
     )
 )
