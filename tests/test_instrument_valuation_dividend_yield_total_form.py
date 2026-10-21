@@ -33,6 +33,8 @@ SQL_DIR = Path(__file__).resolve().parents[1] / "sql"
 SQL_506 = SQL_DIR / "506_instrument_valuation_pe_total_form.sql"
 SQL_507 = SQL_DIR / "507_instrument_valuation_dividend_yield_total_form.sql"
 ROLLBACK_507 = SQL_DIR / "rollback" / "507_instrument_valuation_dividend_yield_total_form.sql"
+# sql/512 appends a financial_periods_ttm column that sql/507's CREATE OR REPLACE cannot drop; its rollback goes first.
+ROLLBACK_512 = SQL_DIR / "rollback" / "512_financial_periods_ttm_stock_items_combine.sql"
 
 PUBLISHED, ZEROS, NULL_MEMBER, NEGATIVE, NAN, REFUSED, FPI, DUAL, ADS, LEGACY = range(311, 321)
 PAID: dict[int, list[str | None]] = {
@@ -195,6 +197,7 @@ def test_rollback_restores_sql_506(_seed: psycopg.Connection[Any]) -> None:
     _apply(_seed, SQL_506)
     control = _shape_and_rows(_seed)
     _seed.rollback()
+    _apply(_seed, ROLLBACK_512)
     _apply(_seed, SQL_507)
     _apply(_seed, ROLLBACK_507)
     restored = _shape_and_rows(_seed)

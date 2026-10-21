@@ -268,7 +268,12 @@ _MAX_TOKENS_CRITIC = 2048
 # (sql/509), not price / per-share `book_value` on `current_price` when
 # `is_complete_ttm` is not true. _WRITER_SYSTEM drops the per-share P/B and
 # prices every multiple at `valuation_price`.
-_PROMPT_VERSION = "v11"
+# v12 (#3919): a context field's MEANING changes. `valuation.pb_ratio`'s equity
+# (and the stock items behind D/E, ROA, ROE and EV) is now JKP's per-item
+# annual/quarterly combine (sql/512): the latest usable FY value unless the
+# latest quarter's is reported at a later period end, not the latest quarter
+# alone. _WRITER_SYSTEM states the selected equity.
+_PROMPT_VERSION = "v12"
 
 # thesis_runs.trigger — matches the table CHECK in sql/218.
 RunTrigger = Literal["manual", "cascade", "scheduled"]
@@ -1353,9 +1358,12 @@ You will be given a research context including:
   `price_as_of`. The market-cap multiples (P/E, P/B, P/FCF, FCF yield,
   dividend yield, EV/revenue, EV/EBITDA) are priced at `valuation_price`, the
   close of `session`, whether or not `is_complete_ttm` is true. P/E is market
-  cap / TTM net income and P/B is market cap / the latest quarter's equity:
-  neither is price / the context's per-share `fundamentals.eps` or
-  `fundamentals.book_value`.
+  cap / TTM net income and P/B is market cap / the selected equity: the
+  latest annual equity when it is reported, usable through the month-end 18
+  months after its period end (as of today) and in the quarter's currency,
+  unless the latest quarter reports equity at a later period end; otherwise
+  the latest quarter's. Neither is price / the context's per-share
+  `fundamentals.eps` or `fundamentals.book_value`.
   Dividend yield is TTM cash dividends paid / market cap, in percent; zero
   means no cash dividends recorded in the window.
   `available: false` with a reason means the surface is structurally

@@ -320,7 +320,7 @@ INVENTORY: tuple[Occurrence, ...] = (
     ),
     Occurrence(
         "app/services/thesis.py",
-        1243,
+        1248,
         "52w high/low aggregate",
         "WINDOWED",
         ("thesis_52w_range",),
@@ -395,7 +395,7 @@ INVENTORY: tuple[Occurrence, ...] = (
     ),
     Occurrence(
         "app/services/thesis.py",
-        1226,
+        1231,
         "price anchor row",
         "DERIVED_COLUMN",
         (*_RETURN_COLS, *_TA_TREND_COLS, "rsi_14", "macd_histogram", "atr_14", "volatility_30d"),
@@ -406,7 +406,7 @@ INVENTORY: tuple[Occurrence, ...] = (
     # --- composed single-bar reads ------------------------------------------
     Occurrence(
         "app/services/thesis.py",
-        583,
+        588,
         "latest close",
         "COMPOSED",
         ("caller_span_whole_history",),
@@ -415,7 +415,7 @@ INVENTORY: tuple[Occurrence, ...] = (
     ),
     Occurrence(
         "app/services/thesis.py",
-        593,
+        598,
         "mint close at-or-before",
         "COMPOSED",
         ("caller_span_whole_history",),

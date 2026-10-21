@@ -13571,3 +13571,15 @@ neighbouring container and match it.**
 - Enforced in: `app/services/def14a_recipients.py::item403_tables` / `load_row_locations`;
   `tests/test_def14a_recipients_db.py::test_unreadable_swept_body_blocks_the_accession_and_keeps_its_rows`;
   `app/workers/scheduler.py::raw_payload_retention_sweep`.
+
+### A view column appended by a migration breaks every test that re-applies an older body of that view (#3919, 2026-10-21)
+
+- Symptom: sql/512 appends `shareholders_equity_end` to `financial_periods_ttm`. Three earlier test files re-apply
+  sql/507's or sql/508's body inside a rolled-back transaction to build their control, and `CREATE OR REPLACE VIEW`
+  cannot drop a column, so each failed with `cannot drop columns from view` against the migrated test database.
+- Prevention: before appending a view column, grep `tests/` for every file that applies a migration defining that
+  view (`grep -l "VIEW <name>" sql/*.sql`, then the test files reading those paths). Each such block applies the new
+  migration's rollback first, which is also a live check that the rollback restores a body the old tests accept.
+- Enforced in: `tests/test_financial_periods_ttm_dividend_window_guard.py`,
+  `tests/test_instrument_valuation_dividend_yield_total_form.py` and `tests/test_instrument_valuation_pb_total_form.py`
+  (`ROLLBACK_512` before each older body); `tests/test_financial_periods_ttm_stock_items_combine.py::test_13_*`.

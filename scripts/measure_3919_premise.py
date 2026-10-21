@@ -166,14 +166,14 @@ def main() -> int:
         f"   FY/quarter reported_currency differs or NULL: "
         f"{sum(1 for r in rows if r['a_pe'] and (r['a_cur'] != r['q_cur'] or r['a_cur'] is None))}"
     )
-    print(f"   view quarter end != latest quarter end (must be 0): {sum(1 for r in rows if r['ttm_end'] != r['q_pe'])}")
+    bad_end = sum(1 for r in rows if r["ttm_end"] != r["q_pe"])
+    print(f"   view quarter end != latest quarter end (must be 0): {bad_end}")
     # The script's quarter row must be the view's: same dedup clause, so only a same-filed_date tie could differ.
     off = [r["instrument_id"] for r in rows if any(r[f"view_{c}"] != r[f"q_{c}"] for c in STOCK_ITEMS)]
     print(f"   view stock items != the script's latest-quarter row (must be 0): {len(off)} {off[:10]}")
     # numeric NaN is no SQL NULL, so combine() would treat it as a value; JKP has no such state. Refuse it.
     nan = [r["instrument_id"] for r in rows for x in ("q", "a") for c in STOCK_ITEMS if _is_nan(r[f"{x}_{c}"])]
     print(f"   numeric NaN in a latest-quarter or latest-FY stock item (must be 0): {len(nan)} {nan[:10]}")
-    bad_end = sum(1 for r in rows if r["ttm_end"] != r["q_pe"])
     if off or nan or bad_end:
         # Every later figure attributes a change to the combine; with a different quarter row it would not be.
         print("   FAIL: a must-be-0 check above is not 0; no attribution is printed")
