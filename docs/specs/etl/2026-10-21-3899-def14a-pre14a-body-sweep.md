@@ -14,6 +14,10 @@
 > - Round 2: 13 new findings, NOT SOUND. It confirmed that the second registry is a
 >   legitimate reconciliation of #1617. It rejected the agent deciding the tombstoned
 >   cohort, so that cohort is now gated (§4 "Authority").
+> - Round 3 (the cap): 11 new findings, NOT SOUND. It judged Authority sound provided
+>   #3899 says what is quoted; the #3899 body was verified with `gh issue view` (Codex
+>   could not reach GitHub). It found D1's revalidation, D3's swept-hash lookup and arm
+>   (a) sound. All 11 refinements are applied below, and §8 records what remains.
 
 ## 1. Source rules
 
@@ -38,7 +42,8 @@
   editing the accepted one. That is the premise on which `raw_filings.stored_body` reuses a
   body. It is **not** a guarantee that `www.sec.gov` serves the same bytes forever: slice 1
   found the edge rewriting HTML from 2026-09-20. No safety claim here rests on
-  immutability. Every swept body is re-fetched and hash-matched first (D2).
+  immutability. Every body the retroactive sweep nulls is re-fetched and hash-matched
+  first (D2). Born-compaction hashes the body it just fetched, as every swept kind does.
 - **Hash.** SHA-256 of the UTF-8 encoding of the stored TEXT, computed server-side
   (`raw_payload_retention` module docstring).
 
@@ -76,8 +81,9 @@ shown.
   | `pre14a_body` | parsed | 285 | 1.46 |
   | `pre14a_body` | tombstoned | 222 | 2.35 |
 
-  None of the 33 filing-index-URL `def14a_body` rows (C3) is in it; they are all split or
-  manifestless rows. The exclusion is a guard, not a subtraction.
+  None of the 33 filing-index-URL rows (C3) is in it. All 33 are `def14a_body`, on
+  `sec_def14a` tombstoned / `absent` split rows. The exclusion is a guard, not a
+  subtraction.
 - **Physical:** `filing_raw_documents` is 30 GB of the 88 GB dev DB (C5).
 - **The tombstoned DEF 14A cohort is not dead weight.** Item 402(c) executive
   compensation runs on the ownership-tombstone path (`def14a_ingest.py` v3 note, #2086).
@@ -164,8 +170,10 @@ fetch_text) -> VerifiedBody` returns exactly one of:
   or empty) or `mismatch`.
 
 The helper never writes. It never restores a payload, because a restored payload would
-only be swept again. Every consumer keys whatever it does on the returned `sha256`, the
-hash of the exact bytes it parsed, and never on a separate read of the row.
+only be swept again. Any **new** derived artifact (a cache entry, a rewash bump) is keyed
+on the returned `sha256`, the hash of the exact bytes parsed. The only use of a row's
+stored hash without the bytes is D3's lookup of an **existing** cache entry for a swept
+row.
 
 ### D1 — `def14a_body` becomes housekept-and-negligible; its rewash becomes re-fetch-capable
 
@@ -202,12 +210,13 @@ hash of the exact bytes it parsed, and never on a separate read of the row.
   - `fetch_backed_specs() ⊆ SWEPT_DOCUMENT_KINDS`.
   - The classification test counts the fetch-backed registry as "swept", not "re-read".
   - `retention_class_for("def14a_body")` is `"swept"`.
-- **Cost.** A rewash run fetches every stale row that has no live body. Today the stale
-  cohort is 43,020 rows and 32.96 GB, all of it live (C3b), so before any sweep its first
-  run fetches nothing.
-  - After the sweep, a version bump costs up to 43,020 fetches: about 79 minutes of the
-    SEC budget if it ran alone at the 0.11 s floor (`rate_gate.py:23`), and about 33 GB
-    downloaded.
+- **Cost.** A rewash run fetches every row in its stale cohort that has no live body.
+  - Today's cohort, stale relative to `def14a-v16`, is 43,020 rows and 32.96 GB, all of
+    it live (C3b), so a v16 rewash run before the sweep fetches nothing.
+  - A **future** bump (v17) makes every `def14a_body` row stale: 43,693 today. It fetches
+    each row without a live body, which after a full sweep is nearly all of them: about
+    80 minutes of the SEC budget if it ran alone at the 0.11 s floor
+    (`rate_gate.py:23`), and about 35 GB downloaded.
   - Rows that `apply_fn` skips (returns `False`) or fails stay stale. Each re-run fetches
     them again; the runner already reports them as `rows_skipped` / `rows_failed`, and
     `since` still scopes a run.
@@ -224,6 +233,8 @@ hash of the exact bytes it parsed, and never on a separate read of the row.
     verified run therefore never touches the 10-K/8-K backlog that V §7 flagged.
   - `dry_run` stays the default.
 - **Eligibility** (C2): every condition below holds.
+  - `statuses` is validated at the service entry, not only in the job wrapper: it must
+    be a non-empty subset of `{'parsed', 'tombstoned'}`, and anything else raises.
   - `payload IS NOT NULL`;
   - `raw_status IN ('stored', 'compacted')`;
   - `ingest_status = ANY(%(statuses)s)`;
@@ -233,11 +244,16 @@ hash of the exact bytes it parsed, and never on a separate read of the row.
   when named explicitly (see "Authority"). Never eligible: split rows (`raw_status =
   'absent'`, the #1014 rule), manifestless rows, and `pending`/`failed` rows, which are
   in flight.
-- **Per row:** the run reads `(accession_number, source_url)` in keyset order
-  (`accession_number > %(after)s ORDER BY accession_number LIMIT n`). It fetches through
-  `SecFilingsProvider.fetch_document_text`, which strips the edge script, and hashes the
-  text. It then runs the existing three-CTE shape (`_SWEEP_BATCH_SQL`,
-  `raw_payload_retention.py:109-145`):
+- **Per row:** the run reads `(accession_number, source_url, stored digest)` in keyset
+  order (`accession_number > %(after)s ORDER BY accession_number LIMIT n`). The stored
+  digest is computed server-side, `encode(sha256(convert_to(payload,'UTF8')),'hex')`. It
+  then fetches through `SecFilingsProvider.fetch_document_text`, which strips the edge
+  script, and hashes the text.
+  - A fetched digest that differs from the stored digest is a `mismatch`, and no UPDATE
+    runs.
+  - Otherwise the run executes the two-CTE + SELECT shape of `_SWEEP_BATCH_SQL`
+    (`raw_payload_retention.py:109-145`), whose predicate re-checks URL and content so
+    that a later change is a `race`:
 
   ```sql
   WITH swept AS (
@@ -256,9 +272,12 @@ hash of the exact bytes it parsed, and never on a separate read of the row.
 
   - **Success** means exactly one row returned from `swept`; an already-`compacted`
     manifest is correct as it stands.
-  - **Zero rows** means "this invocation did not sweep" (`race`): the payload, URL or
-    hash moved, or a concurrent sweep or `store_raw` got there first.
-  - `mismatch`, `fetch_error` and `not_found` never reach the statement.
+  - **Zero rows** means "this invocation did not sweep" (`race`): the payload or URL
+    changed after the digest read, or a concurrent sweep got there first.
+  - `mismatch`, `fetch_error` and `not_found` are decided before the statement and never
+    reach it.
+  - The statement runs under `SET LOCAL statement_timeout = '60s'`; a timeout counts as
+    `race`.
 
   Each outcome is counted, and every unswept accession is listed in the summary.
 - **Concurrency contract**, adopted from `_SWEEP_BATCH_SQL`'s comment
@@ -274,8 +293,11 @@ hash of the exact bytes it parsed, and never on a separate read of the row.
 - **Termination and bounds.** One run is one keyset pass.
   - **`max_rows`** bounds the rows attempted.
   - **`max_seconds`** is a *soft* limit, checked before each row: no new row starts after
-    it. The overrun is bounded by one fetch (the provider's HTTP timeout plus one
-    rate-gate wait) and one single-row statement.
+    it. The overrun is one row's work:
+    - the provider's HTTP timeout and retries;
+    - one rate-gate wait, which is unbounded only if other processes saturate the shared
+      SEC budget;
+    - one statement, capped by the 60 s `statement_timeout`.
   - The summary returns the last cursor, and the next run resumes from `after`.
   - Failed rows are passed over and never re-attempted within a pass.
   - "Done" means one pass attempted every eligible row. The residual is the listed
@@ -302,9 +324,15 @@ hash of the exact bytes it parsed, and never on a separate read of the row.
   - The question goes on #3899 as one sentence, with the evidence, a recommendation
     (sweep: the same verified contract as the parsed cohort, with no consumer depending
     on a retained body after D1/D3) and the safe default (keep them).
-- **Born-compaction of new bodies is not gated.** It deletes nothing stored, which is the
-  #2774 precedent for `pre14a_body` (V:24-27, rubric §3.3). It applies equally to
-  bodies that later tombstone (V:153-155, consequence 3).
+- **Born-compaction is not gated, and it is not a guarantee that tombstoned bytes stay
+  stored.** `store_raw`'s swept branch is an UPSERT (`raw_filings.py:357-363`), so it
+  also nulls an existing live body whenever a writer re-fetches and re-stores it. That
+  covers the legacy ingester, the manifest parser when it has no reusable body, and the
+  33 index-URL rows re-fetched from their primary URL. Today's retained branch already
+  replaces the prior body on those paths. The change is that the new body is not kept
+  either. This is the #2774 consequence, stated in V:140-160 and taken there without an
+  operator gate. The operator's answer gates the **manual sweep** of the tombstoned
+  cohort, not those ingest paths.
 
 ### D3 — the recipient job caches its Item 403 table evidence
 
@@ -346,11 +374,14 @@ hash of the exact bytes it parsed, and never on a separate read of the row.
     in both ledgers are kept, with nothing extended.
   - Today's `return {}` on a missing body, which deletes, goes away with this change.
 - **Population.** A body is read only for accessions with holdings rows under the
-  population's instruments (`def14a_recipients.py:699-709`). Today that is 106
-  accessions (C8, counted before the join to raw rows, all 106 of which have a live
-  `def14a_body`), across 72 issuers / 157 instruments (C8, from `load_population`). Fewer
-  reach it, because the accession must also be dated and have a resolved cover. A parser
-  bump costs at most one fetch per such accession.
+  population's instruments (`def14a_recipients.py:699-709`).
+  - Today that is 106 accessions held by 104 instruments of 49 issuers (C8). The 106 are
+    counted before the join to raw rows, and all of them have a live `def14a_body`. The
+    wider recipient population is 72 issuers / 157 instruments.
+  - Fewer accessions actually reach the read, because each must also be dated and have a
+    resolved cover.
+  - A parser bump costs one fetch per such accession per successful cache fill. An
+    `unavailable` outcome is never cached, so it is retried on the next run.
 
 ### D4 — research scripts
 
@@ -375,9 +406,15 @@ D1's fetch cost.
   - a match nulls the payload and flips `stored → compacted`;
   - a match on an already-`compacted` manifest counts as swept;
   - a mismatch, fetch error or 404 leaves both untouched and is listed;
-  - a payload or `source_url` changed between fetch and UPDATE is a `race` and is not
-    nulled;
-  - a rehydrate between fetch and UPDATE is a `race`;
+  - a payload or `source_url` changed between the digest read and UPDATE is a `race`
+    and is not nulled;
+  - a stored digest that differs from the fetch is a `mismatch`, and no UPDATE runs;
+  - interleavings:
+    - a concurrent sweep that already nulled the row → `race`;
+    - a sweep, then a restore of the same bytes before our UPDATE → swept, which is safe
+      because the bytes are identical;
+  - a `statuses` value outside `{'parsed', 'tombstoned'}`, or an empty list, raises at
+    the service entry;
   - `pending`, `failed`, split, manifestless and index-URL rows are never selected;
   - `tombstoned` is selected only when named in `statuses`;
   - `max_rows` plus the cursor resumes without re-attempting;
@@ -410,23 +447,36 @@ merge-base at build time), so no new code has run against the corpus when they a
 taken.
 
 1. **Before deploy: recipient arm (a) and panel dumps.**
-   - Arm (a) runs `compute_desired` from a worktree at the base SHA, inside a writable
-     transaction that is then rolled back: cover-cache writes roll back too, and the
-     production ledgers are never applied. It dumps complete desired records (every
-     `_LEDGER_COLS` / `_ROW_LEDGER_COLS` field) plus `keep` and `keep_instruments` as JSON.
-   - Panel dumps (AAPL, GME, MSFT, JPM, HD): every `def14a_beneficial_holdings` and
-     `def14a_exec_compensation` row, the `/instruments/<symbol>/ownership-rollup` DEF 14A
-     figures, and the stored `def14a_recipient_suppressions` /
-     `def14a_recipient_row_suppressions` ledgers in full.
+   - **Convergence first.** Dump the stored ledgers right after a base-SHA run of the real
+     job. The daily 04:15Z run counts, or a manual trigger.
+   - Arm (a) calls `compute_desired` directly from a worktree at the base SHA, inside an
+     outer writable transaction that is then rolled back. Cover-cache writes roll back
+     too, and the production ledgers are never applied. It dumps complete desired records
+     (every `_LEDGER_COLS` / `_ROW_LEDGER_COLS` field) plus `keep` and `keep_instruments`
+     as JSON.
+   - Arm (a)'s desired records must equal the converged ledgers. Any difference is listed
+     and becomes the expected delta for item 4.
+   - Panel dumps (AAPL, GME, MSFT, JPM, HD):
+     - every `def14a_beneficial_holdings` and `def14a_exec_compensation` row;
+     - the live `ownership_def14a_observations` and `ownership_esop_observations` rows,
+       plus their `_current` rows;
+     - the `/instruments/<symbol>/ownership-rollup` DEF 14A figures.
+   - **Writer quiescence.** Arms (a)–(d) each record the max `fetched_at` of
+     `def14a_body` rows, and a count-and-hash of the holdings, observation and cover-cache
+     rows for the population, at start and at end.
+     - If an arm's start and end markers differ, rerun it.
+     - If the markers differ between arms, compare only issuer groups (whole CIKs, not
+       single accessions) whose markers are unchanged, and list the excluded groups.
 2. **After deploy, before any sweep: recipient arms (b) and (c).** Both run from the
    build SHA, each in its own rolled-back transaction with an empty
    `def14a_item403_tables`.
    - (b) uses live bodies.
-   - (c) forces `verified_body` down the fetch-and-verify path.
+   - (c) uses an acceptance-only adapter in place of `verified_body`. For each live row
+     it reads the text and its digest, fetches `source_url`, and compares against that
+     digest. It returns the fetched text and hash on a match, and `unavailable(mismatch)`
+     otherwise.
 
-   (a) = (b) = (c) exactly. Corpus writes between (a) and (b), such as a new proxy
-   ingested, are listed by accession and excluded from the comparison only with that
-   listing.
+   (a) = (b) = (c) exactly, under the quiescence rule above.
 3. **Dry run**, then the verified sweep with `statuses=['parsed']`.
    - The dry run's eligible rows and bytes equal C2's parsed rows, run at the same moment.
    - Then `max_rows=5000` passes run until one complete pass has attempted every eligible
@@ -435,15 +485,16 @@ taken.
      lists every unswept accession, and states logical live bytes before and after.
 4. **After the parsed sweep: recipient arm (d)** runs from the build SHA, cold cache, and
    must equal (a). Then the real job runs once. Its stored ledgers must equal item 1's
-   ledger dump, with any listed corpus changes excepted.
+   converged dump plus item 1's listed expected delta, under the quiescence rule.
 5. **Fetch-backed rewash on the panel.**
    - Set the panel's swept accessions' raw `parser_version` to `def14a-v15`. That is an
      explicit stale-version fixture on dev; the rewash itself restores `def14a-v16`.
-   - Run `scripts/rewash.py` for `def14a_body`, restricted with `since` or an accession
-     list.
-   - Assert: fetched = the number of accessions, applied = the expected count, failed = 0,
-     race = 0, and every row is back at `def14a-v16`.
-   - Compare against item 1's typed dumps **immediately**, then separately after a
+   - Run `scripts/rewash.py` for `def14a_body` with the new `--accession` allow-list.
+     The build adds `accessions` to `run_rewash`, a filter on the stale-cohort query.
+   - Assert: the processed set equals the allow-list exactly; fetched = the number of
+     swept accessions in it; failed = 0; race = 0; and every row is back at `def14a-v16`.
+   - Compare against item 1's typed and observation dumps **immediately**, then separately
+     after a
      `sec_rebuild` `{"instrument_id": N, "source": "sec_def14a"}` per panel instrument has
      drained to pending = 0 with every row back in its prior terminal state and error
      class. Both comparisons must be identical, and the rollup figures unchanged.
@@ -490,10 +541,13 @@ SELECT r.document_kind, m.ingest_status, r.accession_number, r.byte_count, r.sou
      OR (r.document_kind = 'pre14a_body' AND m.source = 'sec_pre14a'))
    AND r.payload IS NOT NULL
    AND m.ingest_status IN ('parsed','tombstoned') AND m.raw_status IN ('stored','compacted');
--- C3: recovery-locator shape over every def14a_body row (pre14a_body: 0 index URLs)
-SELECT count(*) FILTER (WHERE source_url IS NULL),
-       count(*) FILTER (WHERE source_url LIKE '%-index.htm%')
-  FROM filing_raw_documents WHERE document_kind = 'def14a_body';
+-- C3: recovery-locator shape over both kinds; is_filing_index_url(source_url) applied in
+-- Python, grouped by manifest state. Result: 33 rows, all def14a_body on
+-- sec_def14a / tombstoned / absent; 0 pre14a_body; 0 NULL source_url.
+SELECT r.document_kind, coalesce(m.source,'(none)'), coalesce(m.ingest_status,'-'),
+       coalesce(m.raw_status,'-'), r.source_url
+  FROM filing_raw_documents r LEFT JOIN sec_filing_manifest m USING (accession_number)
+ WHERE r.document_kind IN ('def14a_body','pre14a_body');
 -- C3b: the rewash cohort at def14a-v16 — rows, logical bytes, live rows
 SELECT count(*), coalesce(sum(byte_count),0), count(*) FILTER (WHERE payload IS NOT NULL)
   FROM filing_raw_documents
@@ -522,7 +576,9 @@ SELECT reason, count(*) FROM def14a_recipient_row_suppressions GROUP BY 1;
 
 C8 is the recipient population. `pop = def14a_recipients.load_population(conn)` gives
 72 issuers (`len(pop)`) and 157 instruments (`ids = [s.instrument_id for v in
-pop.values() for s in v]`). Then:
+pop.values() for s in v]`). The body-needed cohort, `SELECT DISTINCT instrument_id,
+accession_number FROM def14a_beneficial_holdings WHERE instrument_id = ANY(ids)`, is 106
+accessions, 104 instruments and 49 issuers (instrument → CIK through `pop`). Then:
 
 ```sql
 WITH acc AS (SELECT DISTINCT accession_number FROM def14a_beneficial_holdings
@@ -533,3 +589,12 @@ SELECT count(*), count(r.accession_number), count(r.payload), coalesce(sum(r.byt
 ```
 
 That returns 106 accessions, 106 with a raw row, 106 live, and 409,695,538 bytes.
+
+## 8. Residuals after checkpoint 1 (3 rounds, the cap)
+
+- **The future-availability tail** (V:262-264) is not closed by any design. It is why the
+  tombstoned cohort waits for the operator.
+- **Writer quiescence is observed, not enforced.** §6 detects corpus movement and narrows
+  the comparison to unchanged issuer groups; it does not stop writers.
+- **Rewash re-fetches persistent skips** on every run (D1 cost). No retry control is added
+  in this slice.
