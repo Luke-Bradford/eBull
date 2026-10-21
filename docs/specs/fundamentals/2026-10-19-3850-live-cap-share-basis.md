@@ -360,6 +360,152 @@ DB holds 0 such closes and 0 such counts (2026-10-19). This is filed against #38
   round: the fallback branches can select a bar after the frontier, a step refusal outranks `basis_stale`, and the
   lag is bounded by the frontier rather than fixed at one session.
 
+## Amendment 2 (#3923, 2026-10-21): a session a month or more before the build date prices no cap
+
+**Problem.** Amendment 1's "Freshness, chosen" sets no age limit. Its argument covers two cases: the lag between a
+refresh and the next build, and a failed build. In both, a newer close is coming, and the cap at the older close is
+correct at that close. The argument does not cover an instrument whose price series has stopped.
+
+On 2026-10-21 (dev DB, code `c70038d2`), 32 rows published a cap at a session older than the latest one in the view,
+which was 2026-10-20. The oldest were AMWD and CVGW, at 2026-05-27. All 32 have
+`instrument_price_supply.consecutive_no_advance >= 5`, which means eToro answered and the series did not move.
+#3923's PURR example (session 2026-10-09, cap 24% above the 2026-10-19 close) has since healed: its bars run
+through 2026-10-20.
+
+**Source rule.** No published rule bounds the age of a close that prices market equity in a view read daily. The
+nearest is JKP's monthly market equity (`bkelly-lab/ReplicationCrisis` at `67174c7f170b`,
+`GlobalFactors/project_macros.sas`):
+- Daily Compustat rows are grouped by calendar month-end (`eom`, line 586).
+- Only rows with a valid price status are kept (`prcstd in (3, 4, 10)`, line 595). Status 4 is a bid/ask price
+  (line 811), so this is a price observation, not necessarily a trade. The comment at line 595 explains that the
+  filter stops a dividend-distribution day from standing in for a trading day.
+- The month's `me` comes from its last remaining row (`if last.eom`, lines 611–615).
+- A month with no valid price observation has no row, so it has no `me`. The CRSP path is the same in this respect:
+  its monthly `me` is `abs(prc) × shrout` (line 389), where a negative `prc` marks a bid/ask average.
+- The accounting characteristics are priced on that monthly `me` (`main.sas:92–93`, `me_data=scratch.world_msf`).
+
+So in JKP, the oldest price that can set a month-end `me` is from the month's first day with a valid price. That is
+less than one calendar month before the month-end.
+
+**The rule here is constructed, not sourced.** A literal same-month rule would refuse every cap on the first session
+of each month, which is no rule for a view that is read daily. So this amendment takes JKP's maximum age and makes it
+rolling, and freezes that choice:
+- the evaluation date is the active build's `build_date`;
+- a session publishes only when it is after `build_date - interval '1 month'`, which is Postgres calendar-month
+  arithmetic;
+- a session on or before that date is refused.
+
+At month-ends this differs from JKP. For a 2026-02-28 build, the cutoff is 2026-01-28, so a 2026-01-29 session
+publishes; JKP's February `me` would need a February price. The difference is under one month of age at every date,
+and it is accepted.
+
+JKP's 14-day `max_date_lag` (`project_macros.sas:891–894`) is a different rule. It bounds the gap between two
+observations that form a return, and it is not used here.
+
+**The supply marker is not the rule.** `consecutive_no_advance` separates the 32 rows exactly. But the marker is a
+fetch-scheduling signal, and its threshold (`market_data._SUPPLY_LESS_CONSECUTIVE_MISSES`) saves refresh slots; it
+does not state an age for a price. `daily_candle_refresh` ran 80 times from 2026-10-14 to 2026-10-21 (`job_runs`),
+so the counter can reach 5 within a day of a late bar. BZH did: its session is 2026-10-19 and its counter was 5 by
+2026-10-21. A refusal keyed on the marker would therefore refuse the one-session lag that Amendment 1 keeps
+deliberately.
+
+**Construction.**
+- `market_cap_live` is published only with a PIT row at the session. That row needs a step in
+  `instrument_share_count_pit`, and every step carries its `build_id`.
+- The build writes its steps (`DELETE` plus `COPY`) and its `market_cap_pit_builds` row (status `complete`) in one
+  REPEATABLE READ transaction (`app/services/pit_market_cap_build.py:686–700`, `:882`, `:920`). A failed build
+  writes neither.
+- So the `fb` lateral, which already reads the latest step, also reads its build's `build_date`. That is one
+  primary-key probe on `market_cap_pit_builds`, as a scalar subquery inside the lateral. There is no global aggregate
+  and no new index.
+- A row whose cap would otherwise publish takes `market_cap_reason = 'session_stale'` when
+  `session <= build_date - interval '1 month'`. Its `market_cap_live`, and so every count-based column, is NULL by
+  the existing mechanism.
+- The comparison reads `pit.price_date`. The arm is reached only with a PIT row, which is matched on the session,
+  so that column equals the session.
+  - Reading `ses.session` there inlined its CASE and subplan into every count-based column. That lifted the
+    single-instrument plan's estimated cost from 34.8k to 114k, past `jit_above_cost` (100k), and each read paid
+    about 220 ms of JIT compilation (measured 2026-10-21).
+  - With `pit.price_date`, the cost is 41.8k and the reads match control.
+- A row already refused keeps its reason, so the change refuses caps and relabels nothing.
+
+**Why the build date.** `build_date` is the job's parameter: the New York calendar date when the scheduler
+dispatched it (`app/workers/scheduler.py:7275`). Data does not set it, so a bogus future bar, the build's US-only
+scope, or an instrument refused inside a completed build cannot move it.
+
+The age is measured against this parameter, not against the snapshot. At the 08:20 UTC run, `build_date` is one
+calendar day after the latest close. It can lag the snapshot by one day only if the build's lock wait crosses New
+York midnight; the parameter is taken before that wait. Either error is one day inside a one-month bound, and it is
+accepted.
+
+After a failed build, the previous build stays active and so does its `build_date`, and no age measured against it
+grows. A failed build therefore newly refuses no cap on age. It can still refuse on PIT's own checks, such as a
+revision row (`basis_stale`); that is Amendment 1's behaviour, unchanged. Repeated failed builds are a job-health
+signal.
+
+The bound is a calendar month, so venue calendars and weekends do not enter into it. The build is US-scoped
+(`nyse_sessions`, `pit_market_cap_build.py:744`), and only its steps publish caps. A wall clock would also turn every
+fixed-date test into a time bomb.
+
+**Effect, measured 2026-10-21.** `build_date` is 2026-10-21, so a session on or before 2026-09-21 is refused. That
+refuses 21 published caps, from LPSN (2026-09-03) back to AMWD and CVGW (2026-05-27):
+
+AMWD, CVGW, ORGN, JHG, OLPX, TBRG, WSR, CPRX, ESPR, XOMA, GTLS, NFBK, NSA, CCRN, TMHC, AVNS, LPRO, SKYT,
+AFBI, ALOT, LPSN
+
+Eleven stale rows keep their caps until they age past the bound:
+- BZH, ATKR, BTAIQ and ACVA, at 1 to 5 days;
+- WBD, SLP, BLFS, LESLQ, NSTS, QRVO and GWHT, at 14 to 19 days.
+
+**Cross-source, all 21.** `sec_form25_common_equity_delistings` holds a 25-NSE (a)(3) for 19 of them, each filed
+within 4 calendar days either side of the last bar (XOMA 4 days before, WSR 4 after). AMWD and CVGW, for example,
+were both filed on 2026-05-28. ORGN and NSA have none in the register, which runs to 2026-10-08. Their cause is unknown and is not claimed.
+
+**Consumers.** `market_cap_live` and the count-based columns are what the readers use. The `market_cap_pit` jsonb
+still carries PIT's own row, which is unchanged and has no reader in `app/` or `frontend/src` (grep, 2026-10-21).
+Scoring loses these caps as inputs. `/summary.key_stats` reads the view's columns (#3942), so it shows them as
+absent.
+
+The frozen, halted declarations (decl 16 and 23) are not edited, under the provenance rule above. The build PR records
+the change on #3471, #2842 and #3592, and runs `scripts.ai_trial_policy_guard`.
+
+**Acceptance.**
+1. A full-population A/B in one snapshot, comparing sql/512's body with the new one:
+   - the changed rows are exactly the rows sql/512 publishes whose session is on or before `build_date - 1 month`,
+     derived independently from `price_daily`, the steps and `market_cap_pit_builds`;
+   - on those rows, `market_cap_reason` is `session_stale`, `market_cap_live` and every count-based column are NULL,
+     and every other column is unchanged;
+   - every other row is identical in every column.
+
+   This needs a new script, because `scripts/measure_3850_acceptance.py` compares sql/505's bodies.
+2. Synthetic DB tests. Each one inserts its own `market_cap_pit_builds` row with an explicit `build_date`, before
+   seeding steps. The shared fixture would otherwise take the date of the first seeded session.
+   - Calendar-month arithmetic, with a case where a fixed 30-day bound would decide differently:
+     - for a 2026-10-21 build, 2026-09-21 is refused and 2026-09-22 publishes;
+     - for a 2026-03-31 build, 2026-02-28 is refused and 2026-03-01 (30 days) publishes;
+     - for a 2028-02-29 leap-year build, 2028-01-29 is refused and 2028-01-30 publishes.
+   - An already-refused row keeps its reason.
+   - A stale instrument that gains a bar after the build stays refused, because Amendment 1 holds its session at the
+     frontier.
+   - A later build with a later `build_date` refuses a session the earlier build published, with no new bar.
+   - The instrument publishes again only when a build covers a new bar inside the bound, with an otherwise publishable
+     PIT row.
+3. `scripts/measure_3850_acceptance.py` is left unchanged. It is #3850's historical A/B of sql/505's two bodies,
+   and neither body has the age refusal. `scripts/ab_3923_session_stale.py` carries this amendment's oracle.
+4. Plans and timings for a single-instrument read and a full read, before and after.
+
+**Rollback.** `sql/rollback/513_…` restores sql/512's view body.
+
+**Checkpoint record.** Codex checkpoint 1 ran 2 rounds on this amendment.
+- Round 1 (12 findings, UNSOUND). The BLOCKING finding was accepted: JKP's 14-day `max_date_lag` bounds a return's
+  observation gap, not the age of a price for market equity. The rule was rebuilt on JKP's monthly `me`. The global
+  `max(bars_through)` frontier was replaced by `build_date`, which closes findings 2 to 4 (a bogus future bar, the
+  build's scope, and partial refusals inside a build). The rest were applied to the text and to acceptance.
+- Round 2 (7 findings, UNSOUND; no BLOCKING). It raised two HIGH framing points, both applied: the rolling bound is
+  constructed, not sourced, and JKP accepts bid/ask prices. Five acceptance points were also applied: the reason
+  value, the snapshot-relative date, the fixture's build date, the month-end and leap-year cases, and the recovery
+  conditions. These were applied without a third round.
+
 ## Not in scope
 
 - The per-share columns: #3903.
