@@ -673,6 +673,7 @@ JOB_SEC_BUSINESS_SUMMARY_BOOTSTRAP = "sec_business_summary_bootstrap"
 # #3518 — MD&A text (10-K Item 7 / 10-Q Part I Item 2) of each tradable US name's current periodic report, the
 # store the fund-v1 `mdna` pack block reads.
 JOB_SEC_PERIODIC_REPORT_SECTIONS = "sec_periodic_report_sections"
+JOB_SEC_DPS_INLINE_SCALE_SCAN = "sec_dps_inline_scale_scan"
 JOB_SEC_INSIDER_TRANSACTIONS_INGEST = "sec_insider_transactions_ingest"
 JOB_SEC_INSIDER_TRANSACTIONS_BACKFILL = "sec_insider_transactions_backfill"
 JOB_SEC_FORM3_INGEST = "sec_form3_ingest"
@@ -1715,6 +1716,23 @@ SCHEDULED_JOBS: list[ScheduledJob] = [
         cadence=Cadence.daily(hour=22, minute=30),
         # State-based and idempotent: a late run extracts the same due set, so a missed fire is worth recovering.
         catch_up_on_boot=True,
+        prerequisite=_bootstrap_complete,
+    ),
+    ScheduledJob(
+        name=JOB_SEC_DPS_INLINE_SCALE_SCAN,
+        display_name="SEC DPS inline-scale scan (#3947)",
+        source="sec_rate",
+        description=(
+            "Daily — read the inline XBRL scale of every CommonStockDividendsPerShareDeclared occurrence in each "
+            "accession filed since 2019-06-15 (XBRL US DQC.US.0179.10141) into sec_inline_dps_occurrence "
+            "(docs/specs/fundamentals/2026-10-21-3947-dps-inline-scale.md). State-based: unscanned accessions and "
+            "retryable failures past their backoff; no accession started after 45 minutes, the rest deferred."
+        ),
+        # 00:30 UTC: clear of every daily/weekly sec_rate job (22:30 + 45 min of starts, then 04:00). Like #3518, a run
+        # holds the sec_rate lane while it fetches, so sec_atom_fast_lane fires skip until it ends.
+        cadence=Cadence.daily(hour=0, minute=30),
+        # A boot-time catch-up would start a 45-minute SEC fetch at an arbitrary hour; the next fire recovers it.
+        catch_up_on_boot=False,
         prerequisite=_bootstrap_complete,
     ),
     ScheduledJob(
@@ -10356,6 +10374,26 @@ def sec_periodic_report_sections() -> None:
         tracker.row_count = result.rows_written
         tracker.note = result.digest()
         logger.info("sec_periodic_report_sections complete: %s", result.digest())
+
+
+def sec_dps_inline_scale_scan() -> None:
+    """Scan due accessions' inline DPS scale into ``sec_inline_dps_occurrence`` (#3947).
+
+    One run is :func:`app.services.dps_inline_scale_scan.run_dps_inline_scale_scan`: every request goes through the
+    shared SEC client, one transaction per accession. The counters land in ``job_runs.error_msg`` as the note.
+    """
+    from app.providers.implementations.sec_edgar import SecFilingsProvider
+    from app.services.dps_inline_scale_scan import run_dps_inline_scale_scan
+
+    with _tracked_job(JOB_SEC_DPS_INLINE_SCALE_SCAN) as tracker:
+        with (
+            connect_job(autocommit=True) as conn,
+            SecFilingsProvider(user_agent=settings.sec_user_agent) as provider,
+        ):
+            result = run_dps_inline_scale_scan(conn, provider)
+        tracker.row_count = result.succeeded
+        tracker.note = result.digest()
+        logger.info("sec_dps_inline_scale_scan complete: %s", result.digest())
 
 
 def sec_insider_transactions_ingest() -> None:

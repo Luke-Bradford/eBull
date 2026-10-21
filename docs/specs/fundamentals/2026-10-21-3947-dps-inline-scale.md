@@ -91,8 +91,15 @@ rollback starts by turning it off. The #2327 CUSIP bridge ships the same way.
 
 An accession's document set is every `.htm`, `.html` or `.xhtml` file in its `index.json` listing that contains
 an `ix:header`. All of them are read as one Inline XBRL Document Set: contexts and units resolve across the set.
-`FilingSummary.xml` is not used, because nothing guarantees that its `<InputFiles>` list is complete. An accession
-whose listing holds no such file is `not_inline`.
+`FilingSummary.xml` is not used to find inline documents, because nothing guarantees that its `<InputFiles>` list is
+complete. An accession whose listing holds no such file is `not_inline`.
+
+*Build note (PR a).* The listing also holds the EDGAR Renderer's own pages (`R1.htm` …; WHR's
+`0000106640-24-000125` lists 74). The scan skips exactly the files `FilingSummary.xml` names as
+`<Report><HtmlFileName>`: SEC wrote those pages from the instance, so none can be a filer document. A name pattern was
+rejected because filer document names can be upper-case (`SELECT count(*) FROM filing_documents WHERE document_name
+~ '[A-Z]' AND document_name !~ '^R[0-9]+\.htm$'` was 1,090,470 on 2026-10-21). A missing or unparseable summary
+excludes nothing, which costs requests but never coverage.
 
 ### Parser contract
 

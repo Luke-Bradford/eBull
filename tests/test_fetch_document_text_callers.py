@@ -64,6 +64,11 @@ _ALLOWED_CALLER_FILES: frozenset[str] = frozenset(
         "app/services/periodic_report_sections.py",
         "tests/test_3518_periodic_report_sections.py",
         "tests/test_3518_periodic_report_sections_db.py",
+        # #3947 — every HTML file of a DPS accession's inline document set → sec_inline_dps_occurrence (one row
+        # per inline element of the concept, raw attributes and resolved key). The HTML itself is not retained.
+        "app/services/dps_inline_scale_scan.py",
+        "tests/test_3947_dps_inline_scale_scan.py",
+        "tests/test_3947_dps_inline_scale_scan_db.py",
         # Manifest-worker adapters (#1126 / #1128 / #1129 / #1130 /
         # #1133 / #1134 / #1151). Each one wraps a legacy service-layer
         # ingester whose SQL normalisation already lives on this allow-

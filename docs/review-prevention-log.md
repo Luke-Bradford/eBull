@@ -13670,3 +13670,16 @@ neighbouring container and match it.**
   on one is a declared policy with every case listed, not a proof.
 - Enforced in: `docs/specs/fundamentals/2026-10-21-3947-dps-inline-scale.md`;
   `scripts/measure_3947_dps_inline_scale.py`.
+
+### An accession's `index.json` lists the EDGAR Renderer's pages: exclude them by `FilingSummary.xml`, not by name (#3947, 2026-10-22)
+
+- First seen in: #3947 build PR (a). Reading "every HTML file in the listing" fetched each accession's `R<n>.htm`
+  viewer pages too (WHR `0000106640-24-000125` lists 74 of them beside 4 filer HTML documents). SEC writes those pages from
+  the instance; none can hold an `ix:header`, so fetching them changes no result and multiplies the request count.
+- Prevention: when a scan walks an accession's `index.json`, skip exactly the files `FilingSummary.xml` names as
+  `<Report><HtmlFileName>`; a missing or unparseable summary skips nothing. Do not use a name pattern: filer document
+  names can be upper-case. Do not read the summary's `<InputFiles>` as the list of filer documents (nothing guarantees
+  it is complete). Before parsing a listed HTML file as XML, check it declares the inline XBRL namespace: plain HTML
+  exhibits need not be well-formed XML.
+- Enforced in: `app/services/inline_xbrl_dps.py::rendered_report_files`;
+  `tests/test_3947_dps_inline_scale_scan.py::test_reads_every_html_file_except_rendered_pages_in_listing_order`.
