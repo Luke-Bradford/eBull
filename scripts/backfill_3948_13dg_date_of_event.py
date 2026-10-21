@@ -6,9 +6,10 @@ person sets ``date_of_event`` on the row with the same ``(accession, COALESCE(re
 only while it is NULL. No other column is written and no row is inserted or deleted, so it is narrower than the
 DELETE + re-INSERT rewash (which would also re-derive every other column, e.g. the legacy ``member_of_group``).
 
-v4 of ``_PARSER_VERSION_13DG`` differs from v3 only in this parse, so a body is bumped to v4 once every reporting
-person it parses to matches a stored row (and those rows are filled, or it states no date). A body that fails to parse,
-or names a reporter with no stored row, is left at its version, counted, and makes the run exit 1.
+v4 of ``_PARSER_VERSION_13DG`` differs from v3 only in this parse, so a body is bumped to v4 once it parses to at
+least one reporting person and every one matches a stored row (those rows are then filled, or it states no date). A
+body that fails to parse, parses to no reporter, or names a reporter with no stored row is left at its version,
+counted, and makes the run exit 1.
 
 Idempotent. Commits per accession. ``--dry-run`` writes nothing; its counters are prefixed ``would``.
 
@@ -74,26 +75,28 @@ def main() -> int:
                 st["parse failed"] += 1
                 print("FAILED", acc, repr(exc), flush=True)
                 continue
-            stored = {
-                (cik, name)
-                for cik, name in conn.execute(
-                    "SELECT COALESCE(reporter_cik, ''), reporter_name FROM blockholder_filings"
-                    " WHERE accession_number = %s",
-                    (acc,),
-                )
-            }
-            if any((p.cik or "", p.name) not in stored for p in filing.reporting_persons):
-                # The re-parse names a reporter the table does not hold: not this backfill's to decide, and the
-                # body is not marked current (the A/B gates this at 0 on the full population).
-                st["unmatched key (not bumped)"] += 1
-                print("UNMATCHED", acc, flush=True)
-                continue
             would = "would " if args.dry_run else ""
             with conn.transaction():
+                # Read inside the accession's transaction, so the match and the fill see one state.
+                stored = {
+                    (cik, name)
+                    for cik, name in conn.execute(
+                        "SELECT COALESCE(reporter_cik, ''), reporter_name FROM blockholder_filings"
+                        " WHERE accession_number = %s",
+                        (acc,),
+                    )
+                }
+                persons = filing.reporting_persons
+                if not persons or any((p.cik or "", p.name) not in stored for p in persons):
+                    # No reporter, or one the table does not hold: not this backfill's to decide, and the body is
+                    # not marked current (the A/B gates unmatched keys at 0 on the full population).
+                    st["unmatched or no reporter (not bumped)"] += 1
+                    print("UNMATCHED", acc, len(persons), flush=True)
+                    raise psycopg.Rollback
                 if filing.date_of_event is None:
                     st[f"{would}bump with no date"] += 1
                 else:
-                    for p in filing.reporting_persons:
+                    for p in persons:
                         cur = conn.execute(
                             _FILL_SQL, {"d": filing.date_of_event, "acc": acc, "cik": p.cik or "", "name": p.name}
                         )
@@ -105,7 +108,7 @@ def main() -> int:
                 if args.dry_run:
                     raise psycopg.Rollback
     print({k: v for k, v in sorted(st.items())})
-    return 1 if st["parse failed"] or st["unmatched key (not bumped)"] else 0
+    return 1 if st["parse failed"] or st["unmatched or no reporter (not bumped)"] else 0
 
 
 if __name__ == "__main__":
