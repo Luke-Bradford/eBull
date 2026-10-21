@@ -9,7 +9,7 @@ Read-only. Reproduces the figures in
   of the rest. Fetches each primary document once (not stored) and reads the
   ``scale`` attribute of every ``ix:nonFraction`` DPS occurrence (DQC.US.0179.10141).
   Counts are regex-detected occurrences in the primary document only: the regex reads
-  the ``ix:``/``us-gaap:`` prefixes and double-quoted attributes as spelled and resolves
+  the ``ix:``/``us-gaap:`` prefixes as spelled (single- or double-quoted attributes) and resolves
   no context, unit or value, so a miss means "no regex match", not "no occurrence".
   Requests are sequential and at least 0.15 s apart; the script does not share the jobs
   process's SEC limiter, so run it outside a heavy SEC ingest window.
