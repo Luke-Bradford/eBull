@@ -60,6 +60,12 @@ pytestmark = pytest.mark.db
 #     only `invalidated` rows). Append-only INSERTs, one transaction per accession; no watermark,
 #     *_current table, data_freshness_index or manifest write. Self-overlap is excluded by the
 #     per-job-name lock, which is what makes identity order equal commit order (spec §3). Safe.
+#
+# Write-safety audit, 2026-10-21 (#3947) — sec_dps_inline_scale_scan:
+#   sec_inline_scale_scan / sec_inline_dps_occurrence / sec_inline_scale_renormalise → sole writer (sql/514).
+#     One transaction per accession, the scan row locked FOR UPDATE and published only if its work state is the
+#     one the run selected; no watermark, *_current table, data_freshness_index or manifest write. Reads
+#     financial_facts_raw / sec_filing_manifest / external_identifiers only. Safe.
 EXPECTED_SEC_RATE_MEMBERS = frozenset(
     {
         "cusip_universe_backfill",
@@ -79,6 +85,7 @@ EXPECTED_SEC_RATE_MEMBERS = frozenset(
         "sec_atom_fast_lane",
         "sec_business_summary_bootstrap",
         "sec_periodic_report_sections",
+        "sec_dps_inline_scale_scan",
         "sec_daily_index_reconcile",
         "sec_def14a_bootstrap",
         "sec_first_install_drain",
