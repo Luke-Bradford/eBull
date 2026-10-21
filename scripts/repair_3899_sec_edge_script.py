@@ -9,7 +9,8 @@ arrive clean. Two kinds of row were written before that:
     re-pins ``payload = <the bytes read>``, so a concurrent ``store_raw`` is
     never overwritten. ``fetched_at`` and ``parser_version`` are untouched.
     ``--parse-ab`` runs the Item 403 and Item 402(c) parsers on the stored and
-    the stripped DEF 14A body and exits 1 on any difference.
+    the stripped DEF 14A body and exits 1 on any difference; with ``--apply``,
+    a differing row is reported and not rewritten.
 
 ``--swept``
     A born-compacted / swept HTML row hashed since the onset floor. Its
@@ -123,6 +124,7 @@ def _live(conn: psycopg.Connection[Any], *, apply: bool, parse_ab: bool) -> int:
     changed: Counter[str] = Counter()
     lost_race = 0
     parse_diffs: list[str] = []
+    parse_identical = 0
     keys = conn.execute(
         "SELECT accession_number, document_kind FROM filing_raw_documents "
         "WHERE payload IS NOT NULL AND strpos(payload, %s) > 0 ORDER BY 2, 1",
@@ -140,23 +142,27 @@ def _live(conn: psycopg.Connection[Any], *, apply: bool, parse_ab: bool) -> int:
         clean = strip_sec_edge_script(body)
         if clean == body:
             continue
-        changed[kind] += 1
-        if parse_ab and kind == "def14a_body" and _parse(body) != _parse(clean):
-            parse_diffs.append(accession)
-        if apply:
-            result = conn.execute(
-                "UPDATE filing_raw_documents SET payload = %s "
-                "WHERE accession_number = %s AND document_kind = %s AND payload = %s",
-                (clean, accession, kind, body),
-            )
-            lost_race += 1 - result.rowcount
+        if parse_ab and kind == "def14a_body":
+            if _parse(body) != _parse(clean):
+                parse_diffs.append(accession)
+                continue  # a body whose parse would change is reported, never rewritten or counted
+            parse_identical += 1
+        if not apply:
+            changed[kind] += 1
+            continue
+        result = conn.execute(
+            "UPDATE filing_raw_documents SET payload = %s "
+            "WHERE accession_number = %s AND document_kind = %s AND payload = %s",
+            (clean, accession, kind, body),
+        )
+        changed[kind] += result.rowcount  # completed writes, not attempts
+        lost_race += 1 - result.rowcount
 
     print(f"=== #3899 live payload repair ({'APPLIED' if apply else 'DRY RUN'}) ===")
     for kind in sorted(candidates):
         print(f"  {kind:<22} marker rows {candidates[kind]:>6}  stripped {changed[kind]:>6}")
     if parse_ab:
-        identical = changed["def14a_body"] - len(parse_diffs)
-        print(f"  def14a_body parse A/B: {identical} identical, {len(parse_diffs)} differ")
+        print(f"  def14a_body parse A/B: {parse_identical} identical, {len(parse_diffs)} differ (skipped)")
         for accession in parse_diffs:
             print(f"    DIFF {accession}")
     if apply:
