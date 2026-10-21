@@ -12,8 +12,11 @@ Gates (non-zero exit on any failure):
   * every non-blank tag value parses, or is listed as a reject with its text (reported; gated at 0);
   * new date = the independent parse of the body's tag on every parsed person;
   * base never differs from stored (the stored column is the base arm: NULL on every row);
-  * every parsed person's key matches a stored row (a miss is a row the re-drain would INSERT);
-  * new date ≤ the filing's ``filed_at`` date (UTC) + 1 day, and ≥ 1990-01-01 (reported list; gated at 0).
+  * every parsed person's key matches a stored row (a miss is a row the re-drain would INSERT).
+
+Reported, not gated: stored rows the re-parse fills (by distinct key) and leaves NULL, and every date before
+1990-01-01 or after the filing's ``filed_at`` date (UTC) + 1 day. The date is the filer's own statement, stored as
+filed (2026-10-21: one, ``0002086358-25-000001``, a 13G stating ``09/22/2025`` filed 2025-09-19).
 
 Usage: ``PYTHONPATH=. uv run python -m scripts.ab_3948_13dg_date_of_event [--limit N] [--out PATH]``
 """
@@ -76,6 +79,7 @@ def main() -> int:
     fails: list[str] = []
     rejects: list[tuple[str, str]] = []
     odd: list[tuple[str, str, str]] = []
+    filled: set[tuple[str, str, str]] = set()
     with psycopg.connect(settings.database_url) as conn, snapshot_read(conn):
         stored: dict[str, dict[tuple[str, str], date | None]] = {}
         meta: dict[str, tuple[str, datetime | None]] = {}
@@ -143,18 +147,16 @@ def main() -> int:
                 if cur != base and cur is None:
                     fails.append(f"{acc}: base arm {base} but stored NULL")
                 if cur is None and new is not None:
-                    st["rows filled"] += 1
-                    st[f"rows filled {source}"] += 1
-                elif cur is None:
-                    st["rows left NULL"] += 1
-                elif cur != new:
+                    filled.add((acc, *key))
+                    st[f"persons with a date {source}"] += 1
+                elif cur is not None and cur != new:
                     st["stored date kept, differs from re-parse"] += 1
     if st["error"]:
         fails.append(f"errors = {st['error']}")
     if rejects:
         fails.append(f"rejects = {len(rejects)}")
-    if odd:
-        fails.append(f"out-of-range dates = {len(odd)}")
+    st["stored rows filled (distinct key)"] = len(filled)
+    st["stored rows left NULL"] = st["stored rows"] - st["stored rows with a date"] - len(filled)
     if st["parsed person with no stored key (re-drain would INSERT)"]:
         fails.append("parsed persons with no stored key")
     with open(args.out, "w") as fh:
