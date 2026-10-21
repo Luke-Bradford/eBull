@@ -13548,7 +13548,9 @@ neighbouring container and match it.**
   script that loops over thousands of network fetches catches each row's fetch error and tallies it as a verdict
   instead of aborting the run (review bot, PR #3931). A strip anchored to a position is measured on every document
   kind it applies to, not only the one that motivated it; #3931's anchor was checked on raw re-fetches of six HTML
-  kinds (68 tags, all directly before `</body>`).
+  kinds (68 tags, all directly before `</body>`). When a `continue` is added to a reporting loop, move every
+  counter the report reads below it, and a test that builds input with `str.replace` asserts the replacement
+  happened (review bot, PR #3933).
 - Enforced in: `app/providers/implementations/sec_edgar.py::strip_sec_edge_script`;
   `app/services/sec_pipelined_fetcher.py::prefetch_document_texts`; `tests/test_sec_edge_script_strip.py`;
   `scripts/repair_3899_sec_edge_script.py` (stored-body repair, `--parse-ab`).

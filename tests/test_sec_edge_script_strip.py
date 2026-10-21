@@ -93,10 +93,11 @@ def test_prefetch_document_texts_returns_the_stripped_body(monkeypatch: pytest.M
 
 
 def test_every_known_token_is_stripped() -> None:
-    from scripts.repair_3899_sec_edge_script import _KNOWN_TOKENS
+    from scripts.repair_3899_sec_edge_script import _KNOWN_TOKENS, _with_token
 
     for token in _KNOWN_TOKENS:
-        injected = _INJECTED.replace("/-QOA/64Vm/ig/zTjS/gt8A/m1aEQkGLcNmQ4Q/XiUsWQ/Yl0/HHTAfbn4", token)
+        injected = _with_token(_FILED, token)
+        assert injected is not None and token in injected
         assert strip_sec_edge_script(injected) == _FILED
 
 

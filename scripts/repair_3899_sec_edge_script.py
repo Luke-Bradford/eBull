@@ -141,10 +141,10 @@ def _live(conn: psycopg.Connection[Any], *, apply: bool, parse_ab: bool) -> int:
         clean = strip_sec_edge_script(body)
         if clean == body:
             continue
-        changed[kind] += 1
         if parse_ab and kind == "def14a_body" and _parse(body) != _parse(clean):
             parse_diffs.append(accession)
-            continue  # a body whose parse would change is reported, never rewritten
+            continue  # a body whose parse would change is reported, never rewritten or counted
+        changed[kind] += 1
         if apply:
             result = conn.execute(
                 "UPDATE filing_raw_documents SET payload = %s "
@@ -157,8 +157,7 @@ def _live(conn: psycopg.Connection[Any], *, apply: bool, parse_ab: bool) -> int:
     for kind in sorted(candidates):
         print(f"  {kind:<22} marker rows {candidates[kind]:>6}  stripped {changed[kind]:>6}")
     if parse_ab:
-        identical = changed["def14a_body"] - len(parse_diffs)
-        print(f"  def14a_body parse A/B: {identical} identical, {len(parse_diffs)} differ")
+        print(f"  def14a_body parse A/B: {changed['def14a_body']} identical, {len(parse_diffs)} differ (skipped)")
         for accession in parse_diffs:
             print(f"    DIFF {accession}")
     if apply:
