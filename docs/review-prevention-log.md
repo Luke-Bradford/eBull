@@ -13554,3 +13554,20 @@ neighbouring container and match it.**
 - Enforced in: `app/providers/implementations/sec_edgar.py::strip_sec_edge_script`;
   `app/services/sec_pipelined_fetcher.py::prefetch_document_texts`; `tests/test_sec_edge_script_strip.py`;
   `scripts/repair_3899_sec_edge_script.py` (stored-body repair, `--parse-ab`).
+
+### A loader that returns "no evidence" for a body it cannot read feeds a reconcile that deletes (#3899, 2026-10-21)
+
+- Symptom: #3899 slice 2 moved `def14a_body` to swept. `def14a_recipients.load_row_locations` returned `{}` for a NULL
+  body, `compute_desired` then made no class-column or class-row decision, and the reconcile deletes every stored
+  suppression that is neither desired nor kept. A naive sweep would have deleted the 10 class-column and 159
+  class-row suppressions (GOOG/GOOGL) on the next 04:15Z run. Codex checkpoint 2 then found the same shape inside the
+  fix: a `try/except` that turned a cache-query database error into empty evidence.
+- Prevention: before a retention change, grep every payload reader of the kind (`stored_body(`, `read_raw(`,
+  `require_payload()`) and follow each NULL branch to its writer. A body that cannot be read NOW must block the
+  accession (the unresolved-cover path), never be read as evidence of nothing. Only a deterministic failure over
+  verified bytes, or a row that was never a document, may fall back to empty. Keep database calls outside the
+  `except` that produces the fallback. When a job parameter defaults, apply the default only when the key is
+  omitted: `params.get(k) or DEFAULT` widens an explicit empty selection to the default.
+- Enforced in: `app/services/def14a_recipients.py::item403_tables` / `load_row_locations`;
+  `tests/test_def14a_recipients_db.py::test_unreadable_swept_body_blocks_the_accession_and_keeps_its_rows`;
+  `app/workers/scheduler.py::raw_payload_retention_sweep`.

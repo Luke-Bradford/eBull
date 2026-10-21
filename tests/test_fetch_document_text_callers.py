@@ -80,6 +80,12 @@ _ALLOWED_CALLER_FILES: frozenset[str] = frozenset(
         "app/services/manifest_parsers/sec_424b.py",
         "app/services/manifest_parsers/sec_tender.py",
         "app/services/manifest_parsers/sec_pre14a.py",
+        # #3899 verified sweep: the scheduler wrapper injects the provider's
+        # fetch_document_text into raw_payload_retention.sweep_verified, which
+        # persists only a SHA-256 comparison (the body is hashed, never stored);
+        # raw_payload_retention names the method in its FetchText docstring only.
+        "app/workers/scheduler.py",
+        "app/services/raw_payload_retention.py",
         # Bounded pipelined fetcher (#1045) — concurrent transport
         # wrapper used by ``ingest_business_summaries`` to prefetch
         # primary docs. Doesn't persist anything itself; the wrapped

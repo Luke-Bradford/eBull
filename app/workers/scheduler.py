@@ -9721,9 +9721,50 @@ def raw_payload_retention_sweep(params: Mapping[str, Any]) -> None:
       operator reads the dry-run figures, then re-triggers with
       ``dry_run=false`` (mirrors the raw_data_retention_sweep posture).
     """
-    from app.services.raw_payload_retention import sweep_raw_payloads
+    from app.services.raw_payload_retention import (
+        DEFAULT_VERIFIED_SWEEP_STATUSES,
+        sweep_raw_payloads,
+        sweep_verified,
+    )
 
     dry_run = bool(params.get("dry_run", True))
+    if params.get("verified"):
+        # #3899 verified arm (spec D2): DEF 14A / PRE 14A only, each body re-fetched
+        # and hash-matched before it is nulled. The jobs process holds the
+        # cross-process SEC rate gate, which is why this runs here, not in a script.
+        from app.config import settings
+        from app.providers.implementations.sec_edgar import SecFilingsProvider
+
+        with _tracked_job(JOB_RAW_PAYLOAD_RETENTION_SWEEP) as tracker:
+            with SecFilingsProvider(user_agent=settings.sec_user_agent) as provider:
+                verified = sweep_verified(
+                    fetch_text=provider.fetch_document_text,
+                    # Default only when omitted: an explicit empty list must reach
+                    # sweep_verified's validation, never widen to the default.
+                    statuses=(
+                        DEFAULT_VERIFIED_SWEEP_STATUSES if params.get("statuses") is None else list(params["statuses"])
+                    ),
+                    max_rows=int(params.get("max_rows") or 5000),
+                    max_seconds=float(params.get("max_seconds") or 1800),
+                    after=str(params.get("after") or ""),
+                    dry_run=dry_run,
+                )
+            tracker.row_count = verified.outcomes.get("swept", 0)
+            logger.info(
+                "raw_payload_retention_sweep verified: dry_run=%s statuses=%s eligible=%s attempted=%d "
+                "outcomes=%s bytes_reclaimed=%d complete=%s last=%s unswept=%s",
+                verified.dry_run,
+                verified.statuses,
+                verified.eligible_rows,
+                verified.attempted,
+                verified.outcomes,
+                verified.bytes_reclaimed,
+                verified.complete,
+                verified.last_accession,
+                verified.unswept,
+            )
+        return
+
     with _tracked_job(JOB_RAW_PAYLOAD_RETENTION_SWEEP) as tracker:
         summary = sweep_raw_payloads(dry_run=dry_run)
         tracker.row_count = summary.rows_swept

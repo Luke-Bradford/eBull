@@ -72,9 +72,11 @@ _MIN_REQUEST_INTERVAL_S = SEC_MIN_REQUEST_INTERVAL_S  # back-compat alias (exist
 # past the SEC fair-use limit, triggering UA throttling and
 # cascading 4xx/5xx tombstones across every downstream parser.
 #
-# Multi-process / multi-worker concurrency is out of scope here;
-# revive when #479 (multi-worker WS subscriber) lands and look
-# at a Postgres advisory-lock token bucket.
+# Cross-process pacing is NOT this clock's job: the composition roots
+# (app/main.py, app/jobs/__main__.py, and any script that fetches at
+# volume, e.g. scripts/rewash.py) install ``PostgresFloorGate`` via
+# ``sec_rate_gate_holder.set_sec_rate_gate`` (#1484), which spaces every
+# process's grants on one DB clock.
 _PROCESS_RATE_LIMIT_CLOCK: list[float] = [0.0]
 
 # Companion lock for ``_PROCESS_RATE_LIMIT_CLOCK`` (#726). Every

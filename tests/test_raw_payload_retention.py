@@ -31,9 +31,11 @@ from app.services.raw_filings import (
 from app.services.raw_payload_retention import (
     SWEPT_DOCUMENT_KINDS,
     SWEPT_MANIFEST_SOURCES,
+    VERIFIED_SWEEP_TARGETS,
     RawPayloadIntegrityError,
     rehydrate_raw_document,
     sweep_raw_payloads,
+    sweep_verified,
 )
 from app.services.sec_manifest import ManifestSource
 
@@ -48,6 +50,33 @@ def test_swept_kinds_have_no_rewash_parser() -> None:
     parser requires reconciling it with the sweep first (re-fetch-
     capable rewash, or de-scoping the kind here)."""
     assert SWEPT_DOCUMENT_KINDS.isdisjoint(rewash_filings.registered_specs())
+
+
+def test_fetch_backed_rewash_kinds_are_swept() -> None:
+    """#3899 — the reconciliation the docstring above names: a re-fetch-capable
+    rewash (``fetch_backed_specs``) reads through ``verified_body``, so its kind
+    depends on no retained body and belongs in the SWEPT bucket — and only there."""
+    fetch_backed = set(rewash_filings.fetch_backed_specs())
+    assert "def14a_body" in fetch_backed
+    assert fetch_backed <= SWEPT_DOCUMENT_KINDS
+    assert fetch_backed.isdisjoint(rewash_filings.registered_specs())
+
+
+def test_verified_sweep_targets_are_explicit_valid_pairs() -> None:
+    """The verified arm sweeps an explicit (source, kind) map, never the
+    cross-product the unverified arm walks (spec D2)."""
+    assert VERIFIED_SWEEP_TARGETS == {"sec_def14a": "def14a_body", "sec_pre14a": "pre14a_body"}
+    assert set(VERIFIED_SWEEP_TARGETS) <= set(get_args(ManifestSource))
+    assert set(VERIFIED_SWEEP_TARGETS.values()) <= SWEPT_DOCUMENT_KINDS
+    assert set(VERIFIED_SWEEP_TARGETS).isdisjoint(SWEPT_MANIFEST_SOURCES)
+
+
+@pytest.mark.parametrize("statuses", [[], ["pending"], ["parsed", "failed"], ["tombstoned", "bogus"]])
+def test_verified_sweep_refuses_statuses_outside_parsed_tombstoned(statuses: list[str]) -> None:
+    """Validated at the service entry, before any connection: a direct call can
+    never select pending / failed rows (Codex ckpt-1 round 3)."""
+    with pytest.raises(ValueError, match="statuses"):
+        sweep_verified(fetch_text=lambda _u: None, database_url="postgresql://unused/unused", statuses=statuses)
 
 
 def test_swept_kinds_are_valid_document_kinds() -> None:
@@ -89,6 +118,7 @@ def test_retention_buckets_are_pairwise_disjoint() -> None:
     swept = set(SWEPT_DOCUMENT_KINDS)
     kept = set(KEPT_NEGLIGIBLE_DOCUMENT_KINDS)
     assert rewash.isdisjoint(swept), rewash & swept
+    assert set(rewash_filings.fetch_backed_specs()).isdisjoint(kept)
     assert rewash.isdisjoint(kept), rewash & kept
     assert swept.isdisjoint(kept), swept & kept
 
@@ -130,7 +160,9 @@ def test_pre14a_body_is_swept_not_kept() -> None:
 
 def test_retention_class_for_covers_every_bucket() -> None:
     rewash = set(rewash_filings.registered_specs())
-    assert retention_class_for("def14a_body", rewash_kinds=rewash) == "re-read"
+    # #3899: def14a_body's rewash is fetch-backed, so it is housekept, not re-read.
+    assert retention_class_for("def14a_body", rewash_kinds=rewash) == "swept"
+    assert retention_class_for("form4_xml", rewash_kinds=rewash) == "re-read"
     assert retention_class_for("pre14a_body", rewash_kinds=rewash) == "swept"
     assert retention_class_for("nt_body", rewash_kinds=rewash) == "kept-and-negligible"
     # A kind the CORPUS can hold that the code no longer declares. The
@@ -151,6 +183,8 @@ def test_retention_class_for_covers_every_bucket() -> None:
         # swept kind holding bytes is a sweep backlog, a different finding.
         ("pre14a_body", 3_802_824_197, False),
         # A re-read kind's stored body is the point of the class, at any size.
+        ("form4_xml", 32_564_000_000, False),
+        # A swept kind holding bytes is a sweep backlog (#3899), not a breach.
         ("def14a_body", 32_564_000_000, False),
     ],
 )
@@ -158,7 +192,8 @@ def test_kept_negligible_breaches_bar(kind: str, live_bytes: int, expected: bool
     assert kept_negligible_breaches_bar(kind, live_bytes) is expected
 
 
-def test_store_raw_refuses_pre14a_without_source_url() -> None:
+@pytest.mark.parametrize("kind", ["pre14a_body", "def14a_body"])
+def test_store_raw_refuses_swept_body_without_source_url(kind: str) -> None:
     """Born-compaction's precondition, now binding on pre14a_body: the row
     keeps no bytes, so ``source_url`` is its ONLY recovery locator. The guard
     fires before any DB work, which is why a null connection reaches it."""
@@ -166,7 +201,7 @@ def test_store_raw_refuses_pre14a_without_source_url() -> None:
         store_raw(
             cast(Any, None),
             accession_number="0001805521-26-000001",
-            document_kind="pre14a_body",
+            document_kind=cast(DocumentKind, kind),
             payload="<html>proxy</html>",
             source_url=None,
         )

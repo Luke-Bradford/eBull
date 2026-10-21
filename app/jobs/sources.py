@@ -630,7 +630,8 @@ MANUAL_TRIGGER_JOB_SOURCES: dict[str, Lane] = {
     # NOT the catch-all ``db`` (would starve the every-5-min
     # orchestrator_high_frequency_sync; #1526/#1527 class). Params
     # (dry_run) in MANUAL_TRIGGER_JOB_METADATA; invoker in
-    # app/jobs/runtime.py::_INVOKERS.
+    # app/jobs/runtime.py::_INVOKERS. The #3899 verified arm also fetches
+    # from SEC, paced by the process-wide SEC rate gate, not by its lane.
     "raw_payload_retention_sweep": "db_raw_sweep",
     # fx_history_backfill — #1594 operator re-run of the full Frankfurter
     # historical FX backfill into fx_rates_daily. Same lane as the

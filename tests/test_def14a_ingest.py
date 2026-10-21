@@ -13,6 +13,7 @@ primary doc URL) and asserts the canonical row state.
 
 from __future__ import annotations
 
+import hashlib
 from datetime import date
 from decimal import Decimal
 
@@ -364,7 +365,15 @@ class TestIngestDef14a:
         # (#2100 fresh-agent review).
         assert doc.parser_version == _PARSER_VERSION_DEF14A
         assert doc.source_url == url
-        assert len(doc.require_payload()) > 0
+        # #3899: born-compacted — the hash of the fetched body, never the bytes.
+        assert doc.payload is None
+        sha = conn.execute(
+            "SELECT payload_sha256 FROM filing_raw_documents"
+            " WHERE accession_number = %s AND document_kind = 'def14a_body'",
+            (accession,),
+        ).fetchone()
+        assert sha is not None
+        assert sha[0] == hashlib.sha256(_proxy_html_with_table().encode("utf-8")).hexdigest()
 
     def test_re_ingest_promotes_via_upsert_not_insert(
         self,

@@ -221,3 +221,118 @@ def test_row_suppression_withholds_one_holder_from_one_sibling(
     }
     assert names("esop") == {(1, "Plan")}
     assert _current_holders(conn) == {1: 1, 2: 1}
+
+
+# ---------------------------------------------------------------------------
+# #3899 — Item 403 table evidence without a retained body (spec D3)
+# ---------------------------------------------------------------------------
+
+_PROXY_BODY = """<html><body><p>Security Ownership of Certain Beneficial Owners and Management</p>
+<table><tr><td>Name of Beneficial Owner</td><td>Class A Shares</td><td>Percent</td></tr>
+<tr><td>Knighthead Capital</td><td>100,000</td><td>12.5%</td></tr></table></body></html>"""
+_PROXY_URL = "https://www.sec.gov/Archives/edgar/data/1657853/000110465926044356/proxy.htm"
+
+
+def _sha(text: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _seed_proxy_body(conn: psycopg.Connection[tuple], *, swept: bool) -> None:
+    conn.execute(
+        """
+        INSERT INTO filing_raw_documents
+            (accession_number, document_kind, payload, payload_sha256, payload_swept_at, source_url)
+        VALUES (%s, 'def14a_body', %s, %s, CASE WHEN %s THEN NOW() END, %s)
+        """,
+        (PROXY, None if swept else _PROXY_BODY, _sha(_PROXY_BODY) if swept else None, swept, _PROXY_URL),
+    )
+
+
+def test_item403_tables_cache_needs_no_retained_body(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+) -> None:
+    from app.providers.implementations.sec_def14a import item403_table_htmls
+    from app.services.def14a_ingest import _PARSER_VERSION_DEF14A
+    from app.services.def14a_recipients import item403_tables
+
+    conn = ebull_test_conn
+    conn.autocommit = True
+    _seed_proxy_body(conn, swept=True)
+    calls: list[str] = []
+
+    def fetch(url: str) -> str | None:
+        calls.append(url)
+        return _PROXY_BODY
+
+    def no_fetch(url: str) -> str | None:
+        raise AssertionError(f"warm cache must not fetch {url}")
+
+    expected = item403_table_htmls(_PROXY_BODY)
+    # Miss on a swept body: one verified fetch, cache filled under the body's hash.
+    assert item403_tables(conn, PROXY, fetch) == expected
+    assert calls == [_PROXY_URL]
+    cached = conn.execute("SELECT parser_version, body_sha256 FROM def14a_item403_tables").fetchall()
+    assert cached == [(_PARSER_VERSION_DEF14A, _sha(_PROXY_BODY))]
+    # Hit: looked up on the stored hash before any fetch.
+    assert item403_tables(conn, PROXY, no_fetch) == expected
+
+    # A row under an older parser version is a miss.
+    conn.execute("UPDATE def14a_item403_tables SET parser_version = 'def14a-v0'")
+    calls.clear()
+    assert item403_tables(conn, PROXY, fetch) == expected and calls == [_PROXY_URL]
+
+    # A swept body whose re-fetch no longer matches is unavailable, and not cached.
+    conn.execute("DELETE FROM def14a_item403_tables")
+    assert item403_tables(conn, PROXY, lambda _u: "<html>changed</html>") == "mismatch"
+    assert conn.execute("SELECT count(*) FROM def14a_item403_tables").fetchone() == (0,)
+
+    # A live body never fetches; it fills the cache under its own hash.
+    conn.execute(
+        "UPDATE filing_raw_documents SET payload = %s, payload_sha256 = NULL, payload_swept_at = NULL",
+        (_PROXY_BODY,),
+    )
+    assert item403_tables(conn, PROXY, no_fetch) == expected
+    assert conn.execute("SELECT body_sha256 FROM def14a_item403_tables").fetchall() == [(_sha(_PROXY_BODY),)]
+
+
+def test_unreadable_swept_body_blocks_the_accession_and_keeps_its_rows(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+) -> None:
+    """A swept proxy body whose re-fetch fails verification is absence of evidence: the
+    accession is blocked like an unresolved cover, so a stored suppression — here one
+    the cover alone would rewrite — is kept untouched, and nothing is inserted."""
+    conn = ebull_test_conn
+    conn.autocommit = True
+    _seed(conn)
+    _seed_proxy_body(conn, swept=True)
+    conn.execute(
+        """
+        INSERT INTO def14a_recipient_suppressions (
+            instrument_id, accession_number, issuer_cik, reason, rule_version, cover_accession,
+            cover_title, cover_symbol, witness_instrument_id, witness_title)
+        VALUES (2, %s, %s, 'non_common_sibling', %s, %s, 'stale title', 'HTZWW', 1, 'Common Stock')
+        """,
+        (PROXY, CIK, RECIPIENT_RULE_VERSION, COVER_NEW),
+    )
+    pairs = [("Common Stock, par value $0.01", "HTZ"), ("Warrants to purchase Common Stock", "HTZWW")]
+
+    def fetch(url: str) -> str | None:
+        return "<html>SEC now serves other bytes</html>" if url == _PROXY_URL else cover_xml(pairs, cik=CIK)
+
+    report = run_recipient_suppressions(conn, fetch)
+    assert report.accessions_evidence_unavailable == 1
+    assert report.inserted == report.updated == report.deleted == 0 and not report.instruments_failed
+    assert conn.execute("SELECT cover_title FROM def14a_recipient_suppressions").fetchall() == [("stale title",)]
+
+    # Once the body verifies, the accession is decided normally again.
+    def fetch_ok(url: str) -> str | None:
+        return _PROXY_BODY if url == _PROXY_URL else cover_xml(pairs, cik=CIK)
+
+    report = run_recipient_suppressions(conn, fetch_ok)
+    assert report.accessions_evidence_unavailable == 0
+    assert report.updated == 1
+    assert conn.execute("SELECT cover_title FROM def14a_recipient_suppressions").fetchall() == [
+        ("Warrants to purchase Common Stock",)
+    ]

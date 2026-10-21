@@ -136,7 +136,8 @@ def test_sweep_nulls_only_parsed_swept_source_primary_docs(
     # B — sec_8k but ingest_status='failed': keep-on-fail, payload survives.
     _seed_manifest(conn, accession="swp-b", source="sec_8k", form="8-K", ingest_status="failed", raw_status="stored")
     _seed_raw(conn, accession="swp-b", kind="primary_doc", payload=_BODY_8K)
-    # C — parsed sec_def14a def14a_body: kind not swept, survives.
+    # C — parsed sec_def14a def14a_body: source not on the UNVERIFIED drop-list
+    # (it is the #3899 verified arm's), so this sweep leaves it alone.
     _seed_manifest(
         conn, accession="swp-c", source="sec_def14a", form="DEF 14A", ingest_status="parsed", raw_status="stored"
     )

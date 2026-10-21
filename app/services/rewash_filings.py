@@ -35,13 +35,22 @@ Operator runs:
 Re-wash is idempotent. Re-running after a successful pass is a
 no-op because every row's ``parser_version`` already matches the
 current spec.
+
+#3899: a kind whose bodies are swept (``raw_filings.SWEPT_DOCUMENT_KINDS``)
+can still be re-washed through the FETCH-BACKED registry
+(``register_fetch_backed_parser``). Its rows are read through
+``raw_payload_retention.verified_body`` — a live body as stored, a swept one
+re-fetched and hash-matched — so the kind's retention is justified as
+housekept, not re-read (#1617; the reconciliation
+``tests/test_raw_payload_retention.py::test_swept_kinds_have_no_rewash_parser``
+names). Spec: docs/specs/etl/2026-10-21-3899-def14a-pre14a-body-sweep.md (D1).
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Collection, Sequence
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from typing import Any
 
@@ -52,6 +61,7 @@ from app.services import raw_filings
 from app.services.def14a_ingest import _PARSER_VERSION_DEF14A
 from app.services.institutional_holdings import acquire_13f_accession_write_lock
 from app.services.raw_filings import DocumentKind, RawFilingDocument
+from app.services.raw_payload_retention import FetchText, verified_body
 
 logger = logging.getLogger(__name__)
 
@@ -93,9 +103,16 @@ class RewashResult:
     rows_reparsed: int
     rows_skipped: int
     rows_failed: int
+    # Fetch-backed kinds only: the body changed between the verified fetch and the
+    # parser-version bump, so the accession's whole transaction was rolled back.
+    rows_raced: int = 0
 
 
 _REGISTRY: dict[DocumentKind, ParserSpec] = {}
+# Re-fetch-capable specs (#3899): kinds in SWEPT_DOCUMENT_KINDS whose rewash reads
+# through ``verified_body``. Disjoint from ``_REGISTRY`` by construction of the
+# #1617 partition tests.
+_FETCH_BACKED_REGISTRY: dict[DocumentKind, ParserSpec] = {}
 
 
 def register_parser(spec: ParserSpec) -> None:
@@ -106,8 +123,18 @@ def register_parser(spec: ParserSpec) -> None:
 
 
 def registered_specs() -> dict[DocumentKind, ParserSpec]:
-    """Snapshot for tests + introspection."""
+    """Snapshot for tests + introspection. Stored-body (re-read) specs only."""
     return dict(_REGISTRY)
+
+
+def register_fetch_backed_parser(spec: ParserSpec) -> None:
+    """Register a re-fetch-capable spec for a SWEPT kind (#3899). Idempotent."""
+    _FETCH_BACKED_REGISTRY[spec.document_kind] = spec
+
+
+def fetch_backed_specs() -> dict[DocumentKind, ParserSpec]:
+    """Snapshot of the re-fetch-capable specs."""
+    return dict(_FETCH_BACKED_REGISTRY)
 
 
 def run_rewash(
@@ -117,10 +144,19 @@ def run_rewash(
     since: date | None = None,
     dry_run: bool = False,
     batch_size: int = 100,
+    fetch_text: FetchText | None = None,
+    accessions: Collection[str] | None = None,
 ) -> RewashResult:
     """Walk every raw row of ``document_kind`` whose parser_version
     is not the registered spec's current_version and re-apply the
     parser.
+
+    A fetch-backed kind (#3899) needs ``fetch_text`` to write: its body comes
+    from ``verified_body``, an unavailable body fails the row unparsed, and the
+    parser-version bump is conditional on the row still holding the verified
+    bytes — otherwise the accession's whole transaction rolls back
+    (``rows_raced``). ``accessions`` restricts the stale cohort to an explicit
+    allow-list.
 
     ``since`` filters by ``fetched_at`` to scope sweeps to recent
     filings — useful when an operator only wants to re-wash the
@@ -132,14 +168,19 @@ def run_rewash(
 
     Returns counts for operator triage.
     """
-    spec = _REGISTRY.get(document_kind)
+    fetch_backed = document_kind in _FETCH_BACKED_REGISTRY
+    spec = _FETCH_BACKED_REGISTRY.get(document_kind) or _REGISTRY.get(document_kind)
     if spec is None:
-        raise ValueError(f"No parser registered for document_kind={document_kind!r}. Available: {sorted(_REGISTRY)}")
+        available = sorted({*_REGISTRY, *_FETCH_BACKED_REGISTRY})
+        raise ValueError(f"No parser registered for document_kind={document_kind!r}. Available: {available}")
+    if fetch_backed and fetch_text is None and not dry_run:
+        raise ValueError(f"document_kind={document_kind!r} is fetch-backed (#3899): run_rewash needs fetch_text")
 
     scanned = 0
     reparsed = 0
     skipped = 0
     failed = 0
+    raced = 0
 
     # Eager-fetch the cohort: accession_number + fetched_at only,
     # NOT the body. The bodies can be hundreds of KB each — loading
@@ -158,6 +199,9 @@ def run_rewash(
         current_version=spec.current_version,
         batch_size=batch_size,
     )
+    if accessions is not None:
+        allowed = set(accessions)
+        cohort = [(acc, fetched_at) for acc, fetched_at in cohort if acc in allowed]
 
     for accession, fetched_at in cohort:
         scanned += 1
@@ -176,14 +220,27 @@ def run_rewash(
             accession_number=accession,
             document_kind=document_kind,
         )
+        verified_sha: str | None = None
+        if fetch_backed and raw_doc is not None:
+            assert fetch_text is not None  # checked above: a writing run has one
+            body = verified_body(conn, accession_number=accession, document_kind=document_kind, fetch_text=fetch_text)
+            if body.status == "unavailable":
+                logger.warning(
+                    "rewash: body unavailable accession=%s kind=%s reason=%s", accession, document_kind, body.reason
+                )
+                conn.rollback()
+                failed += 1
+                continue
+            raw_doc = replace(raw_doc, payload=body.text)
+            verified_sha = body.sha256
         if raw_doc is None or raw_doc.payload is None:
             # Row vanished between cohort scan and read (rare but
             # possible if a parallel process truncated), OR the
-            # payload was swept by the #1014 retention sweep
-            # (unreachable for registered kinds today — the sweep
-            # only targets kinds with no rewash parser, pinned by
-            # tests/test_raw_payload_retention.py — but cheap
-            # belt-and-braces). Treat as skipped.
+            # payload was swept by the #1014 retention sweep — a
+            # stored-body kind never is (the sweep only targets
+            # SWEPT_DOCUMENT_KINDS, disjoint from _REGISTRY, pinned by
+            # tests/test_raw_payload_retention.py), and a fetch-backed
+            # kind's swept body was filled in above. Treat as skipped.
             skipped += 1
             continue
 
@@ -209,12 +266,20 @@ def run_rewash(
         # so a crash between the two leaves both unchanged — the
         # row will be picked up again on the next sweep.
         try:
-            _bump_parser_version(
+            bumped = _bump_parser_version(
                 conn,
                 accession_number=accession,
                 document_kind=document_kind,
                 new_version=spec.current_version,
+                verified_sha=verified_sha,
             )
+            if not bumped:
+                # A concurrent ingest replaced the body after the verified fetch:
+                # the typed rows were derived from bytes the row no longer holds.
+                logger.warning("rewash: body changed under accession=%s kind=%s; rolled back", accession, document_kind)
+                conn.rollback()
+                raced += 1
+                continue
             conn.commit()
         except Exception:
             logger.exception(
@@ -233,6 +298,7 @@ def run_rewash(
         rows_reparsed=reparsed,
         rows_skipped=skipped,
         rows_failed=failed,
+        rows_raced=raced,
     )
 
 
@@ -267,19 +333,41 @@ def _bump_parser_version(
     accession_number: str,
     document_kind: DocumentKind,
     new_version: str,
-) -> None:
+    verified_sha: str | None = None,
+) -> bool:
     """Update the ``parser_version`` on a single raw row WITHOUT
     rewriting the body. Avoid ``store_raw`` (which would refresh
     ``fetched_at``) so the operator-visible "when did SEC last
-    publish this?" timestamp is preserved."""
-    conn.execute(
+    publish this?" timestamp is preserved.
+
+    With ``verified_sha`` (a fetch-backed rewash, #3899) the bump applies only
+    while the row still holds exactly those bytes — swept under that hash, or
+    live with that content. Both ``store_raw`` branches re-hash (born-compacted)
+    or clear the hash (retained) on a new body, so a replaced body never
+    matches. Returns whether the row was bumped."""
+    if verified_sha is None:
+        conn.execute(
+            """
+            UPDATE filing_raw_documents
+            SET parser_version = %s
+            WHERE accession_number = %s AND document_kind = %s
+            """,
+            (new_version, accession_number, document_kind),
+        )
+        return True
+    result = conn.execute(
         """
         UPDATE filing_raw_documents
-        SET parser_version = %s
-        WHERE accession_number = %s AND document_kind = %s
+        SET parser_version = %(v)s
+        WHERE accession_number = %(acc)s AND document_kind = %(kind)s
+          AND (
+              (payload IS NULL AND payload_sha256 = %(sha)s)
+              OR (payload IS NOT NULL AND encode(sha256(convert_to(payload, 'UTF8')), 'hex') = %(sha)s)
+          )
         """,
-        (new_version, accession_number, document_kind),
+        {"v": new_version, "acc": accession_number, "kind": document_kind, "sha": verified_sha},
     )
+    return result.rowcount == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1146,7 +1234,9 @@ def _rewash_exec_comp(
     return written
 
 
-register_parser(
+# #3899: def14a_body is SWEPT (born-compacted, retro-swept after a verified
+# re-fetch), so its rewash is fetch-backed — reads through verified_body.
+register_fetch_backed_parser(
     ParserSpec(
         document_kind="def14a_body",
         # Imported from def14a_ingest (single source of truth) so the rewash
