@@ -74,7 +74,10 @@ from app.services.sec_identity import siblings_for_issuer_cik
 # returned an empty CUSIP, so CUSIP-only resolution never resolved and
 # blockholders never populated. The bump flips sec_13d/sec_13g manifest
 # rows back to ``pending`` so they re-drain through the fixed extractor.
-_PARSER_VERSION_13DG = "13dg-primary-v3"
+# v4 (#3948): the cover's event date is parsed from ``MM/DD/YYYY`` (it was
+# ISO-only and NULL on every row). The 13D/G rewash spec registers this same
+# constant, so the bump makes every stored body stale for ``scripts/rewash.py``.
+_PARSER_VERSION_13DG = "13dg-primary-v4"
 
 logger = logging.getLogger(__name__)
 
@@ -552,8 +555,11 @@ def _upsert_filing_row(
     095 backstops re-runs.
 
     ⚠ The conflict action is a **deliberately conditional** ``DO UPDATE``
-    that can perform exactly one transition: ``instrument_id``
-    NULL → non-NULL. Every other column stays immutable on re-ingest,
+    that can perform exactly two transitions, each NULL → non-NULL:
+    ``instrument_id``, and ``date_of_event`` (#3948: the adapter parsed
+    ISO only and stored NULL on every row, so a re-drain must be able to
+    fill it; a value already stored is never changed). Every other column
+    stays immutable on re-ingest,
     which is the documented contract (one accession × one reporter ==
     one row) and the reason ``rewash_filings._apply_blockholders``
     DELETEs-then-INSERTs rather than updating. **A NULL link is an
@@ -612,9 +618,11 @@ def _upsert_filing_row(
             %(date_of_event)s, %(filed_at)s
         )
         ON CONFLICT (accession_number, COALESCE(reporter_cik, ''), reporter_name)
-        DO UPDATE SET instrument_id = EXCLUDED.instrument_id
-        WHERE blockholder_filings.instrument_id IS NULL
-          AND EXCLUDED.instrument_id IS NOT NULL
+        DO UPDATE SET
+            instrument_id = COALESCE(blockholder_filings.instrument_id, EXCLUDED.instrument_id),
+            date_of_event = COALESCE(blockholder_filings.date_of_event, EXCLUDED.date_of_event)
+        WHERE (blockholder_filings.instrument_id IS NULL AND EXCLUDED.instrument_id IS NOT NULL)
+           OR (blockholder_filings.date_of_event IS NULL AND EXCLUDED.date_of_event IS NOT NULL)
         RETURNING (xmax = 0) AS inserted
         """,
         {
