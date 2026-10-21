@@ -29,6 +29,9 @@ SQL_507 = SQL_DIR / "507_instrument_valuation_dividend_yield_total_form.sql"
 SQL_508 = SQL_DIR / "508_financial_periods_ttm_dividend_window_guard.sql"
 ROLLBACK_507 = SQL_DIR / "rollback" / "507_instrument_valuation_dividend_yield_total_form.sql"
 ROLLBACK_508 = SQL_DIR / "rollback" / "508_financial_periods_ttm_dividend_window_guard.sql"
+# sql/512 appends a financial_periods_ttm column that sql/507's and sql/508's CREATE OR REPLACE cannot drop; each
+# block applies its rollback first.
+ROLLBACK_512 = SQL_DIR / "rollback" / "512_financial_periods_ttm_stock_items_combine.sql"
 
 D = date
 Window = list[tuple[date | None, date]]
@@ -195,10 +198,12 @@ def _state(conn: psycopg.Connection[Any]) -> tuple[Any, ...]:
 
 @pytest.mark.db
 def test_rollback_restores_sql_507(_seed: psycopg.Connection[Any]) -> None:
+    _apply(_seed, ROLLBACK_512)
     _apply(_seed, SQL_507)
     prior = _state(_seed)
     _seed.rollback()
     # sql/507's valuation body explicitly: a later migration (sql/509) replaces it in the test database.
+    _apply(_seed, ROLLBACK_512)
     _apply(_seed, SQL_507)
     _apply(_seed, SQL_508)
     forward = _state(_seed)
@@ -211,10 +216,12 @@ def test_rollback_restores_sql_507(_seed: psycopg.Connection[Any]) -> None:
 
 @pytest.mark.db
 def test_whole_construction_rollback_is_508_then_507(_seed: psycopg.Connection[Any]) -> None:
+    _apply(_seed, ROLLBACK_512)
     _apply(_seed, SQL_507)
     _apply(_seed, ROLLBACK_507)
     expected = _state(_seed)
     _seed.rollback()
+    _apply(_seed, ROLLBACK_512)
     _apply(_seed, SQL_508)
     _apply(_seed, ROLLBACK_508)
     _apply(_seed, ROLLBACK_507)

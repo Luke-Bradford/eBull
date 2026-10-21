@@ -1,4 +1,4 @@
-"""#3903: ``instrument_valuation.pb_ratio`` is market cap / the latest quarter's equity in both arms (sql/509).
+"""#3903: ``instrument_valuation.pb_ratio`` is market cap / stored equity in both arms (sql/509; sql/512 selects it).
 
 Frozen synthetic cases (spec "Acceptance" item 5). A legacy-arm instrument has a ``fundamentals_snapshot`` row and
 one normalized quarter in ``financial_periods`` (no complete TTM window); the complete-arm instrument has four
@@ -28,6 +28,8 @@ SQL_DIR = Path(__file__).resolve().parents[1] / "sql"
 SQL_507 = SQL_DIR / "507_instrument_valuation_dividend_yield_total_form.sql"
 SQL_509 = SQL_DIR / "509_instrument_valuation_pb_total_form.sql"
 ROLLBACK_509 = SQL_DIR / "rollback" / "509_instrument_valuation_pb_total_form.sql"
+# sql/512 appends a financial_periods_ttm column that sql/507's CREATE OR REPLACE cannot drop; its rollback goes first.
+ROLLBACK_512 = SQL_DIR / "rollback" / "512_financial_periods_ttm_stock_items_combine.sql"
 
 (
     LEGACY,
@@ -137,7 +139,7 @@ def _seed(ebull_test_conn: psycopg.Connection[Any]) -> psycopg.Connection[Any]:
             _quarter(conn, iid, end, qtype, "1e9", "1e8")
         _quarter(conn, iid, Q_END, "Q2", "2e9", "1e8")
         seed_pit_step(conn, iid, session=SESSION, close=50, shares=1e8)
-    # Amendment 1: a stored FY period ending after the latest quarter ends that quarter's equity, in both arms.
+    # A stored FY period ending after the latest quarter: sql/509 refused (Amendment 1); sql/512 reads its equity.
     for iid in (LATER_FY, LATER_FY_COMPLETE):
         _quarter(conn, iid, date(2026, 9, 30), "FY", "3e9", "1e8", days=364)
     # Stored equity and a cap, no snapshot row and no complete window: no legacy row.
@@ -184,6 +186,7 @@ def _apply(conn: psycopg.Connection[Any], path: Path) -> None:
 
 
 def _pb_507(conn: psycopg.Connection[Any], iid: int) -> Any:
+    _apply(conn, ROLLBACK_512)
     _apply(conn, SQL_507)
     row = _val(conn, iid)
     conn.rollback()
@@ -248,13 +251,12 @@ def test_equity_is_usable_through_the_month_end_18_months_on(
 
 @pytest.mark.db
 @pytest.mark.parametrize(("iid", "complete"), [(LATER_FY, None), (LATER_FY_COMPLETE, True)])
-def test_a_later_stored_period_ends_the_quarter_equity(
-    _seed: psycopg.Connection[Any], iid: int, complete: bool | None
-) -> None:
+def test_a_later_stored_fy_supplies_the_equity(_seed: psycopg.Connection[Any], iid: int, complete: bool | None) -> None:
+    """sql/509 refused here (Amendment 1); sql/512 (#3919) reads the later FY's equity, 5e9 / 3e9."""
     row = _row(_seed, iid)
     assert row["is_complete_ttm"] is complete
     assert row["market_cap_live"] == Decimal("5e9")
-    assert row["pb_ratio"] is None
+    assert round(row["pb_ratio"], 12) == round(Decimal(5) / Decimal(3), 12)
 
 
 @pytest.mark.db
@@ -305,9 +307,11 @@ def _shape_and_rows(conn: psycopg.Connection[Any]) -> tuple[list[tuple[str, str]
 @pytest.mark.db
 def test_rollback_restores_sql_507(_seed: psycopg.Connection[Any]) -> None:
     forward = _shape_and_rows(_seed)
+    _apply(_seed, ROLLBACK_512)
     _apply(_seed, SQL_507)
     control = _shape_and_rows(_seed)
     _seed.rollback()
+    _apply(_seed, ROLLBACK_512)
     _apply(_seed, SQL_509)
     _apply(_seed, ROLLBACK_509)
     restored = _shape_and_rows(_seed)
