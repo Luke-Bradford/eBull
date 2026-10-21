@@ -488,6 +488,50 @@ def test_per_share_summary_yield_is_never_published(client: TestClient) -> None:
     assert body["source"]["key_stats"] == "unavailable"
 
 
+def test_no_sec_cik_publishes_no_key_stats(client: TestClient) -> None:
+    """#3943 removed the block-level ``use_local_sec`` condition; the SEC-CIK
+    gate is now the one on the view read. An instrument without a primary CIK
+    never reads the view, so no key stats publish even if the view would
+    return ratios for it."""
+    row = {
+        "instrument_id": 1236,
+        "symbol": "NOCIK",
+        "company_name": "No CIK Co",
+        "exchange": "NYSE",
+        "exchange_name": "NYSE",
+        "currency": "USD",
+        "sector": None,
+        "sector_name": None,
+        "industry": None,
+        "country": None,
+        "is_tradable": True,
+        "session_profile": "continuous",
+        "coverage_tier": 2,
+        "bid": Decimal("50"),
+        "ask": Decimal("50.10"),
+        "last": Decimal("50.05"),
+    }
+    conn = _make_conn(row=row)
+    _install_conn(conn)
+    with (
+        patch("app.api.instruments._has_sec_cik", return_value=False),
+        patch(
+            "app.api.instruments._fetch_valuation_ratios",
+            return_value={"pe_ratio": Decimal("30"), "dividend_yield": Decimal("2")},
+        ) as fetch,
+    ):
+        try:
+            resp = client.get("/instruments/NOCIK/summary")
+        finally:
+            _clear_conn()
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["key_stats"] is None
+    assert body["source"]["key_stats"] == "unavailable"
+    fetch.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # #819 — canonical_symbol redirect surface
 # ---------------------------------------------------------------------------

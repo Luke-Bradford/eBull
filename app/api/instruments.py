@@ -2911,6 +2911,8 @@ def get_instrument_dividends(
             has_dividend=summary.has_dividend,
             ttm_dps=summary.ttm_dps,
             ttm_dividends_paid=summary.ttm_dividends_paid,
+            # A failed view read logs a WARNING with the traceback inside the helper and
+            # renders "—", the same contract as the summary's key stats (#3942).
             dividend_yield=_fetch_valuation_ratios(conn, instrument_id).get("dividend_yield"),
             latest_dps=summary.latest_dps,
             latest_dividend_at=summary.latest_dividend_at,
@@ -4267,7 +4269,8 @@ def get_instrument_summary(
 
     # Every key stat, the dividend yield included (#3943), is an
     # instrument_valuation column, which refuses an FPI ADR/ADS cap (#1939) and
-    # so every ratio priced on it.
+    # so every ratio priced on it. The SEC-CIK gate is the ``use_local_sec`` read
+    # above: without a CIK, ``valuation_ratios`` stays ``{}`` and the block is None.
     stats_block = _build_local_stats(valuation_ratios)
     key_stats_source = "sec_xbrl" if stats_block is not None else "unavailable"
 
