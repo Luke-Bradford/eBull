@@ -34,10 +34,12 @@ from app.config import settings
 
 _CONCEPT = "CommonStockDividendsPerShareDeclared"
 _TAG = re.compile(
-    r'<ix:nonFraction\b([^>]*\bname="us-gaap:' + _CONCEPT + r'"[^>]*)>(.*?)</ix:nonFraction>', re.S | re.I
+    r'<ix:nonFraction\b([^>]*\bname=["\']us-gaap:' + _CONCEPT + r'["\'][^>]*)>(.*?)</ix:nonFraction>', re.S | re.I
 )
 _SCALE_LEXICAL = re.compile(r"[-+]?[0-9]+")  # xs:integer lexical space
-_ATTR = re.compile(r'([\w:]+)="([^"]*)"')
+_ATTR = re.compile(r'([\w:]+)=(?:"([^"]*)"|\'([^\']*)\')')
+# The one primary-document-extension expression both [1] and [2] use, so "an .htm accession" means one thing.
+_EXTENSION_SQL = "substring(m.primary_document_url FROM '\\.([a-z]+)$')"
 
 
 def _scale(raw: str | None) -> int | str | None:
@@ -66,10 +68,10 @@ def _population(conn: psycopg.Connection[tuple]) -> None:
         " by form and manifest primary-document extension"
     )
     for row in conn.execute(
-        """
+        f"""
         WITH a AS (SELECT DISTINCT accession_number, form_type FROM financial_facts_raw
                    WHERE concept = %s AND unit = 'USD/shares' AND filed_date >= '2019-06-15')
-        SELECT a.form_type, coalesce(substring(m.primary_document_url FROM '\\.([a-z]+)$'), '<none>'), count(*)
+        SELECT a.form_type, coalesce({_EXTENSION_SQL}, '<none>'), count(*)
         FROM a LEFT JOIN sec_filing_manifest m USING (accession_number) GROUP BY 1, 2 ORDER BY 3 DESC
         """,
         (_CONCEPT,),
@@ -79,12 +81,12 @@ def _population(conn: psycopg.Connection[tuple]) -> None:
 
 def _pilot(conn: psycopg.Connection[tuple]) -> None:
     rows = conn.execute(
-        """
+        f"""
         WITH f AS (SELECT accession_number, bool_or(val >= 10) AS big FROM financial_facts_raw
                    WHERE concept = %s AND unit = 'USD/shares' AND filed_date >= '2019-06-15' GROUP BY 1)
         SELECT f.accession_number, f.big, m.primary_document_url
         FROM f JOIN sec_filing_manifest m USING (accession_number)
-        WHERE m.primary_document_url ILIKE '%%.htm' ORDER BY 1
+        WHERE {_EXTENSION_SQL} = 'htm' ORDER BY 1
         """,
         (_CONCEPT,),
     ).fetchall()
@@ -101,14 +103,20 @@ def _pilot(conn: psycopg.Connection[tuple]) -> None:
         scales: collections.Counter[int | str | None] = collections.Counter()
         scaled_accessions: list[str] = []
         no_fact = 0
+        fetch_failed: list[str] = []
         total_bytes = 0
         for accession, _big, url in sample:
             started = time.monotonic()
-            response = client.get(url)
-            response.raise_for_status()
+            try:
+                response = client.get(url)
+                response.raise_for_status()
+            except httpx.HTTPError as exc:
+                # Counted and listed, not fatal: one transient SEC error must not void the run.
+                fetch_failed.append(f"{accession} {exc!r}")
+                continue
             body = response.text
             total_bytes += len(body.encode())
-            found = [dict(_ATTR.findall(m.group(1))) for m in _TAG.finditer(body)]
+            found = [{k: dq or sq for k, dq, sq in _ATTR.findall(m.group(1))} for m in _TAG.finditer(body)]
             no_fact += not found
             parsed = [_scale(a.get("scale")) for a in found]
             for scale in parsed:
@@ -117,10 +125,13 @@ def _pilot(conn: psycopg.Connection[tuple]) -> None:
                 scaled_accessions.append(accession)
             time.sleep(max(0.0, 0.15 - (time.monotonic() - started)))
         print(
-            f"    {label}: accessions {len(sample)}, no regex-detected occurrence in primary doc {no_fact},"
+            f"    {label}: accessions {len(sample)}, fetch failures {len(fetch_failed)},"
+            f" no regex-detected occurrence in primary doc {no_fact},"
             f" occurrences by scale {dict(scales)}, accessions with scale > 0 {len(scaled_accessions)},"
-            f" mean MB {total_bytes / len(sample) / 1e6:.2f}"
+            f" mean MB {total_bytes / max(1, len(sample) - len(fetch_failed)) / 1e6:.2f}"
         )
+        for failure in fetch_failed:
+            print("       fetch failed", failure)
         for accession in scaled_accessions:
             symbol = conn.execute(
                 "SELECT i.symbol FROM financial_facts_raw f JOIN instruments i USING (instrument_id)"
@@ -137,6 +148,9 @@ def _fy_over_ytd(conn: psycopg.Connection[tuple]) -> None:
                           period_end - period_start AS days
                    FROM financial_facts_raw
                    WHERE concept = %s AND unit = 'USD/shares' AND period_start IS NOT NULL),
+        -- 350-380 days is a fiscal year (52/53 weeks included); 260-285 days is nine months (39-40 weeks
+        -- is 273-280 days). Neither window can hold a 6-month (~182 days) or 12-month (~365 days) duration,
+        -- and ytd.s = fy.s pins the YTD to the same fiscal year's start.
         fy AS (SELECT DISTINCT ON (instrument_id, s, e) * FROM d WHERE days BETWEEN 350 AND 380
                ORDER BY instrument_id, s, e, filed_date DESC, accession_number DESC),
         ytd AS (SELECT DISTINCT ON (instrument_id, s, e) * FROM d WHERE days BETWEEN 260 AND 285
