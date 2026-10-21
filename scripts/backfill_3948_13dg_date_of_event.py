@@ -59,6 +59,7 @@ def main() -> int:
         if args.limit:
             cohort = cohort[: args.limit]
         st["cohort"] = len(cohort)
+        would = "would " if args.dry_run else ""
         for n, (acc, form) in enumerate(cohort):
             if n % 5000 == 0:
                 print("progress", n, len(cohort), dict(st), flush=True)
@@ -75,7 +76,6 @@ def main() -> int:
                 st["parse failed"] += 1
                 print("FAILED", acc, repr(exc), flush=True)
                 continue
-            would = "would " if args.dry_run else ""
             with conn.transaction():
                 # Read inside the accession's transaction, so the match and the fill see one state.
                 stored = {
