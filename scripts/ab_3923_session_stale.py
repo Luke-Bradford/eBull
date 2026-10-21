@@ -23,6 +23,7 @@ Prints, and exits non-zero on any failure:
 
 from __future__ import annotations
 
+import calendar
 import re
 import statistics
 import subprocess
@@ -97,12 +98,7 @@ def _median(conn: psycopg.Connection[Any], sql: str, params: list[dict[str, Any]
 def month_before(d: date) -> date:
     """Postgres ``date - interval '1 month'``: the same day a month earlier, clamped to that month's last day."""
     year, month = (d.year, d.month - 1) if d.month > 1 else (d.year - 1, 12)
-    for day in (d.day, 30, 29, 28):
-        try:
-            return date(year, month, day)
-        except ValueError:
-            continue
-    raise AssertionError(d)
+    return date(year, month, min(d.day, calendar.monthrange(year, month)[1]))
 
 
 def main() -> int:

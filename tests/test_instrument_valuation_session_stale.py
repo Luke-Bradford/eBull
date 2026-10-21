@@ -150,3 +150,29 @@ def test_a_later_build_ages_a_session_with_no_new_bar(ebull_test_conn: psycopg.C
     conn.execute("UPDATE instrument_share_count_pit SET build_id = %s WHERE instrument_id = 205", (BUILD_ID + 1,))
     conn.commit()
     _assert_refused(_val(conn, 205), "session_stale")
+
+
+@pytest.mark.db
+def test_a_step_always_has_a_dated_build(ebull_test_conn: psycopg.Connection[Any]) -> None:
+    """sql/513 skips no age check on a NULL build_date because none can exist (sql/499).
+
+    ``instrument_share_count_pit.build_id`` is NOT NULL with a deferred foreign key to ``market_cap_pit_builds``, and
+    ``build_date`` is NOT NULL there; a cap publishes only with a PIT row, which needs a step. This pins both.
+    """
+    conn = ebull_test_conn
+    nullable = conn.execute(
+        "SELECT table_name, column_name, is_nullable FROM information_schema.columns "
+        "WHERE (table_name, column_name) IN "
+        "(('instrument_share_count_pit', 'build_id'), ('market_cap_pit_builds', 'build_date')) ORDER BY 1"
+    ).fetchall()
+    assert nullable == [
+        ("instrument_share_count_pit", "build_id", "NO"),
+        ("market_cap_pit_builds", "build_date", "NO"),
+    ]
+    _instrument(conn, 206)
+    conn.commit()
+    _build(conn, BUILD_ID, date(2026, 10, 21))
+    seed_pit_step(conn, 206, session=date(2026, 10, 20), close=150, shares=1e9)
+    conn.execute("UPDATE instrument_share_count_pit SET build_id = 999999 WHERE instrument_id = 206")
+    with pytest.raises(psycopg.errors.ForeignKeyViolation):
+        conn.commit()
