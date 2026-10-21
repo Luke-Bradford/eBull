@@ -13650,5 +13650,9 @@ neighbouring container and match it.**
 - Prevention: before writing a format assumption into a parser, run it on one stored body and check the skill's date
   table. A fixture is evidence only if it was copied from a real body. When a new column is 100% NULL, re-parse a
   real body before you call it a data gap. Register a raw kind's parser version once and import it everywhere.
+- Prevention (backfills, bot review of #3952): a backfill marks a raw body current (parser-version bump) only after
+  every row the re-parse names matched a stored row; otherwise it leaves the body stale and exits non-zero. A dry run
+  labels its counters as hypothetical. One-shot scripts share constants through `app/`, never each other's private
+  names.
 - Enforced in: `tests/test_schedule13_adapter.py::test_adapter_parses_the_mm_dd_yyyy_date_sec_ships`;
   `app/services/rewash_filings.py` (the 13D/G spec imports `_PARSER_VERSION_13DG`); `scripts/ab_3948_13dg_date_of_event.py`.

@@ -89,6 +89,16 @@ _SUBMISSION_TYPE_FOR_FORM: Final[dict[str, SubmissionType]] = {
 }
 
 
+# A stored ``blockholder_filings.submission_type`` → its manifest source, for
+# re-parsing a stored body (the #3948 backfill and A/B). KeyError on unknown.
+SOURCE_FOR_SUBMISSION_TYPE: Final[dict[str, Literal["sec_13d", "sec_13g"]]] = {
+    "SCHEDULE 13D": "sec_13d",
+    "SCHEDULE 13D/A": "sec_13d",
+    "SCHEDULE 13G": "sec_13g",
+    "SCHEDULE 13G/A": "sec_13g",
+}
+
+
 # Schedule13D writes ``date_of_event`` into parsed; Schedule13G writes
 # ``event_date``. We dispatch on the manifest source so the adapter
 # does not need to introspect either dict.

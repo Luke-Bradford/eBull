@@ -29,24 +29,21 @@ import re
 import sys
 from collections import Counter
 from datetime import UTC, date, datetime, timedelta
-from typing import Any, Literal
+from typing import Any
 
 import psycopg
 from edgar.beneficial_ownership.schedule13 import Schedule13D, Schedule13G
 
 from app.config import settings
 from app.db.snapshot import snapshot_read
-from app.services.manifest_parsers._schedule13_adapter import build_filing_from_edgartools_dict
+from app.services.manifest_parsers._schedule13_adapter import (
+    SOURCE_FOR_SUBMISSION_TYPE,
+    build_filing_from_edgartools_dict,
+)
 from app.services.raw_filings import stored_body
 
 # Namespace-prefixed or not (``<ns2:eventDateRequiresFilingThisStatement>`` occurs).
 _TAG = re.compile(r"<(?:\w+:)?(dateOfEvent|eventDateRequiresFilingThisStatement)>\s*([^<]*?)\s*<", re.S)
-_FORMS: dict[str, Literal["sec_13d", "sec_13g"]] = {
-    "SCHEDULE 13D": "sec_13d",
-    "SCHEDULE 13D/A": "sec_13d",
-    "SCHEDULE 13G": "sec_13g",
-    "SCHEDULE 13G/A": "sec_13g",
-}
 
 
 def _independent(text: str) -> date | None:
@@ -107,8 +104,8 @@ def main() -> int:
                 st["body with no typed row"] += 1
                 continue
             form, filed = meta[acc]
-            source = _FORMS[form]
             try:
+                source = SOURCE_FOR_SUBMISSION_TYPE[form]
                 body = stored_body(conn, accession_number=acc, document_kind="primary_doc_13dg")
                 if body is None:
                     raise ValueError("no stored body")

@@ -618,8 +618,9 @@ def _upsert_filing_row(
             %(date_of_event)s, %(filed_at)s
         )
         ON CONFLICT (accession_number, COALESCE(reporter_cik, ''), reporter_name)
-        DO UPDATE SET instrument_id = COALESCE(blockholder_filings.instrument_id, EXCLUDED.instrument_id),
-                      date_of_event = COALESCE(blockholder_filings.date_of_event, EXCLUDED.date_of_event)
+        DO UPDATE SET
+            instrument_id = COALESCE(blockholder_filings.instrument_id, EXCLUDED.instrument_id),
+            date_of_event = COALESCE(blockholder_filings.date_of_event, EXCLUDED.date_of_event)
         WHERE (blockholder_filings.instrument_id IS NULL AND EXCLUDED.instrument_id IS NOT NULL)
            OR (blockholder_filings.date_of_event IS NULL AND EXCLUDED.date_of_event IS NOT NULL)
         RETURNING (xmax = 0) AS inserted
