@@ -244,18 +244,21 @@ def test_happy_path_parses_and_stores_raw_and_holdings(
     assert log_row[0] == "success"
     assert log_row[1] >= 2
 
-    # filing_raw_documents has the body so a re-wash can reparse.
+    # #3899: def14a_body is born-compacted — the row records the body's hash
+    # and recovery URL, never the bytes; a re-wash re-fetches and verifies.
     with ebull_test_conn.cursor() as cur:
         cur.execute(
             """
-            SELECT byte_count FROM filing_raw_documents
+            SELECT payload IS NULL, payload_sha256, source_url FROM filing_raw_documents
             WHERE accession_number = '0000320193-26-000010'
               AND document_kind = 'def14a_body'
             """
         )
         raw = cur.fetchone()
     assert raw is not None
-    assert raw[0] > 0
+    assert raw[0] is True
+    assert raw[1] is not None and len(raw[1]) == 64
+    assert raw[2]
 
 
 def test_empty_fetch_tombstones(
@@ -783,19 +786,20 @@ def test_def14a_reuse_stored_body_skips_fetch(
     holdings still write from the stored body. The pre-fetch latest-N cap gate
     still runs above the reuse (it sits before the fetch)."""
     import app.services.manifest_parsers  # noqa: F401 — register
-    from app.services.raw_filings import store_raw
 
     iid = 8740050
     acc = "0000320193-26-000050"
     _seed_instrument(ebull_test_conn, iid=iid, symbol="AAPLR", cik="0000320193")
     _seed_pending_def14a(ebull_test_conn, accession=acc, instrument_id=iid)
-    store_raw(
-        ebull_test_conn,
-        accession_number=acc,
-        document_kind="def14a_body",
-        payload=_FAKE_DEF14A_HTML,
-        parser_version="def14a-v1",
-        source_url="https://www.sec.gov/Archives/edgar/data/320193/000032019326000050/def14a.htm",
+    # A LIVE body, as a pre-sweep corpus holds (#3899: store_raw now born-compacts
+    # def14a_body, so reuse applies only to rows stored before the kind was swept).
+    ebull_test_conn.execute(
+        """
+        INSERT INTO filing_raw_documents
+            (accession_number, document_kind, payload, parser_version, source_url)
+        VALUES (%s, 'def14a_body', %s, 'def14a-v1', %s)
+        """,
+        (acc, _FAKE_DEF14A_HTML, "https://www.sec.gov/Archives/edgar/data/320193/000032019326000050/def14a.htm"),
     )
     ebull_test_conn.commit()
 
@@ -847,19 +851,20 @@ def test_def14a_reuse_failure_preserves_raw_status_stored(
     path. Hoisting issuer_cik above the reuse branch keeps the tombstone
     ingest-log write intact."""
     import app.services.manifest_parsers  # noqa: F401 — register
-    from app.services.raw_filings import store_raw
 
     iid = 8740051
     acc = "0000320193-26-000051"
     _seed_instrument(ebull_test_conn, iid=iid, symbol="AAPLF", cik="0000320193")
     _seed_pending_def14a(ebull_test_conn, accession=acc, instrument_id=iid)
-    store_raw(
-        ebull_test_conn,
-        accession_number=acc,
-        document_kind="def14a_body",
-        payload=_NOTICE_ONLY_DEF14A_HTML,
-        parser_version="def14a-v1",
-        source_url="https://www.sec.gov/Archives/edgar/data/320193/000032019326000051/def14a.htm",
+    # A LIVE body, as a pre-sweep corpus holds (#3899: store_raw now born-compacts
+    # def14a_body, so reuse applies only to rows stored before the kind was swept).
+    ebull_test_conn.execute(
+        """
+        INSERT INTO filing_raw_documents
+            (accession_number, document_kind, payload, parser_version, source_url)
+        VALUES (%s, 'def14a_body', %s, 'def14a-v1', %s)
+        """,
+        (acc, _NOTICE_ONLY_DEF14A_HTML, "https://www.sec.gov/Archives/edgar/data/320193/000032019326000051/def14a.htm"),
     )
     ebull_test_conn.commit()
 

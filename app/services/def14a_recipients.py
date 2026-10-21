@@ -41,8 +41,10 @@ import psycopg
 
 from app.providers.implementations.sec_def14a import ShareLocation, item403_table_htmls, share_locations
 from app.services.def14a_drift import detect_drift
+from app.services.def14a_ingest import _PARSER_VERSION_DEF14A
 from app.services.ownership_observations import refresh_def14a_current, refresh_esop_current
-from app.services.raw_filings import store_raw, stored_body
+from app.services.raw_filings import store_raw
+from app.services.raw_payload_retention import verified_body
 from app.services.sec_cover_identity import cover_pairs, entity_ciks, parse_cover_contexts_root
 from app.services.xbrl_instance import SAFE_XML_PARSER
 
@@ -613,6 +615,9 @@ class RunReport:
     accessions: int = 0
     accessions_unresolved: int = 0
     accessions_no_date: int = 0
+    # #3899: Item 403 table evidence could not be read (a swept body whose re-fetch
+    # failed or no longer hash-matches). The accession is blocked, never decided empty.
+    accessions_evidence_unavailable: int = 0
     instruments_vetoed: int = 0
     fetches: int = 0
     inserted: int = 0
@@ -686,15 +691,95 @@ def _accessions_with_dates(
     return sorted(dates.items()), by_instrument
 
 
+RowLocationMap = dict[int, list[tuple[str, list[ShareLocation]]]]
+
+
+@dataclass(frozen=True)
+class RowLocations:
+    """``load_row_locations``'s result. ``available=False`` means the accession's Item
+    403 evidence could not be read now (``reason`` from ``verified_body``); the caller
+    blocks the accession rather than treating it as evidence of nothing."""
+
+    available: bool
+    by_instrument: RowLocationMap = field(default_factory=dict)
+    reason: str | None = None
+
+
+def _cached_tables(conn: psycopg.Connection[Any], accession: str, body_sha256: str) -> list[str] | None:
+    row = conn.execute(
+        """
+        SELECT tables FROM def14a_item403_tables
+         WHERE accession_number = %s AND parser_version = %s AND body_sha256 = %s
+        """,
+        (accession, _PARSER_VERSION_DEF14A, body_sha256),
+    ).fetchone()
+    return None if row is None else list(row[0])
+
+
+# No raw row, or a row fetched from a filing-index page (#3590): there is no proxy body
+# and never was, so there is no table evidence to lose and retrying cannot produce
+# any — the pre-#3899 ``{}``, which still lets the body-independent point-in-time
+# decision stand. Only a swept body that cannot be re-read NOW blocks the accession.
+_NEVER_A_DOCUMENT: Final = frozenset({"no_row", "index_url"})
+
+
+def item403_tables(conn: psycopg.Connection[Any], accession: str, fetch_text: FetchText) -> list[str] | str:
+    """The parser's Item 403 tables for ACCESSION's DEF 14A body, or the
+    ``verified_body`` reason they are unavailable (#3899, spec D3).
+
+    Cached in ``def14a_item403_tables`` keyed on the parser version and the SHA-256 of
+    the exact bytes extracted from, so the job needs no retained body. A swept row is
+    looked up on its stored hash BEFORE any fetch: that hash names bytes verified when
+    they were swept or born-compacted, so a warm cache never fetches. An extractor
+    failure is deterministic over verified bytes: logged, returned as no tables, and
+    not cached. A database error propagates — it is never evidence. Nothing
+    unavailable or failed is cached.
+    """
+    swept = conn.execute(
+        """
+        SELECT payload_sha256 FROM filing_raw_documents
+         WHERE accession_number = %s AND document_kind = 'def14a_body'
+           AND payload IS NULL AND payload_sha256 IS NOT NULL
+        """,
+        (accession,),
+    ).fetchone()
+    if swept is not None:
+        hit = _cached_tables(conn, accession, str(swept[0]))
+        if hit is not None:
+            return hit
+    body = verified_body(conn, accession_number=accession, document_kind="def14a_body", fetch_text=fetch_text)
+    if body.reason in _NEVER_A_DOCUMENT:
+        return []
+    if body.text is None or body.sha256 is None:
+        return str(body.reason)
+    hit = _cached_tables(conn, accession, body.sha256)
+    if hit is not None:
+        return hit
+    try:
+        tables = item403_table_htmls(body.text)
+    except Exception:
+        logger.exception("def14a_recipients: Item 403 table extraction failed for %s", accession)
+        return []
+    conn.execute(
+        """
+        INSERT INTO def14a_item403_tables (accession_number, parser_version, body_sha256, tables)
+        VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING
+        """,
+        (accession, _PARSER_VERSION_DEF14A, body.sha256, tables),
+    )
+    return tables
+
+
 def load_row_locations(
-    conn: psycopg.Connection[Any], accession: str, sibling_ids: list[int]
-) -> dict[int, list[tuple[str, list[ShareLocation]]]]:
+    conn: psycopg.Connection[Any], accession: str, sibling_ids: list[int], fetch_text: FetchText
+) -> RowLocations:
     """Slice 3/3b evidence: per sibling, ``(holder_name, locations)`` of each of its stored
     rows for ACCESSION.
 
     A row with a NULL share count gets no location, so it keeps the accession. A body
     that fails to parse is no evidence (logged): parsing is deterministic, so the failure
-    is a property of the document, not of this run.
+    is a property of the document, not of this run. A body that cannot be READ now is
+    ``available=False`` (#3899): absence of evidence, never evidence of absence.
     """
     held = conn.execute(
         """
@@ -706,24 +791,26 @@ def load_row_locations(
         (accession, sibling_ids),
     ).fetchall()
     if not held:
-        return {}
-    body = stored_body(conn, accession_number=accession, document_kind="def14a_body")
-    if not body:
-        return {}
+        return RowLocations(available=True)
     rows_by_instrument: dict[int, list[tuple[str, Decimal | None]]] = {}
     for iid, name, shares in held:
         rows_by_instrument.setdefault(int(iid), []).append((str(name), None if shares is None else Decimal(shares)))
+    # Outside the try: a database error here must fail the run, never read as "no
+    # evidence" — the reconcile would then delete the suppressions it protects.
+    tables = item403_tables(conn, accession, fetch_text)
+    if isinstance(tables, str):
+        logger.warning("def14a_recipients: Item 403 evidence unavailable for %s (%s)", accession, tables)
+        return RowLocations(available=False, reason=tables)
     try:
-        tables = item403_table_htmls(body)
-        out: dict[int, list[tuple[str, list[ShareLocation]]]] = {}
+        out: RowLocationMap = {}
         for iid, rows in rows_by_instrument.items():
             counted = [(name, shares) for name, shares in rows if shares is not None]
             located = iter(share_locations(tables, counted))
             out[iid] = [(name, next(located) if shares is not None else []) for name, shares in rows]
-        return out
+        return RowLocations(available=True, by_instrument=out)
     except Exception:
         logger.exception("def14a_recipients: class-column evidence failed for %s", accession)
-        return {}
+        return RowLocations(available=True)
 
 
 # Column order of the ledger SELECT / INSERT below; must match both.
@@ -808,10 +895,17 @@ def compute_desired(conn: psycopg.Connection[Any], fetch_text: FetchText, report
                 continue
             if res.cover is None:
                 continue
+            # #3899: read the Item 403 evidence BEFORE this accession contributes
+            # anything. Unreadable now → blocked exactly like an unresolved cover.
+            evidence = load_row_locations(conn, accession, ids, fetch_text)
+            if not evidence.available:
+                report.accessions_evidence_unavailable += 1
+                blocked_accessions.add(accession)
+                continue
+            located = evidence.by_instrument
             covers.append(res.cover)
             pit = decide(accession_number=accession, issuer_cik=cik, siblings=siblings, cover=res.cover)
             point_in_time.extend(pit)
-            located = load_row_locations(conn, accession, ids)
             whole_column = decide_class_column(
                 accession_number=accession,
                 issuer_cik=cik,

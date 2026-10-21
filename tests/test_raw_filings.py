@@ -291,7 +291,7 @@ def test_storage_summary_groups_by_kind(
     raw_filings.store_raw(
         conn,
         accession_number="0000000002-26-000003",
-        document_kind="def14a_body",
+        document_kind="form3_xml",
         payload="z" * 5000,
     )
     conn.commit()
@@ -299,8 +299,8 @@ def test_storage_summary_groups_by_kind(
     by_kind = {s.document_kind: s for s in summary}
     assert by_kind["form4_xml"].row_count == 2
     assert by_kind["form4_xml"].total_bytes == 300
-    assert by_kind["def14a_body"].row_count == 1
-    assert by_kind["def14a_body"].total_bytes == 5000
+    assert by_kind["form3_xml"].row_count == 1
+    assert by_kind["form3_xml"].total_bytes == 5000
 
 
 def test_iter_raw_concurrent_calls_use_unique_cursor_names(

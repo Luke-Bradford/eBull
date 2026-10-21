@@ -413,6 +413,54 @@ MANUAL_TRIGGER_JOB_METADATA: dict[str, tuple[ParamMetadata, ...]] = {
             default=True,
             advanced_group=False,
         ),
+        # #3899 — the verified arm (spec D2): DEF 14A / PRE 14A bodies are nulled only
+        # after a re-fetch from EDGAR hash-matches the stored bytes. Never touches the
+        # sec_10k / sec_8k arm above.
+        ParamMetadata(
+            name="verified",
+            label="Verified sweep (DEF/PRE 14A)",
+            help_text=(
+                "If true, run ONLY the verified arm: re-fetch each DEF 14A / PRE 14A body "
+                "from EDGAR and null it only when the SHA-256 matches the stored bytes."
+            ),
+            field_type="bool",
+            default=False,
+            advanced_group=False,
+        ),
+        ParamMetadata(
+            name="statuses",
+            label="Manifest statuses",
+            help_text=(
+                "Verified arm only. Which manifest states to sweep. 'tombstoned' waits for the "
+                "operator's answer on #3899; the default sweeps parsed rows only."
+            ),
+            field_type="multi_enum",
+            enum_values=("parsed", "tombstoned"),
+            default=["parsed"],
+        ),
+        ParamMetadata(
+            name="max_rows",
+            label="Max rows per pass",
+            help_text="Verified arm only. Rows attempted before the pass stops (resume with 'after').",
+            field_type="int",
+            default=5000,
+            min_value=1,
+        ),
+        ParamMetadata(
+            name="max_seconds",
+            label="Max seconds per pass",
+            help_text="Verified arm only. Soft wall-clock limit, checked before each row.",
+            field_type="int",
+            default=1800,
+            min_value=1,
+        ),
+        ParamMetadata(
+            name="after",
+            label="Resume after accession",
+            help_text="Verified arm only. Keyset cursor: the last accession a previous pass reported.",
+            field_type="string",
+            default=None,
+        ),
     ),
     # sec_13f_quarterly_sweep — post-#1155 retirement of the weekly
     # scheduled row; bootstrap stage 21 still dispatches it via

@@ -105,16 +105,18 @@ DocumentKind = Literal[
 # this per-filing table. Claude PR 808 review (BLOCKING) caught the
 # prior overload that smuggled CIKs into the accession_number column.
 
-# Kinds whose payload is WRITE-ONLY — no rewash parser reads them and
-# the manifest rebuild re-fetches from EDGAR unconditionally (sql/190).
+# Kinds whose payload no reader depends on RETAINING — no stored-body rewash
+# parser reads them, the manifest rebuild re-fetches from EDGAR (sql/190), and
+# a re-fetch-capable rewash (``rewash_filings.fetch_backed_specs()``, #3899)
+# reuses a live body or re-fetches and hash-verifies a swept one.
 # ``store_raw`` persists these **born-compacted** (#1615): payload NULL +
 # payload_sha256 + payload_swept_at, the same state the #1014 sweep
 # produces, so ~22 GB of primary_doc bytes are never stored. MUST stay
-# disjoint from the rewash registry (a rewash parser reads stored bodies,
-# which a born-compacted row lacks). Canonical here (single source of
-# truth); ``raw_payload_retention`` imports it.
+# disjoint from the stored-body rewash registry (``registered_specs()``),
+# whose parsers read stored bodies a born-compacted row lacks. Canonical here
+# (single source of truth); ``raw_payload_retention`` imports it.
 SWEPT_DOCUMENT_KINDS: frozenset[DocumentKind] = frozenset(
-    {"primary_doc", "prospectus_body", "tender_body", "pre14a_body", "xbrl_cover_instance"}
+    {"primary_doc", "prospectus_body", "tender_body", "pre14a_body", "def14a_body", "xbrl_cover_instance"}
 )
 # Future PR adds a sibling ``cik_raw_documents`` table for those.
 
@@ -443,9 +445,11 @@ def stored_body(
     fetch so a re-drain (parser-version bump → ``sec_rebuild`` resets rows
     to pending) re-parses the stored body instead of re-downloading it.
 
-    Only valid for retained kinds (a payload reader on a SWEPT kind is
-    barred by ``tests/test_raw_payload_retention.py``); SWEPT kinds always
-    return ``None`` here and fall through to the fetch path.
+    A SWEPT kind returns ``None`` once its row is swept or born-compacted, and
+    the caller falls through to the fetch path; a live body left from before
+    the kind was swept is still reused. No caller may DEPEND on a SWEPT body
+    being retained (``tests/test_raw_payload_retention.py``) — a re-wash of one
+    goes through ``raw_payload_retention.verified_body`` (#3899).
 
     ⚠ "Present == fresh" holds only if the stored body is the right
     DOCUMENT. #3590: bodies fetched from an EDGAR filing-INDEX page

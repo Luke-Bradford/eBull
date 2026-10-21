@@ -35,6 +35,8 @@ from app.services.ownership_observations import (
 from app.services.raw_filings import RawFilingDocument
 from app.services.rewash_filings import (
     ParserSpec,
+    fetch_backed_specs,
+    register_fetch_backed_parser,
     register_parser,
     registered_specs,
     run_rewash,
@@ -70,14 +72,18 @@ _MIN_PARSEABLE_13D_XML = """<?xml version="1.0" encoding="UTF-8"?>
 
 @pytest.fixture
 def isolated_registry() -> Iterator[None]:
-    """Snapshot + restore the parser registry around each test."""
+    """Snapshot + restore both parser registries around each test."""
     saved = registered_specs()
+    saved_fetch_backed = fetch_backed_specs()
     try:
         yield
     finally:
         rewash_filings._REGISTRY.clear()
         for spec in saved.values():
             register_parser(spec)
+        rewash_filings._FETCH_BACKED_REGISTRY.clear()
+        for spec in saved_fetch_backed.values():
+            register_fetch_backed_parser(spec)
 
 
 def _seed_raw(
@@ -88,6 +94,20 @@ def _seed_raw(
     payload: str = "<x/>",
     parser_version: str | None = None,
 ) -> None:
+    if kind in raw_filings.SWEPT_DOCUMENT_KINDS:
+        # A swept kind's store_raw born-compacts (#3899 for def14a_body), so seed
+        # the LIVE row a pre-sweep corpus holds: the fetch-backed rewash reads it
+        # as present and never fetches.
+        conn.execute(
+            """
+            INSERT INTO filing_raw_documents
+                (accession_number, document_kind, payload, parser_version, source_url)
+            VALUES (%s, %s, %s, %s, %s)
+            """,
+            (accession, kind, payload, parser_version, f"https://www.sec.gov/Archives/{accession}.htm"),
+        )
+        conn.commit()
+        return
     raw_filings.store_raw(
         conn,
         accession_number=accession,
@@ -96,6 +116,10 @@ def _seed_raw(
         parser_version=parser_version,
     )
     conn.commit()
+
+
+def _no_fetch(url: str) -> str | None:
+    raise AssertionError(f"a live body must be reused, not fetched: {url}")
 
 
 def _seed_blockholder_manifest(
@@ -740,7 +764,7 @@ def test_def14a_apply_raises_on_parse_failure(
     )
 
     rewash_filings._REGISTRY.clear()
-    register_parser(
+    register_fetch_backed_parser(
         ParserSpec(
             document_kind="def14a_body",
             current_version="def14a-v1",
@@ -748,7 +772,7 @@ def test_def14a_apply_raises_on_parse_failure(
         )
     )
 
-    result = rewash_filings.run_rewash(conn, document_kind="def14a_body")
+    result = rewash_filings.run_rewash(conn, document_kind="def14a_body", fetch_text=_no_fetch)
 
     assert result.rows_scanned == 1
     assert result.rows_failed == 1
@@ -819,7 +843,7 @@ def test_def14a_apply_replaces_holders_on_rewash(
     )
 
     rewash_filings._REGISTRY.clear()
-    register_parser(
+    register_fetch_backed_parser(
         ParserSpec(
             document_kind="def14a_body",
             current_version="def14a-v1",
@@ -827,7 +851,7 @@ def test_def14a_apply_replaces_holders_on_rewash(
         )
     )
 
-    result = rewash_filings.run_rewash(conn, document_kind="def14a_body")
+    result = rewash_filings.run_rewash(conn, document_kind="def14a_body", fetch_text=_no_fetch)
     assert result.rows_reparsed == 1
 
     with conn.cursor() as cur:
@@ -931,7 +955,7 @@ def test_def14a_rescue_resolves_the_lowest_instrument_when_filing_events_fan_out
     )
 
     rewash_filings._REGISTRY.clear()
-    register_parser(
+    register_fetch_backed_parser(
         ParserSpec(
             document_kind="def14a_body",
             current_version="def14a-v1",
@@ -939,7 +963,7 @@ def test_def14a_rescue_resolves_the_lowest_instrument_when_filing_events_fan_out
         )
     )
 
-    result = rewash_filings.run_rewash(conn, document_kind="def14a_body")
+    result = rewash_filings.run_rewash(conn, document_kind="def14a_body", fetch_text=_no_fetch)
     assert result.rows_reparsed == 1
 
     with conn.cursor() as cur:
@@ -1021,7 +1045,7 @@ def test_def14a_apply_rescues_tombstoned_accession(
     )
 
     rewash_filings._REGISTRY.clear()
-    register_parser(
+    register_fetch_backed_parser(
         ParserSpec(
             document_kind="def14a_body",
             current_version="def14a-v1",
@@ -1029,7 +1053,7 @@ def test_def14a_apply_rescues_tombstoned_accession(
         )
     )
 
-    result = rewash_filings.run_rewash(conn, document_kind="def14a_body")
+    result = rewash_filings.run_rewash(conn, document_kind="def14a_body", fetch_text=_no_fetch)
     assert result.rows_reparsed == 1  # rescued, not skipped
 
     with conn.cursor() as cur:
@@ -1118,7 +1142,7 @@ def test_def14a_rescue_with_no_ownership_table_still_rewashes_exec_comp(
     )
 
     rewash_filings._REGISTRY.clear()
-    register_parser(
+    register_fetch_backed_parser(
         ParserSpec(
             document_kind="def14a_body",
             current_version="def14a-v1",
@@ -1126,7 +1150,7 @@ def test_def14a_rescue_with_no_ownership_table_still_rewashes_exec_comp(
         )
     )
 
-    result = rewash_filings.run_rewash(conn, document_kind="def14a_body")
+    result = rewash_filings.run_rewash(conn, document_kind="def14a_body", fetch_text=_no_fetch)
     assert result.rows_reparsed == 1  # comp written → bumped, not skipped
 
     with conn.cursor() as cur:
@@ -1255,7 +1279,7 @@ def test_def14a_rewash_refreshes_comp_on_all_sibling_instruments(
     )
 
     rewash_filings._REGISTRY.clear()
-    register_parser(
+    register_fetch_backed_parser(
         ParserSpec(
             document_kind="def14a_body",
             current_version="def14a-v1",
@@ -1263,7 +1287,7 @@ def test_def14a_rewash_refreshes_comp_on_all_sibling_instruments(
         )
     )
 
-    result = rewash_filings.run_rewash(conn, document_kind="def14a_body")
+    result = rewash_filings.run_rewash(conn, document_kind="def14a_body", fetch_text=_no_fetch)
     assert result.rows_reparsed == 1
 
     with conn.cursor() as cur:
@@ -1345,11 +1369,11 @@ def test_def14a_rewash_clears_comp_when_the_parser_withheld_every_row(
     sct = Def14ASummaryCompTable(rows=(), raw_table_score=20, withheld_rows=withheld)
     monkeypatch.setattr("app.providers.implementations.sec_def14a.parse_summary_compensation_table", lambda _html: sct)
     rewash_filings._REGISTRY.clear()
-    register_parser(
+    register_fetch_backed_parser(
         ParserSpec(document_kind="def14a_body", current_version="def14a-v1", apply_fn=rewash_filings._apply_def14a)
     )
 
-    result = rewash_filings.run_rewash(conn, document_kind="def14a_body")
+    result = rewash_filings.run_rewash(conn, document_kind="def14a_body", fetch_text=_no_fetch)
 
     with conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM def14a_exec_compensation WHERE accession_number = %s", (accession,))
@@ -2927,14 +2951,14 @@ def test_def14a_rewash_fans_out_over_every_instrument_holding_the_accession(
     )
 
     rewash_filings._REGISTRY.clear()
-    register_parser(
+    register_fetch_backed_parser(
         ParserSpec(
             document_kind="def14a_body",
             current_version="def14a-v1",
             apply_fn=rewash_filings._apply_def14a,
         )
     )
-    result = rewash_filings.run_rewash(conn, document_kind="def14a_body")
+    result = rewash_filings.run_rewash(conn, document_kind="def14a_body", fetch_text=_no_fetch)
     assert result.rows_reparsed == 1
 
     with conn.cursor() as cur:
@@ -2981,3 +3005,126 @@ def test_def14a_rewash_fans_out_over_every_instrument_holding_the_accession(
         (orphan_iid, "Corrected Name"),
         (typed_only_iid, "Corrected Name"),
     ]
+
+
+# ---------------------------------------------------------------------------
+# #3899 — fetch-backed rewash over a SWEPT def14a_body (spec D1)
+# ---------------------------------------------------------------------------
+
+_SWEPT_BODY = "<html>the proxy body EDGAR serves</html>"
+
+
+@pytest.mark.parametrize("scenario", ["applied", "mismatch", "race"])
+def test_def14a_fetch_backed_rewash_of_a_swept_body(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_registry: None,
+    scenario: str,
+) -> None:
+    """A swept body is re-fetched and hash-verified before the unchanged
+    ``_apply_def14a`` parses it. A mismatch fails the row unparsed; a body replaced
+    between the fetch and the version bump rolls back every typed change."""
+    import hashlib
+
+    from app.providers.implementations.sec_def14a import (
+        Def14ABeneficialHolder,
+        Def14ABeneficialOwnershipTable,
+    )
+    from tests.fixtures.ebull_test_db import test_database_url
+
+    conn = ebull_test_conn
+    instrument_id = 950_391
+    accession = "0001234567-26-003899"
+    url = f"https://www.sec.gov/Archives/{accession}.htm"
+    conn.execute(
+        """
+        INSERT INTO instruments (instrument_id, symbol, company_name, exchange, currency, is_tradable)
+        VALUES (%s, 'D14S', 'DEF 14A Swept', '4', 'USD', TRUE)
+        """,
+        (instrument_id,),
+    )
+    for holder in ("Holder A", "Holder B"):
+        conn.execute(
+            """
+            INSERT INTO def14a_beneficial_holdings (
+                instrument_id, accession_number, issuer_cik,
+                holder_name, holder_role, shares, percent_of_class, as_of_date
+            ) VALUES (%s, %s, '0000999000', %s, 'officer', 100, 5.0, '2025-01-01')
+            """,
+            (instrument_id, accession, holder),
+        )
+    conn.execute(
+        """
+        INSERT INTO filing_raw_documents
+            (accession_number, document_kind, payload, payload_sha256, payload_swept_at, parser_version, source_url)
+        VALUES (%s, 'def14a_body', NULL, %s, NOW(), 'def14a-v0', %s)
+        """,
+        (accession, hashlib.sha256(_SWEPT_BODY.encode("utf-8")).hexdigest(), url),
+    )
+    conn.commit()
+
+    parsed_bodies: list[str] = []
+
+    def fake_parse(html: str) -> Def14ABeneficialOwnershipTable:
+        parsed_bodies.append(html)
+        return Def14ABeneficialOwnershipTable(
+            as_of_date=None,
+            rows=[
+                Def14ABeneficialHolder(
+                    holder_name=name, holder_role="officer", shares=Decimal("100"), percent_of_class=Decimal("5.0")
+                )
+                for name in ("Holder A", "Holder C")
+            ],
+            raw_table_score=10,
+        )
+
+    monkeypatch.setattr("app.providers.implementations.sec_def14a.parse_beneficial_ownership_table", fake_parse)
+
+    def fetch(fetched_url: str) -> str | None:
+        assert fetched_url == url
+        if scenario == "mismatch":
+            return "<html>SEC now serves other bytes</html>"
+        if scenario == "race":
+            # A concurrent re-ingest born-compacts a different body after our fetch.
+            with psycopg.connect(test_database_url(), autocommit=True) as other:
+                other.execute(
+                    "UPDATE filing_raw_documents SET payload_sha256 = %s WHERE accession_number = %s",
+                    ("f" * 64, accession),
+                )
+        return _SWEPT_BODY
+
+    rewash_filings._REGISTRY.clear()
+    register_fetch_backed_parser(
+        ParserSpec(document_kind="def14a_body", current_version="def14a-v1", apply_fn=rewash_filings._apply_def14a)
+    )
+
+    with pytest.raises(ValueError, match="fetch_text"):
+        rewash_filings.run_rewash(conn, document_kind="def14a_body")
+
+    result = rewash_filings.run_rewash(conn, document_kind="def14a_body", fetch_text=fetch)
+    conn.commit()
+
+    holders = [
+        r[0]
+        for r in conn.execute(
+            "SELECT holder_name FROM def14a_beneficial_holdings WHERE accession_number = %s ORDER BY holder_name",
+            (accession,),
+        ).fetchall()
+    ]
+    version = conn.execute(
+        "SELECT parser_version FROM filing_raw_documents WHERE accession_number = %s", (accession,)
+    ).fetchone()
+    if scenario == "applied":
+        assert (result.rows_reparsed, result.rows_failed, result.rows_raced) == (1, 0, 0)
+        assert parsed_bodies[0] == _SWEPT_BODY
+        assert holders == ["Holder A", "Holder C"]
+        assert version == ("def14a-v1",)
+    elif scenario == "mismatch":
+        assert (result.rows_reparsed, result.rows_failed, result.rows_raced) == (0, 1, 0)
+        assert parsed_bodies == []
+        assert holders == ["Holder A", "Holder B"]
+        assert version == ("def14a-v0",)
+    else:
+        assert (result.rows_reparsed, result.rows_failed, result.rows_raced) == (0, 0, 1)
+        assert holders == ["Holder A", "Holder B"]
+        assert version == ("def14a-v0",)
