@@ -66,7 +66,9 @@ export interface DividendSummary {
   has_dividend: boolean;
   ttm_dps: string | null;
   ttm_dividends_paid: string | null;
-  ttm_yield_pct: string | null;
+  // #3943: instrument_valuation.dividend_yield, already a percent — the one yield
+  // the summary key stats, rankings and thesis read.
+  dividend_yield: string | null;
   latest_dps: string | null;
   latest_dividend_at: string | null;
   dividend_streak_q: number;

@@ -44,7 +44,7 @@ function paid(): InstrumentDividends {
       has_dividend: true,
       ttm_dps: "1.0000",
       ttm_dividends_paid: "15000000000.0000",
-      ttm_yield_pct: "0.52",
+      dividend_yield: "0.52",
       latest_dps: "0.2500",
       latest_dividend_at: "2025-12-28",
       dividend_streak_q: 40,

@@ -10,8 +10,8 @@ function formatDecimal(
   // `percent`: value is a raw FRACTION (e.g. roe 0.277) → render ×100 as
   // "27.70%". `alreadyPercent`: value is ALREADY in percent units → append
   // "%" without re-scaling. The two must not be confused: dividend_yield is
-  // `ttm_yield_pct = (ttm_dps / price) * 100` (already a percent, sql/050),
-  // so it takes `alreadyPercent`; its fraction-valued siblings (roe/roa/…)
+  // `instrument_valuation.dividend_yield` (already a percent, sql/507), so it
+  // takes `alreadyPercent`; its fraction-valued siblings (roe/roa/…)
   // take `percent`. Mixing them double-scaled the yield 100× (#1827). Same
   // already-percent convention as `dividendsShared.formatYieldPct`.
   opts: { percent?: boolean; alreadyPercent?: boolean } = {},
@@ -42,10 +42,6 @@ function FieldSourceTag({ source }: { source: KeyStatsFieldSource | undefined })
     case "sec_xbrl":
       tone = "ok";
       label = "SEC";
-      break;
-    case "sec_dividend_summary":
-      tone = "ok";
-      label = "SEC · div";
       break;
     case "unavailable":
       tone = "neutral";
@@ -79,7 +75,7 @@ function buildRatioRows(stats: InstrumentKeyStats): Array<Row | null> {
   return [
     makeRow(formatDecimal(stats.pe_ratio), "P/E ratio", fs["pe_ratio"]),
     makeRow(formatDecimal(stats.pb_ratio), "P/B ratio", fs["pb_ratio"]),
-    // dividend_yield is already a percent (ttm_yield_pct, sql/050) — render
+    // dividend_yield is already a percent (instrument_valuation, sql/507) — render
     // as-is, do NOT re-multiply by 100 (#1827).
     makeRow(formatDecimal(stats.dividend_yield, { alreadyPercent: true }), "Dividend yield", fs["dividend_yield"]),
     makeRow(formatDecimal(stats.payout_ratio, { percent: true }), "Payout ratio", fs["payout_ratio"]),

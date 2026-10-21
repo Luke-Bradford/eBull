@@ -1,4 +1,4 @@
-"""DB integration test for #3942: ``_fetch_valuation_ratios`` executes against the real view.
+"""DB integration test for #3942/#3943: ``_fetch_valuation_ratios`` executes against the real view.
 
 The summary's key_stats ratios are ``instrument_valuation`` columns. A column or alias typo
 would be swallowed into ``{}`` by the handler's ``psycopg.Error`` fallback and read as
@@ -38,16 +38,26 @@ def _seed(ebull_test_conn: psycopg.Connection[tuple]) -> psycopg.Connection[tupl
 
 def test_reads_the_view_columns(_seed: psycopg.Connection[tuple]) -> None:
     got = _fetch_valuation_ratios(_seed, 31)
-    assert set(got) == {"pe_ratio", "pb_ratio", "roe", "roa", "debt_to_equity"}
+    assert set(got) == {"pe_ratio", "pb_ratio", "roe", "roa", "debt_to_equity", "dividend_yield"}
     row = _seed.execute(
-        "SELECT pe_ratio, pb_ratio, roe, roa, debt_equity_ratio FROM instrument_valuation WHERE instrument_id = 31"
+        "SELECT pe_ratio, pb_ratio, roe, roa, debt_equity_ratio, dividend_yield "
+        "FROM instrument_valuation WHERE instrument_id = 31"
     ).fetchone()
     assert row is not None
-    assert (got["pe_ratio"], got["pb_ratio"], got["roe"], got["roa"], got["debt_to_equity"]) == row
+    assert (
+        got["pe_ratio"],
+        got["pb_ratio"],
+        got["roe"],
+        got["roa"],
+        got["debt_to_equity"],
+        got["dividend_yield"],
+    ) == row
     # Legacy arm: debt / (book_value × shares) = 2e10 / 3e11. No complete TTM, so no earnings ratios.
     assert got["debt_to_equity"] is not None
     assert abs(got["debt_to_equity"] - Decimal(2) / Decimal(30)) < Decimal("1e-12")
     assert got["pe_ratio"] is None and got["roe"] is None and got["roa"] is None
+    # #3943: the yield is count-based (sql/507) — no complete TTM and no PIT cap, so NULL.
+    assert got["dividend_yield"] is None
 
 
 def test_no_view_row_is_empty(_seed: psycopg.Connection[tuple]) -> None:
