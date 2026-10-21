@@ -324,7 +324,8 @@ def test_6_day_granularity_bound_through_the_view_body(_seed: psycopg.Connection
 def test_the_deployed_view_reads_current_date(_seed: psycopg.Connection[Any]) -> None:
     row = _seed.execute("SELECT pg_get_viewdef('financial_periods_ttm'::regclass)").fetchone()
     assert row is not None
-    assert "CURRENT_DATE <=" in row[0]
+    # Tolerant of the deparser's case and spacing; test 6 pins the behaviour through the view itself.
+    assert re.search(r"current_date\s*<=", row[0], re.IGNORECASE)
 
 
 @pytest.mark.db

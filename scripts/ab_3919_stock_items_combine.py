@@ -658,9 +658,10 @@ def main() -> int:
     attribution = {"own": 0, "cohort": 0, "both": 0}
     print(f"   full arms: {len(full_changed)} band changes:")
     for iid in full_changed:
-        own = iid in own_set
-        iso_same = own and band_iso.get(iid) == band_t.get(iid)
-        kind = "own" if iso_same else "both" if own else "cohort"
+        # own: the own inputs alone (control cohort) give the treatment band; cohort: they move nothing (or did not
+        # change); both: they move the band, and the cohort moves it further.
+        own_moves = iid in own_set and band_iso.get(iid) != band_c.get(iid)
+        kind = "cohort" if not own_moves else "own" if band_iso.get(iid) == band_t.get(iid) else "both"
         attribution[kind] += 1
         print(f"     {sym.get(iid)} ({iid}) {kind}: {band_c.get(iid)} -> {band_t.get(iid)}")
     print(f"   attribution: {attribution}")
