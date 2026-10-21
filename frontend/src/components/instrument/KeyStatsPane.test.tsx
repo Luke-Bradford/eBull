@@ -44,7 +44,7 @@ describe("KeyStatsPane", () => {
   });
 
   it("renders dividend yield as an already-percent value, not double-scaled ×100 (#1827)", () => {
-    // The wire value is `ttm_yield_pct = (ttm_dps / price) * 100` — already a
+    // The wire value is `instrument_valuation.dividend_yield` (×100) — already a
     // percent. AAPL's 0.2744 must render "0.27%", NOT "27.45%" (the old
     // {percent:true} double-scale bug). Sibling roe stays a fraction → ×100.
     render(<KeyStatsPane summary={fixture({ dividend_yield: "0.27448", roe: "0.2777" })} />);

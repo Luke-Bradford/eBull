@@ -13608,3 +13608,15 @@ neighbouring container and match it.**
   is matched on the session), read that column instead. A latency A/B against control is the gate.
 - Enforced in: `sql/513_instrument_valuation_session_stale.sql` (the `fr` comment), `scripts/ab_3923_session_stale.py`
   item 4 (treatment within 2x control on 50 single reads, with the plan printed).
+
+### Removing a block-level gate must leave the surviving gate visible at the new call site (#3943, 2026-10-21)
+
+- Symptom: #3943 collapsed the summary's `if (use_local_sec and has_local_values) or dividend_yield is not None:`
+  into an unconditional `_build_local_stats(valuation_ratios)`. The behaviour was unchanged, because
+  `valuation_ratios` is filled only under `if use_local_sec:` a few lines earlier. Nothing at the new line said so,
+  though, and the review bot read it as a dropped SEC-CIK gate and returned NEEDS DISCUSSION.
+- Prevention: when you delete a condition because an earlier one already implies it, grep the handler for the
+  deleted flag. Name the surviving gate in a comment at the new call site, and add a test that drives the gated-off
+  case through the handler, asserting both the output and that the gated read was not called.
+- Enforced in: `app/api/instruments.py` (the comment above `_build_local_stats(valuation_ratios)`),
+  `tests/test_api_instrument_summary.py::test_no_sec_cik_publishes_no_key_stats`.

@@ -233,24 +233,25 @@ def test_per_completion_cap_recomputation_immediately_unblocks_consumer(
       * stage_a (cap-provider) — sleeps 0.5 s, provides capability
         ``synth_cap_alpha``.
       * stage_b (cap-requirer) — requires ``synth_cap_alpha``. Sleeps 0.1 s.
-      * stage_pad — independent slow stage, sleeps 2.0 s. Blocks the
+      * stage_pad — independent slow stage, sleeps 5.0 s. Blocks the
         batch-join in the pre-PR-2 dispatcher.
 
     Pre-PR-2: stage_b cannot dispatch until the entire ready batch
     drains via ``wait([all_futures])``. The first batch contains only
     stage_a + stage_pad (B is not yet ready). The dispatcher waits
-    ~2.0 s for stage_pad to finish before re-evaluating caps and
+    ~5.0 s for stage_pad to finish before re-evaluating caps and
     dispatching B.
 
     Post-PR-2: stage_a's completion at t≈0.5 s immediately triggers
     cap recomputation; stage_b is dispatched on its lane within the
     poll iteration. Stage_b starts within ~0.2 s of stage_a's end —
-    NOT 1.5 s later when stage_pad finishes.
+    NOT 4.5 s later when stage_pad finishes.
 
-    Assertion: ``stage_b.started_at - stage_a.ended_at < 0.3``. The
+    Assertion: ``stage_b.started_at - stage_a.ended_at < 1.5``. The
     tolerance accommodates DB round-trips for ``mark_stage_running``
-    + cap re-eval; the pre-PR-2 dispatcher's ~1.5 s gap would fail
-    this margin by a factor of 5.
+    + cap re-eval on a loaded host (#3943: 0.40 s at load average 18
+    failed the former 0.3 s bound against a 2.0 s pad); the pre-PR-2
+    dispatcher's ~4.5 s gap would fail it by a factor of 3.
     """
     _reset_state(ebull_test_conn)
     test_db_url = _bind_settings_to_test_db(monkeypatch)
@@ -288,7 +289,7 @@ def test_per_completion_cap_recomputation_immediately_unblocks_consumer(
             stage_key="stage_pad",
             job_name="synth_job_stage_pad",
             lane="sec_rate",
-            invoker=_sleep_invoker("stage_pad", 2.0, calls),
+            invoker=_sleep_invoker("stage_pad", 5.0, calls),
             requires=CapRequirement(),
         ),
     ]
@@ -305,9 +306,9 @@ def test_per_completion_cap_recomputation_immediately_unblocks_consumer(
 
     by_name = {c.name: c for c in calls}
     gap = by_name["stage_b"].started_at - by_name["stage_a"].ended_at
-    assert gap < 0.3, (
-        f"stage_b started {gap:.3f}s after stage_a completed; expected < 0.3s. "
-        "Pre-PR-2 batch-join would gate stage_b on stage_pad's 2.0s sleep — confirms "
+    assert gap < 1.5, (
+        f"stage_b started {gap:.3f}s after stage_a completed; expected < 1.5s. "
+        "Pre-PR-2 batch-join would gate stage_b on stage_pad's 5.0s sleep — confirms "
         "the dispatcher recomputes caps per completion, not per batch."
     )
 

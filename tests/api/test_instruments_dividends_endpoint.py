@@ -79,6 +79,7 @@ def test_dividends_endpoint_returns_summary_and_history() -> None:
         patch("app.services.dividends.get_dividend_summary", return_value=summary),
         patch("app.services.dividends.get_dividend_history", return_value=history),
         patch("app.services.dividends.get_upcoming_dividends", return_value=[]),
+        patch("app.api.instruments._fetch_valuation_ratios", return_value={"dividend_yield": Decimal("1.94")}),
         TestClient(app) as client,
     ):
         resp = client.get("/instruments/AAPL/dividends")
@@ -87,7 +88,9 @@ def test_dividends_endpoint_returns_summary_and_history() -> None:
     body = resp.json()
     assert body["symbol"] == "AAPL"
     assert body["summary"]["has_dividend"] is True
-    assert body["summary"]["ttm_yield_pct"] == "2.00"
+    # #3943: the pane's yield is instrument_valuation's, not the per-share ttm_yield_pct (2.00).
+    assert body["summary"]["dividend_yield"] == "1.94"
+    assert "ttm_yield_pct" not in body["summary"]
     assert body["summary"]["dividend_streak_q"] == 20
     assert len(body["history"]) == 1
     assert body["history"][0]["period_type"] == "Q4"

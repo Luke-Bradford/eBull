@@ -388,16 +388,10 @@ class InstrumentPrice(BaseModel):
 # Closed set of values for `InstrumentKeyStats.field_source` entries. Mirror
 # in frontend/src/api/types.ts — consumers rely on this being exhaustive.
 # Per settled decision (eToro = market data, SEC = official filings),
-# yfinance has no role; #498/#499 retired it.
-#
-# ``sec_dividend_summary`` distinguishes values sourced from
-# ``instrument_dividend_summary.ttm_yield_pct`` (#426) from values
-# computed against XBRL concepts directly — the dividend summary is
-# *not* a raw XBRL field and conflating the two would mislead any
-# audit trail that filters on provenance.
+# yfinance has no role; #498/#499 retired it. Every published key stat is an
+# ``instrument_valuation`` column (#3942, #3943).
 KeyStatsFieldSource = Literal[
     "sec_xbrl",
-    "sec_dividend_summary",
     "unavailable",
 ]
 
@@ -2828,7 +2822,9 @@ class DividendSummaryModel(BaseModel):
     has_dividend: bool
     ttm_dps: Decimal | None
     ttm_dividends_paid: Decimal | None
-    ttm_yield_pct: Decimal | None
+    # #3943: ``instrument_valuation.dividend_yield`` (a percent), the one yield the
+    # summary, rankings and thesis read — not the per-share ``ttm_yield_pct``.
+    dividend_yield: Decimal | None
     latest_dps: Decimal | None
     latest_dividend_at: date | None
     dividend_streak_q: int
@@ -2915,7 +2911,9 @@ def get_instrument_dividends(
             has_dividend=summary.has_dividend,
             ttm_dps=summary.ttm_dps,
             ttm_dividends_paid=summary.ttm_dividends_paid,
-            ttm_yield_pct=summary.ttm_yield_pct,
+            # A failed view read logs a WARNING with the traceback inside the helper and
+            # renders "—", the same contract as the summary's key stats (#3942).
+            dividend_yield=_fetch_valuation_ratios(conn, instrument_id).get("dividend_yield"),
             latest_dps=summary.latest_dps,
             latest_dividend_at=summary.latest_dividend_at,
             dividend_streak_q=summary.dividend_streak_q,
@@ -3953,15 +3951,18 @@ def _fetch_valuation_ratios(
 
     #3942: the view is the one source of truth the thesis and the rankings read, so the
     summary publishes its P/E, P/B, ROE, ROA and D/E rather than deriving its own (the
-    per-share P/B sql/509 retired, a single period's net income as ROE). The view applies
-    the PIT-cap, staleness, currency and FPI/dual-class refusals; a refused or
-    underivable ratio is NULL here too. No row yields an empty dict.
+    per-share P/B sql/509 retired, a single period's net income as ROE). #3943 adds the
+    dividend yield: TTM cash dividends paid over the PIT cap, already a percent (sql/507,
+    sql/508), in place of the per-share ``ttm_yield_pct``. The view applies the PIT-cap,
+    staleness, currency and FPI/dual-class refusals; a refused or underivable ratio is
+    NULL here too. No row yields an empty dict.
     """
     try:
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
                 """
-                SELECT pe_ratio, pb_ratio, roe, roa, debt_equity_ratio AS debt_to_equity
+                SELECT pe_ratio, pb_ratio, roe, roa, debt_equity_ratio AS debt_to_equity,
+                       dividend_yield
                 FROM instrument_valuation
                 WHERE instrument_id = %(iid)s
                 """,
@@ -3983,38 +3984,33 @@ def _fetch_valuation_ratios(
 
 def _build_local_stats(
     valuation: Mapping[str, Decimal | None],
-    dividend_yield: Decimal | None,
 ) -> InstrumentKeyStats | None:
     """Build an :class:`InstrumentKeyStats` from SEC XBRL-derived data only.
 
     Per the settled provider strategy (#498/#499), yfinance is no
-    longer consulted:
-
-      - pe_ratio, pb_ratio, roe, roa, debt_to_equity = the
-        ``instrument_valuation`` columns (#3942), from
-        :func:`_fetch_valuation_ratios`
-      - dividend_yield  = passed in from
-        ``instrument_dividend_summary.ttm_yield_pct`` (#426)
+    longer consulted: pe_ratio, pb_ratio, dividend_yield, roe, roa and
+    debt_to_equity are the ``instrument_valuation`` columns (#3942,
+    #3943), from :func:`_fetch_valuation_ratios`.
 
     Fields the local SEC pipeline doesn't yet produce (payout ratio,
     revenue / earnings growth YoY) return ``None`` with
     ``field_source = "unavailable"`` until those derivations land.
     """
-    if not any(v is not None for v in valuation.values()) and dividend_yield is None:
+    if not any(v is not None for v in valuation.values()):
         return None
 
     field_source: dict[str, KeyStatsFieldSource] = {}
 
-    def _pick(field: str, local_value: Decimal | None, *, source: KeyStatsFieldSource = "sec_xbrl") -> Decimal | None:
+    def _pick(field: str, local_value: Decimal | None) -> Decimal | None:
         if local_value is not None:
-            field_source[field] = source
+            field_source[field] = "sec_xbrl"
             return local_value
         field_source[field] = "unavailable"
         return None
 
     pe_final = _pick("pe_ratio", valuation.get("pe_ratio"))
     pb_final = _pick("pb_ratio", valuation.get("pb_ratio"))
-    div_final = _pick("dividend_yield", dividend_yield, source="sec_dividend_summary")
+    div_final = _pick("dividend_yield", valuation.get("dividend_yield"))
     payout_final = _pick("payout_ratio", None)
     roe_final = _pick("roe", valuation.get("roe"))
     roa_final = _pick("roa", valuation.get("roa"))
@@ -4050,8 +4046,8 @@ def get_instrument_summary(
     - Identity: local ``instruments`` row.
     - Price: ``quotes`` table (eToro WS / market data refresh).
     - Market cap: SEC XBRL share count × ``quotes.last``.
-    - Key stats: ``instrument_valuation`` ratios (#3942) +
-      ``instrument_dividend_summary``.
+    - Key stats: ``instrument_valuation`` ratios, the dividend yield
+      included (#3942, #3943).
 
     Fields with no canonical eToro / SEC source today (52-week range,
     day change, payout ratio, growth YoY) return ``None`` rather
@@ -4237,12 +4233,10 @@ def get_instrument_summary(
     #     when only one class of a multi-class issuer is in our universe)
     # Returns None for instruments without SEC coverage; market cap then stays null
     # on the identity rather than reaching for a non-canonical source.
-    cap_basis: str = "not_multiclass"
     try:
         from app.services.xbrl_derived_stats import compute_market_cap, resolve_market_cap_basis
 
         cap_resolution = resolve_market_cap_basis(conn, instrument_id=instrument_id_int)
-        cap_basis = cap_resolution.basis
         if cap_resolution.basis == "total_company" and cap_resolution.total is not None:
             computed_cap_value: Decimal | None = cap_resolution.total.value
         elif cap_resolution.basis == "fpi_adr_ratio":
@@ -4273,47 +4267,12 @@ def get_instrument_summary(
     if identity_update:
         identity = identity.model_copy(update=identity_update)
 
-    # Dividend yield: SEC dividend summary (#426). Empty when the
-    # instrument has never paid a dividend; key stats path falls
-    # through cleanly.
-    dividend_yield: Decimal | None = None
-    try:
-        from app.services.dividends import get_dividend_summary
-
-        div_summary = get_dividend_summary(conn, instrument_id=instrument_id_int)
-        dividend_yield = div_summary.ttm_yield_pct
-    except Exception:
-        logger.warning("get_dividend_summary failed", exc_info=True)
-
-    # #1939: FPI ADR/ADS — the dividend yield (per-ordinary-share DPS ÷
-    # per-ADS price) is wrong by the un-ingested ADS ratio. Refused before the
-    # block and its source label are built, so neither credits it. P/E and P/B
-    # come from instrument_valuation (#3942), which already refuses them there.
-    if cap_basis == "fpi_adr_unavailable":
-        dividend_yield = None
-
-    has_local_values = any(v is not None for v in valuation_ratios.values())
-    # Build the stats block when ANY input is available — SEC
-    # fundamentals, dividend yield, or both. Without this gate, an
-    # instrument with a dividend yield but no SEC fundamentals row
-    # would silently drop the yield (Codex round 2 finding on PR for
-    # #498/#499).
-    if (use_local_sec and has_local_values) or dividend_yield is not None:
-        stats_block = _build_local_stats(valuation_ratios, dividend_yield=dividend_yield)
-        # Block-level source label reflects which inputs actually
-        # contributed: combined when both SEC fundamentals and the
-        # dividend summary are populated, individual when only one
-        # provided values. Avoids mislabelling a dividend-only block
-        # as ``sec_xbrl`` (Codex review on PR for #499).
-        if use_local_sec and has_local_values and dividend_yield is not None:
-            key_stats_source = "sec_xbrl+sec_dividend_summary"
-        elif use_local_sec and has_local_values:
-            key_stats_source = "sec_xbrl"
-        else:
-            key_stats_source = "sec_dividend_summary"
-    else:
-        stats_block = None
-        key_stats_source = "unavailable"
+    # Every key stat, the dividend yield included (#3943), is an
+    # instrument_valuation column, which refuses an FPI ADR/ADS cap (#1939) and
+    # so every ratio priced on it. The SEC-CIK gate is the ``use_local_sec`` read
+    # above: without a CIK, ``valuation_ratios`` stays ``{}`` and the block is None.
+    stats_block = _build_local_stats(valuation_ratios)
+    key_stats_source = "sec_xbrl" if stats_block is not None else "unavailable"
 
     source = {
         "identity": "local_db",

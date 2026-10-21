@@ -126,7 +126,7 @@ export function DividendsSummaryBlock({ summary }: { summary: DividendSummary })
         <Term term="TTM" /> yield
       </dt>
       <dd className="font-semibold text-emerald-700">
-        {formatYieldPct(summary.ttm_yield_pct)}
+        {formatYieldPct(summary.dividend_yield)}
       </dd>
       <dt className="text-slate-500">
         <Term term="TTM" /> <Term term="DPS" />

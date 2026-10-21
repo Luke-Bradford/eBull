@@ -319,9 +319,9 @@ def test_local_company_name_authoritative(client: TestClient) -> None:
 
 
 def test_sec_path_populates_key_stats() -> None:
-    """#3942: the ratios are the ``instrument_valuation`` columns passed
-    through unchanged, never re-derived from price / snapshot / a single
-    period."""
+    """#3942/#3943: the ratios and the dividend yield are the
+    ``instrument_valuation`` columns passed through unchanged, never
+    re-derived from price / snapshot / a single period / per-share DPS."""
     from app.api.instruments import _build_local_stats
 
     valuation = {
@@ -330,22 +330,19 @@ def test_sec_path_populates_key_stats() -> None:
         "roe": Decimal("0.3469"),
         "roa": Decimal("0.0712"),
         "debt_to_equity": Decimal("1.5"),
+        "dividend_yield": Decimal("0.5"),
     }
-    stats = _build_local_stats(valuation, dividend_yield=Decimal("0.5"))
+    stats = _build_local_stats(valuation)
     assert stats is not None
     assert stats.pe_ratio == Decimal("30")
     assert stats.pb_ratio == Decimal("26.25")
     assert stats.roe == Decimal("0.3469")
     assert stats.roa == Decimal("0.0712")
     assert stats.debt_to_equity == Decimal("1.5")
-    # Dividend yield from #426 dividend summary, not yfinance.
     assert stats.dividend_yield == Decimal("0.5")
     assert stats.field_source is not None
     assert stats.field_source["pe_ratio"] == "sec_xbrl"
-    # Dividend yield carries its own provenance — sourced from
-    # instrument_dividend_summary, NOT raw XBRL. Prevention assert
-    # for the mislabel Codex caught on the first PR round.
-    assert stats.field_source["dividend_yield"] == "sec_dividend_summary"
+    assert stats.field_source["dividend_yield"] == "sec_xbrl"
     # Fields the SEC pipeline doesn't yet derive — surfaced as
     # unavailable, never silently filled from elsewhere.
     assert stats.payout_ratio is None
@@ -355,7 +352,7 @@ def test_sec_path_populates_key_stats() -> None:
 
 
 def test_refused_view_ratio_stays_null() -> None:
-    """#3942: a ratio the view refuses (NULL: a refused PIT cap, stale
+    """#3942/#3943: a ratio the view refuses (NULL: a refused PIT cap, stale
     equity, no complete TTM) is ``unavailable`` here too — the summary
     does not fill it from another formula."""
     from app.api.instruments import _build_local_stats
@@ -366,23 +363,23 @@ def test_refused_view_ratio_stays_null() -> None:
         "roe": None,
         "roa": None,
         "debt_to_equity": Decimal("0.4"),
+        "dividend_yield": None,
     }
-    stats = _build_local_stats(valuation, dividend_yield=None)
+    stats = _build_local_stats(valuation)
     assert stats is not None
     assert stats.field_source is not None
-    for field in ("pe_ratio", "pb_ratio", "roe", "roa"):
+    for field in ("pe_ratio", "pb_ratio", "roe", "roa", "dividend_yield"):
         assert getattr(stats, field) is None
         assert stats.field_source[field] == "unavailable"
     assert stats.debt_to_equity == Decimal("0.4")
 
 
 def test_empty_input_returns_none() -> None:
-    """No view ratios and no dividend yield → no stats block rather
-    than an all-null shell."""
+    """No view ratios → no stats block rather than an all-null shell."""
     from app.api.instruments import _build_local_stats
 
-    assert _build_local_stats({}, dividend_yield=None) is None
-    assert _build_local_stats({"pe_ratio": None, "roe": None}, dividend_yield=None) is None
+    assert _build_local_stats({}) is None
+    assert _build_local_stats({"pe_ratio": None, "roe": None, "dividend_yield": None}) is None
 
 
 def test_id_override_pinned_lookup(client: TestClient) -> None:
@@ -437,10 +434,11 @@ def test_id_override_symbol_mismatch_returns_404(client: TestClient) -> None:
     assert resp.status_code == 404
 
 
-def test_dividend_only_partial_stats_surface(client: TestClient) -> None:
-    """An instrument with a dividend yield but no SEC fundamentals
-    row should still surface the yield in key_stats — without this,
-    the dividend summary fetch is wasted (Codex round 2 finding)."""
+def test_per_share_summary_yield_is_never_published(client: TestClient) -> None:
+    """#3943: the summary's dividend yield is ``instrument_valuation``'s. A
+    per-share ``ttm_yield_pct`` on the dividend summary (FMBH 196.6% against
+    the view's 1.85% on 2026-10-21) is not a fallback when the view has no row
+    or refuses it (an FPI ADR/ADS cap, #1939, among the refusals)."""
     row = {
         "instrument_id": 1234,
         "symbol": "DIV",
@@ -462,12 +460,6 @@ def test_dividend_only_partial_stats_surface(client: TestClient) -> None:
     conn = _make_conn(row=row)
     _install_conn(conn)
 
-    # _has_sec_cik returns False for this instrument so the SEC
-    # fundamentals path short-circuits. The dividend summary fetch
-    # uses its own conn cursor — patch the service-level helper to
-    # return a yield without going through DB.
-    from unittest.mock import patch
-
     from app.services.dividends import DividendSummary
 
     div_summary = DividendSummary(
@@ -480,7 +472,11 @@ def test_dividend_only_partial_stats_surface(client: TestClient) -> None:
         dividend_streak_q=4,
         dividend_currency="USD",
     )
-    with patch("app.services.dividends.get_dividend_summary", return_value=div_summary):
+    with (
+        patch("app.services.dividends.get_dividend_summary", return_value=div_summary),
+        patch("app.api.instruments._has_sec_cik", return_value=True),
+        patch("app.api.instruments._fetch_valuation_ratios", return_value={"dividend_yield": None}),
+    ):
         try:
             resp = client.get("/instruments/DIV/summary")
         finally:
@@ -488,23 +484,19 @@ def test_dividend_only_partial_stats_surface(client: TestClient) -> None:
 
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert body["key_stats"] is not None
-    assert body["key_stats"]["dividend_yield"] == "3.50"
-    # Block-level source tag must NOT mislabel a dividend-only block
-    # as ``sec_xbrl`` — the dividend summary is its own provenance
-    # (Codex review on PR for #499).
-    assert body["source"]["key_stats"] == "sec_dividend_summary"
-    assert body["key_stats"]["field_source"]["dividend_yield"] == "sec_dividend_summary"
+    assert body["key_stats"] is None
+    assert body["source"]["key_stats"] == "unavailable"
 
 
-def test_fpi_refused_yield_leaves_no_dividend_source(client: TestClient) -> None:
-    """#1939/#3942: an FPI ADR/ADS without a curated ratio refuses the
-    per-share yield BEFORE the block and its source label are built, so a
-    yield-only block is not published under ``sec_dividend_summary``."""
+def test_no_sec_cik_publishes_no_key_stats(client: TestClient) -> None:
+    """#3943 removed the block-level ``use_local_sec`` condition; the SEC-CIK
+    gate is now the one on the view read. An instrument without a primary CIK
+    never reads the view, so no key stats publish even if the view would
+    return ratios for it."""
     row = {
-        "instrument_id": 1235,
-        "symbol": "FADR",
-        "company_name": "Foreign Issuer Co",
+        "instrument_id": 1236,
+        "symbol": "NOCIK",
+        "company_name": "No CIK Co",
         "exchange": "NYSE",
         "exchange_name": "NYSE",
         "currency": "USD",
@@ -521,29 +513,15 @@ def test_fpi_refused_yield_leaves_no_dividend_source(client: TestClient) -> None
     }
     conn = _make_conn(row=row)
     _install_conn(conn)
-
-    from app.services.dividends import DividendSummary
-    from app.services.xbrl_derived_stats import MarketCapResolution
-
-    div_summary = DividendSummary(
-        has_dividend=True,
-        ttm_dps=None,
-        ttm_dividends_paid=None,
-        ttm_yield_pct=Decimal("3.50"),
-        latest_dps=None,
-        latest_dividend_at=None,
-        dividend_streak_q=4,
-        dividend_currency="USD",
-    )
     with (
-        patch("app.services.dividends.get_dividend_summary", return_value=div_summary),
+        patch("app.api.instruments._has_sec_cik", return_value=False),
         patch(
-            "app.services.xbrl_derived_stats.resolve_market_cap_basis",
-            return_value=MarketCapResolution(basis="fpi_adr_unavailable"),
-        ),
+            "app.api.instruments._fetch_valuation_ratios",
+            return_value={"pe_ratio": Decimal("30"), "dividend_yield": Decimal("2")},
+        ) as fetch,
     ):
         try:
-            resp = client.get("/instruments/FADR/summary")
+            resp = client.get("/instruments/NOCIK/summary")
         finally:
             _clear_conn()
 
@@ -551,6 +529,7 @@ def test_fpi_refused_yield_leaves_no_dividend_source(client: TestClient) -> None
     body = resp.json()
     assert body["key_stats"] is None
     assert body["source"]["key_stats"] == "unavailable"
+    fetch.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
