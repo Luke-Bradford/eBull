@@ -271,14 +271,16 @@ def _occurrence(
     scale: int | None = 0
     if raw["scale"] is not None:
         collapsed = _collapse(raw["scale"])
+        # Leading zeros are stripped before ``int()``, which refuses a string past Python's 4,300-digit limit.
+        digits = collapsed.lstrip("+-").lstrip("0") or "0"
         if not _SCALE_LEXICAL.fullmatch(collapsed):
             scale = None
             problems.append("scale_lexical")
-        elif abs(int(collapsed)) > SCALE_BOUND:
+        elif len(digits) > 2 or int(digits) > SCALE_BOUND:
             scale = None
             problems.append("scale_out_of_bound")
         else:
-            scale = int(collapsed)
+            scale = -int(digits) if collapsed.startswith("-") else int(digits)
     negative = False
     if raw["sign"] is not None:
         if raw["sign"] == "-":

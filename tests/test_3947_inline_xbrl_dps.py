@@ -81,7 +81,7 @@ def test_present_scale_and_sign_form_the_instance_value() -> None:
     assert _one(_fact('scale="-2"', text="39")).instance_value == Decimal("0.39")
 
 
-@pytest.mark.parametrize("raw", ["+3", " 3 ", "03"])
+@pytest.mark.parametrize("raw", ["+3", " 3 ", "03", "0" * 5000 + "3"])
 def test_scale_lexical_space_is_xs_integer_after_collapse(raw: str) -> None:
     o = _one(_fact(f'scale="{raw}"'))
     assert (o.scale, o.scale_raw, o.unresolved) == (3, raw, None)
@@ -89,7 +89,13 @@ def test_scale_lexical_space_is_xs_integer_after_collapse(raw: str) -> None:
 
 @pytest.mark.parametrize(
     ("raw", "reason"),
-    [("3.0", "scale_lexical"), ("x", "scale_lexical"), ("31", "scale_out_of_bound"), ("-31", "scale_out_of_bound")],
+    [
+        ("3.0", "scale_lexical"),
+        ("x", "scale_lexical"),
+        ("31", "scale_out_of_bound"),
+        ("-31", "scale_out_of_bound"),
+        ("9" * 5000, "scale_out_of_bound"),
+    ],
 )
 def test_scale_outside_lexical_space_or_bound_is_unresolved(raw: str, reason: str) -> None:
     o = _one(_fact(f'scale="{raw}"'))
@@ -244,3 +250,8 @@ def test_rendered_report_files_reads_html_file_names_only() -> None:
     )
     assert rendered_report_files(summary) == frozenset({"R1.htm", "R2.htm"})
     assert rendered_report_files("not xml <") == frozenset()
+
+
+def test_negative_scale_with_leading_zeros() -> None:
+    o = _one(_fact('scale="-' + "0" * 5000 + '2"', text="39"))
+    assert (o.scale, o.instance_value) == (-2, Decimal("0.39"))
