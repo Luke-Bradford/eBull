@@ -124,6 +124,7 @@ def _live(conn: psycopg.Connection[Any], *, apply: bool, parse_ab: bool) -> int:
     changed: Counter[str] = Counter()
     lost_race = 0
     parse_diffs: list[str] = []
+    parse_identical = 0
     keys = conn.execute(
         "SELECT accession_number, document_kind FROM filing_raw_documents "
         "WHERE payload IS NOT NULL AND strpos(payload, %s) > 0 ORDER BY 2, 1",
@@ -141,9 +142,11 @@ def _live(conn: psycopg.Connection[Any], *, apply: bool, parse_ab: bool) -> int:
         clean = strip_sec_edge_script(body)
         if clean == body:
             continue
-        if parse_ab and kind == "def14a_body" and _parse(body) != _parse(clean):
-            parse_diffs.append(accession)
-            continue  # a body whose parse would change is reported, never rewritten or counted
+        if parse_ab and kind == "def14a_body":
+            if _parse(body) != _parse(clean):
+                parse_diffs.append(accession)
+                continue  # a body whose parse would change is reported, never rewritten or counted
+            parse_identical += 1
         if not apply:
             changed[kind] += 1
             continue
@@ -159,7 +162,7 @@ def _live(conn: psycopg.Connection[Any], *, apply: bool, parse_ab: bool) -> int:
     for kind in sorted(candidates):
         print(f"  {kind:<22} marker rows {candidates[kind]:>6}  stripped {changed[kind]:>6}")
     if parse_ab:
-        print(f"  def14a_body parse A/B: {changed['def14a_body']} identical, {len(parse_diffs)} differ (skipped)")
+        print(f"  def14a_body parse A/B: {parse_identical} identical, {len(parse_diffs)} differ (skipped)")
         for accession in parse_diffs:
             print(f"    DIFF {accession}")
     if apply:
