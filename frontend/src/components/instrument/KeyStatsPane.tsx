@@ -2,7 +2,7 @@ import { Pane } from "@/components/instrument/Pane";
 import { Term } from "@/components/Term";
 import { EmptyState } from "@/components/states/EmptyState";
 import { lookupTerm } from "@/lib/glossary";
-import type { InstrumentSummary, KeyStatsFieldSource } from "@/api/types";
+import type { InstrumentKeyStats, InstrumentSummary, KeyStatsFieldSource } from "@/api/types";
 import { Badge, type BadgeTone } from "@/components/ui/Badge";
 
 function formatDecimal(
@@ -47,10 +47,6 @@ function FieldSourceTag({ source }: { source: KeyStatsFieldSource | undefined })
       tone = "ok";
       label = "SEC · div";
       break;
-    case "sec_xbrl_price_missing":
-      tone = "warn";
-      label = "SEC · price?";
-      break;
     case "unavailable":
       tone = "neutral";
       label = "—";
@@ -78,20 +74,9 @@ function makeRow(
   return { label, value, source };
 }
 
-function buildRows(summary: InstrumentSummary): Row[] {
-  const stats = summary.key_stats;
-  if (stats === null) return [];
+function buildRatioRows(stats: InstrumentKeyStats): Array<Row | null> {
   const fs = stats.field_source ?? {};
-  const candidates: Array<Row | null> = [
-    makeRow(formatMarketCap(summary.identity.market_cap), "Market cap", undefined),
-    // #1665: per-class FLOAT value (this share class's shares × price), a separate
-    // stat from total-company "Market cap". Labelled by the viewed symbol — the
-    // ticker IS the class. Null (row absent) for single-class issuers.
-    makeRow(
-      formatMarketCap(summary.identity.class_market_value),
-      `${summary.identity.symbol} market value`,
-      undefined,
-    ),
+  return [
     makeRow(formatDecimal(stats.pe_ratio), "P/E ratio", fs["pe_ratio"]),
     makeRow(formatDecimal(stats.pb_ratio), "P/B ratio", fs["pb_ratio"]),
     // dividend_yield is already a percent (ttm_yield_pct, sql/050) — render
@@ -104,6 +89,23 @@ function buildRows(summary: InstrumentSummary): Row[] {
     makeRow(formatDecimal(stats.revenue_growth_yoy, { percent: true }), "Revenue growth (YoY)", fs["revenue_growth_yoy"]),
     makeRow(formatDecimal(stats.earnings_growth_yoy, { percent: true }), "Earnings growth (YoY)", fs["earnings_growth_yoy"]),
   ];
+}
+
+function buildRows(summary: InstrumentSummary): Row[] {
+  const candidates: Array<Row | null> = [
+    makeRow(formatMarketCap(summary.identity.market_cap), "Market cap", undefined),
+    // #1665: per-class FLOAT value (this share class's shares × price), a separate
+    // stat from total-company "Market cap". Labelled by the viewed symbol — the
+    // ticker IS the class. Null (row absent) for single-class issuers.
+    makeRow(
+      formatMarketCap(summary.identity.class_market_value),
+      `${summary.identity.symbol} market value`,
+      undefined,
+    ),
+    // Capitalisation comes from `identity`, so it renders even when every
+    // ratio is NULL and the summary sends `key_stats: null` (#3942).
+    ...(summary.key_stats === null ? [] : buildRatioRows(summary.key_stats)),
+  ];
   return candidates.filter((r): r is Row => r !== null);
 }
 
@@ -115,7 +117,7 @@ export function KeyStatsPane({ summary }: KeyStatsPaneProps): JSX.Element {
   const rows = buildRows(summary);
   return (
     <Pane title="Key statistics">
-      {summary.key_stats === null ? (
+      {rows.length === 0 ? (
         <EmptyState
           title="No key stats"
           description="No provider returned key stats for this ticker."

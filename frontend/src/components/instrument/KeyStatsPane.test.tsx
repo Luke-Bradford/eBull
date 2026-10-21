@@ -55,9 +55,18 @@ describe("KeyStatsPane", () => {
     expect(screen.getByText("27.77%")).toBeInTheDocument();
   });
 
-  it("renders empty state when key_stats is null", () => {
-    render(<KeyStatsPane summary={fixture(null)} />);
+  it("renders empty state when key_stats is null and there is no market cap", () => {
+    const base = fixture(null);
+    const noCap = { ...base, identity: { ...base.identity, market_cap: null } } as InstrumentSummary;
+    render(<KeyStatsPane summary={noCap} />);
     expect(screen.getByText(/No key stats/i)).toBeInTheDocument();
+  });
+
+  it("keeps the market cap row when key_stats is null (#3942: every view ratio refused)", () => {
+    render(<KeyStatsPane summary={fixture(null)} />);
+    expect(screen.getByText("Market cap")).toBeInTheDocument();
+    expect(screen.getByText("1.00B")).toBeInTheDocument();
+    expect(screen.queryByText(/No key stats/i)).not.toBeInTheDocument();
   });
 
   it("renders a per-class float row labelled by symbol when class_market_value is set (#1665)", () => {

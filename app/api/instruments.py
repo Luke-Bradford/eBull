@@ -25,10 +25,10 @@ import csv
 import io
 import logging
 import re
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from datetime import UTC, date, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Any, Final, Literal, LiteralString, get_args
 
 import httpx
@@ -399,7 +399,6 @@ KeyStatsFieldSource = Literal[
     "sec_xbrl",
     "sec_dividend_summary",
     "unavailable",
-    "sec_xbrl_price_missing",
 ]
 
 
@@ -3946,91 +3945,54 @@ def _has_filings_coverage(conn: psycopg.Connection[object], instrument_id: int) 
         return cur.fetchone() is not None
 
 
-def _fetch_local_fundamentals(
+def _fetch_valuation_ratios(
     conn: psycopg.Connection[object],
     instrument_id: int,
 ) -> dict[str, Decimal | None]:
-    """Return the latest fundamentals_snapshot row as a dict of derivable
-    fields. Missing rows yield an empty dict — callers treat it as
-    'no local fundamentals'.
+    """Return the instrument's ``instrument_valuation`` ratios, keyed by key_stats field.
 
-    Pulls:
-      - eps (for PE ratio with current price)
-      - book_value (per-share, for PB ratio with current price)
-      - net_debt / cash / debt (for debt_to_equity with equity from
-        financial_periods)
-
-    Complemented by the latest financial_periods row (TTM-ish) for ROE,
-    ROA, revenue growth — data the snapshot table doesn't carry.
+    #3942: the view is the one source of truth the thesis and the rankings read, so the
+    summary publishes its P/E, P/B, ROE, ROA and D/E rather than deriving its own (the
+    per-share P/B sql/509 retired, a single period's net income as ROE). The view applies
+    the PIT-cap, staleness, currency and FPI/dual-class refusals; a refused or
+    underivable ratio is NULL here too. No row yields an empty dict.
     """
-    out: dict[str, Decimal | None] = {}
     try:
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
             cur.execute(
                 """
-                SELECT eps, book_value, shares_outstanding, cash, debt, net_debt, revenue_ttm
-                FROM fundamentals_snapshot
+                SELECT pe_ratio, pb_ratio, roe, roa, debt_equity_ratio AS debt_to_equity
+                FROM instrument_valuation
                 WHERE instrument_id = %(iid)s
-                ORDER BY as_of_date DESC
-                LIMIT 1
                 """,
                 {"iid": instrument_id},
             )
-            snap = cur.fetchone()
-            cur.execute(
-                """
-                SELECT net_income, shareholders_equity, total_assets, total_liabilities, revenue
-                FROM financial_periods
-                WHERE instrument_id = %(iid)s
-                  AND superseded_at IS NULL
-                  AND period_type IN ('Q1', 'Q2', 'Q3', 'Q4', 'FY')
-                ORDER BY period_end_date DESC
-                LIMIT 1
-                """,
-                {"iid": instrument_id},
-            )
-            fp = cur.fetchone()
+            row = cur.fetchone()
     except psycopg.Error:
         # DB errors masquerading as "no local data" would be invisible
         # in the source map. Log the failure loudly; caller treats the
         # empty dict as "stats unavailable".
         logger.warning(
-            "_fetch_local_fundamentals: DB query failed for instrument_id=%d",
+            "_fetch_valuation_ratios: DB query failed for instrument_id=%d",
             instrument_id,
             exc_info=True,
         )
         return {}
-    if snap is not None:
-        out["eps"] = snap.get("eps")  # type: ignore[union-attr]
-        out["book_value"] = snap.get("book_value")  # type: ignore[union-attr]
-        out["shares_outstanding"] = snap.get("shares_outstanding")  # type: ignore[union-attr]
-        out["net_debt"] = snap.get("net_debt")  # type: ignore[union-attr]
-        out["debt"] = snap.get("debt")  # type: ignore[union-attr]
-    if fp is not None:
-        out["net_income"] = fp.get("net_income")  # type: ignore[union-attr]
-        out["shareholders_equity"] = fp.get("shareholders_equity")  # type: ignore[union-attr]
-        out["total_assets"] = fp.get("total_assets")  # type: ignore[union-attr]
-        out["total_liabilities"] = fp.get("total_liabilities")  # type: ignore[union-attr]
-        out["revenue"] = fp.get("revenue")  # type: ignore[union-attr]
-    return out
+    return dict(row) if row is not None else {}  # type: ignore[arg-type]
 
 
 def _build_local_stats(
-    local: dict[str, Decimal | None],
-    current_price: Decimal | None,
+    valuation: Mapping[str, Decimal | None],
     dividend_yield: Decimal | None,
 ) -> InstrumentKeyStats | None:
     """Build an :class:`InstrumentKeyStats` from SEC XBRL-derived data only.
 
     Per the settled provider strategy (#498/#499), yfinance is no
-    longer consulted; key stats are computed exclusively from local
-    SEC data:
+    longer consulted:
 
-      - pe_ratio        = current_price / eps
-      - pb_ratio        = current_price / book_value
-      - debt_to_equity  = debt / shareholders_equity
-      - roe             = net_income / shareholders_equity
-      - roa             = net_income / total_assets
+      - pe_ratio, pb_ratio, roe, roa, debt_to_equity = the
+        ``instrument_valuation`` columns (#3942), from
+        :func:`_fetch_valuation_ratios`
       - dividend_yield  = passed in from
         ``instrument_dividend_summary.ttm_yield_pct`` (#426)
 
@@ -4038,7 +4000,7 @@ def _build_local_stats(
     revenue / earnings growth YoY) return ``None`` with
     ``field_source = "unavailable"`` until those derivations land.
     """
-    if not local and current_price is None and dividend_yield is None:
+    if not any(v is not None for v in valuation.values()) and dividend_yield is None:
         return None
 
     field_source: dict[str, KeyStatsFieldSource] = {}
@@ -4050,45 +4012,15 @@ def _build_local_stats(
         field_source[field] = "unavailable"
         return None
 
-    def _safe_div(num: Decimal | None, denom: Decimal | None) -> Decimal | None:
-        if num is None or denom is None or denom == 0:
-            return None
-        try:
-            return num / denom
-        except ArithmeticError, InvalidOperation:
-            return None
-
-    local_pe = _safe_div(current_price, local.get("eps"))
-    local_pb = _safe_div(current_price, local.get("book_value"))
-    local_de = _safe_div(local.get("debt"), local.get("shareholders_equity"))
-    local_roe = _safe_div(local.get("net_income"), local.get("shareholders_equity"))
-    local_roa = _safe_div(local.get("net_income"), local.get("total_assets"))
-
-    # When local EPS / book_value are present but current_price is not,
-    # pe/pb remain unresolvable — but that's "waiting on price", not
-    # "no local data". Surface that distinction so the UI can render a
-    # "price missing" hint rather than an ambiguous em-dash.
-    price_blocked_pe = local_pe is None and current_price is None and local.get("eps") is not None
-    price_blocked_pb = local_pb is None and current_price is None and local.get("book_value") is not None
-
-    pe_final = _pick("pe_ratio", local_pe)
-    pb_final = _pick("pb_ratio", local_pb)
+    pe_final = _pick("pe_ratio", valuation.get("pe_ratio"))
+    pb_final = _pick("pb_ratio", valuation.get("pb_ratio"))
     div_final = _pick("dividend_yield", dividend_yield, source="sec_dividend_summary")
     payout_final = _pick("payout_ratio", None)
-    roe_final = _pick("roe", local_roe)
-    roa_final = _pick("roa", local_roa)
-    de_final = _pick("debt_to_equity", local_de)
+    roe_final = _pick("roe", valuation.get("roe"))
+    roa_final = _pick("roa", valuation.get("roa"))
+    de_final = _pick("debt_to_equity", valuation.get("debt_to_equity"))
     rev_growth_final = _pick("revenue_growth_yoy", None)
     earn_growth_final = _pick("earnings_growth_yoy", None)
-
-    # Rewrite pe/pb source when SEC data exists but the current price
-    # is missing — distinguishes "waiting on price" from "genuinely
-    # unavailable". Must run BEFORE Pydantic copies the dict into the
-    # model field.
-    if price_blocked_pe and pe_final is None:
-        field_source["pe_ratio"] = "sec_xbrl_price_missing"
-    if price_blocked_pb and pb_final is None:
-        field_source["pb_ratio"] = "sec_xbrl_price_missing"
 
     return InstrumentKeyStats(
         pe_ratio=pe_final,
@@ -4118,7 +4050,7 @@ def get_instrument_summary(
     - Identity: local ``instruments`` row.
     - Price: ``quotes`` table (eToro WS / market data refresh).
     - Market cap: SEC XBRL share count × ``quotes.last``.
-    - Key stats: SEC XBRL via ``financial_periods_ttm`` +
+    - Key stats: ``instrument_valuation`` ratios (#3942) +
       ``instrument_dividend_summary``.
 
     Fields with no canonical eToro / SEC source today (52-week range,
@@ -4289,10 +4221,10 @@ def get_instrument_summary(
         else None
     )
 
-    local_fundamentals: dict[str, Decimal | None] = {}
+    valuation_ratios: dict[str, Decimal | None] = {}
     use_local_sec = _has_sec_cik(conn, instrument_id_int)
     if use_local_sec:
-        local_fundamentals = _fetch_local_fundamentals(conn, instrument_id_int)
+        valuation_ratios = _fetch_valuation_ratios(conn, instrument_id_int)
 
     # Market cap. For a CURATED multi-class issuer (GOOG/GOOGL, …) the combined-shares
     # × this-class-price product is structurally wrong (one company → two different
@@ -4353,18 +4285,21 @@ def get_instrument_summary(
     except Exception:
         logger.warning("get_dividend_summary failed", exc_info=True)
 
-    has_local_values = any(v is not None for v in local_fundamentals.values())
+    # #1939: FPI ADR/ADS — the dividend yield (per-ordinary-share DPS ÷
+    # per-ADS price) is wrong by the un-ingested ADS ratio. Refused before the
+    # block and its source label are built, so neither credits it. P/E and P/B
+    # come from instrument_valuation (#3942), which already refuses them there.
+    if cap_basis == "fpi_adr_unavailable":
+        dividend_yield = None
+
+    has_local_values = any(v is not None for v in valuation_ratios.values())
     # Build the stats block when ANY input is available — SEC
     # fundamentals, dividend yield, or both. Without this gate, an
     # instrument with a dividend yield but no SEC fundamentals row
     # would silently drop the yield (Codex round 2 finding on PR for
     # #498/#499).
     if (use_local_sec and has_local_values) or dividend_yield is not None:
-        stats_block = _build_local_stats(
-            local_fundamentals,
-            current_price=current_price,
-            dividend_yield=dividend_yield,
-        )
+        stats_block = _build_local_stats(valuation_ratios, dividend_yield=dividend_yield)
         # Block-level source label reflects which inputs actually
         # contributed: combined when both SEC fundamentals and the
         # dividend summary are populated, individual when only one
@@ -4379,24 +4314,6 @@ def get_instrument_summary(
     else:
         stats_block = None
         key_stats_source = "unavailable"
-
-    # #1939: FPI ADR/ADS — the locally derived P/E and P/B (per-ADS price ÷
-    # per-ordinary-share EPS/book) and the dividend yield (per-ordinary-share
-    # DPS ÷ per-ADS price) are wrong by the un-ingested ADS ratio. Null them
-    # here too — this path computes its own ratios and does NOT read the
-    # (already-suppressed) instrument_valuation view (Codex ckpt-2 #1939).
-    if stats_block is not None and cap_basis == "fpi_adr_unavailable":
-        fpi_sources: dict[str, KeyStatsFieldSource] = dict(stats_block.field_source or {})
-        for f in ("pe_ratio", "pb_ratio", "dividend_yield"):
-            fpi_sources[f] = "unavailable"
-        stats_block = stats_block.model_copy(
-            update={
-                "pe_ratio": None,
-                "pb_ratio": None,
-                "dividend_yield": None,
-                "field_source": fpi_sources,
-            }
-        )
 
     source = {
         "identity": "local_db",
