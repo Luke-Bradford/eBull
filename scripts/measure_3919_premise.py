@@ -23,6 +23,7 @@ Prints:
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any, Final, LiteralString, cast
 
 import psycopg
@@ -104,6 +105,10 @@ ORDER BY 1, 2
 """
 
 
+def _is_nan(v: Any) -> bool:
+    return isinstance(v, Decimal) and v.is_nan()
+
+
 def annual_usable(r: dict[str, Any]) -> bool:
     """Spec "Construction" 1: an annual row supplies items only within 18 months and in the quarter's currency."""
     return (
@@ -165,9 +170,13 @@ def main() -> int:
     # The script's quarter row must be the view's: same dedup clause, so only a same-filed_date tie could differ.
     off = [r["instrument_id"] for r in rows if any(r[f"view_{c}"] != r[f"q_{c}"] for c in STOCK_ITEMS)]
     print(f"   view stock items != the script's latest-quarter row (must be 0): {len(off)} {off[:10]}")
-    if off:
+    # numeric NaN is no SQL NULL, so combine() would treat it as a value; JKP has no such state. Refuse it.
+    nan = [r["instrument_id"] for r in rows for x in ("q", "a") for c in STOCK_ITEMS if _is_nan(r[f"{x}_{c}"])]
+    print(f"   numeric NaN in a latest-quarter or latest-FY stock item (must be 0): {len(nan)} {nan[:10]}")
+    bad_end = sum(1 for r in rows if r["ttm_end"] != r["q_pe"])
+    if off or nan or bad_end:
         # Every later figure attributes a change to the combine; with a different quarter row it would not be.
-        print("   FAIL: the script and the view select different quarter rows; no attribution is printed")
+        print("   FAIL: a must-be-0 check above is not 0; no attribution is printed")
         return 1
 
     print("2. per item: changed = newer FY + NULL-quarter fill + tie; to_null must be 0")
