@@ -104,8 +104,10 @@ def annual_usable(r: dict[str, Any]) -> bool:
 
 
 def combine(q_val: Any, q_pe: Any, a_val: Any, a_pe: Any) -> Any:
-    """accounting_chars.sas:1235: ``if missing(ann) or (not missing(qtr) and datadate_q > datadate) then ann = qtr``."""
-    if a_val is None or (q_val is not None and a_pe is not None and q_pe > a_pe):
+    """accounting_chars.sas:1235: ``if missing(ann) or (not missing(qtr) and datadate_q > datadate) then ann = qtr``.
+
+    Called only for a usable annual row, so ``a_pe`` is set; ``q_pe`` is set on every row (inner join on ``q``)."""
+    if a_val is None or (q_val is not None and q_pe > a_pe):
         return q_val
     return a_val
 
@@ -117,6 +119,10 @@ def combined(r: dict[str, Any], c: str) -> Any:
 
 
 def cause(r: dict[str, Any]) -> str:
+    # Only a usable annual row can change a value (``combined`` returns the quarter's otherwise), so a changed row
+    # without one means the script and the view disagree on the quarter row: fail rather than misattribute.
+    if r["a_pe"] is None:
+        raise RuntimeError(f"instrument {r['instrument_id']} changed with no annual row")
     return "newer_fy" if r["a_pe"] > r["q_pe"] else "tie" if r["a_pe"] == r["q_pe"] else "fill"
 
 
@@ -125,6 +131,7 @@ def main() -> int:
         cur = conn.execute(cast(LiteralString, _PAIRS_SQL))
         names = [d.name for d in cur.description or []]
         rows = [dict(zip(names, r, strict=True)) for r in cur.fetchall()]
+        ties = conn.execute(_QUARTER_TIES_SQL).fetchall()
         conn.rollback()
 
     print(f"1. financial_periods_ttm rows: {len(rows)}")
@@ -143,6 +150,9 @@ def main() -> int:
         f"{sum(1 for r in rows if r['a_pe'] and (r['a_cur'] != r['q_cur'] or r['a_cur'] is None))}"
     )
     print(f"   view quarter end != latest quarter end (must be 0): {sum(1 for r in rows if r['ttm_end'] != r['q_pe'])}")
+    # The script's quarter row must be the view's: same dedup clause, so only a same-filed_date tie could differ.
+    off = [r["instrument_id"] for r in rows if any(r[f"view_{c}"] != r[f"q_{c}"] for c in STOCK_ITEMS)]
+    print(f"   view stock items != the script's latest-quarter row (must be 0): {len(off)} {off[:10]}")
 
     print("2. per item: changed = newer FY + NULL-quarter fill + tie; to_null must be 0")
     changed: dict[int, dict[str, Any]] = {}
@@ -171,9 +181,6 @@ def main() -> int:
                 f"   {r['symbol']} {r['q_pe']} quarter={r['q_shareholders_equity']} annual={r['a_shareholders_equity']}"
                 f" annual_usable={annual_usable(r)} combined={combined(r, 'shareholders_equity')}"
             )
-    with psycopg.connect(settings.database_url) as conn:
-        ties = conn.execute(_QUARTER_TIES_SQL).fetchall()
-        conn.rollback()
     print(f"   quarter (instrument, period end, filed_date) groups with more than one row: {len(ties)}")
     for t in ties:
         print(f"     instrument {t[0]} {t[1]} filed {t[2]}: {t[3]} rows, latest quarter of its instrument: {t[4]}")
