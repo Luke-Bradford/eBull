@@ -140,20 +140,24 @@ def test_cross_lane_parallelism_fast_lane_drains_before_slow_lane(
     ebull_test_conn: psycopg.Connection[tuple],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Two lanes: slow lane has one stage that sleeps 2.0s; fast lane
+    """Two lanes: slow lane has one stage that sleeps 5.0s; fast lane
     has five stages that sleep 0.10s each. Production lane caps stay
     at 1 — the parallelism win is **cross-lane**, not intra-lane.
 
     Pre-PR-2: the dispatcher's ``wait([all_futures])`` blocks until
     EVERY future in the ready batch (slow + first-fast) completes;
     the next fast-lane sibling only gets submitted after that join
-    returns. Five 100 ms fast-lane stages serialised behind a 2 s
-    slow-lane batch-mate take ~2.4 s to drain.
+    returns. Five 100 ms fast-lane stages serialised behind a 5 s
+    slow-lane batch-mate take ~5.4 s to drain.
 
     Post-PR-2: each fast-lane completion is picked up by the poll
     loop and immediately submits the next fast-lane stage. Five fast
-    stages drain in ~0.5 s wall-clock — well before the 2.0 s slow
-    stage finishes.
+    stages drain in ~0.5 s wall-clock — well before the 5.0 s slow
+    stage finishes. The slow stage was 2.0 s until #3923's pre-push
+    run: on a host at load average 18 the fast lane's per-stage
+    bookkeeping took over 2 s twice. Batch-join semantics still fail
+    the check at any slow duration, since fast_1..4 then start after
+    the slow stage ends.
 
     Assertion: all five fast-lane stages have ``ended_at`` BEFORE the
     slow lane's ``ended_at``. This single check separates batch-join
@@ -180,7 +184,7 @@ def test_cross_lane_parallelism_fast_lane_drains_before_slow_lane(
             stage_key="slow_0",
             job_name="synth_job_slow_0",
             lane="init",
-            invoker=_sleep_invoker("slow_0", 2.0, calls),
+            invoker=_sleep_invoker("slow_0", 5.0, calls),
             requires=CapRequirement(),
         ),
         *[
