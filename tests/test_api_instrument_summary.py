@@ -5,7 +5,7 @@ After #498/#499 retired yfinance, the endpoint sources:
 - Identity from the local ``instruments`` row.
 - Price from the local ``quotes`` table.
 - Market cap from SEC XBRL × ``quotes`` (via ``compute_market_cap``).
-- Key stats from SEC ``financial_periods_ttm`` + dividend summary.
+- Key stats from ``instrument_valuation`` (#3942) + dividend summary.
 
 Tests stub the DB with the row shape the endpoint expects and verify
 the response carries the right values from the right source.
@@ -319,39 +319,25 @@ def test_local_company_name_authoritative(client: TestClient) -> None:
 
 
 def test_sec_path_populates_key_stats() -> None:
-    """When ``_has_sec_cik`` is True and ``_fetch_local_fundamentals``
-    returns SEC values, ``_build_local_stats`` constructs the key
-    stats block from SEC data only."""
+    """#3942: the ratios are the ``instrument_valuation`` columns passed
+    through unchanged, never re-derived from price / snapshot / a single
+    period."""
     from app.api.instruments import _build_local_stats
 
-    local = {
-        "eps": Decimal("6.00"),
-        "book_value": Decimal("4.00"),
-        "shares_outstanding": Decimal("15000000000"),
-        "net_debt": None,
-        "debt": Decimal("100000000000"),
-        "net_income": Decimal("100000000000"),
-        "shareholders_equity": Decimal("60000000000"),
-        "total_assets": Decimal("350000000000"),
-        "total_liabilities": None,
-        "revenue": Decimal("400000000000"),
+    valuation = {
+        "pe_ratio": Decimal("30"),
+        "pb_ratio": Decimal("26.25"),
+        "roe": Decimal("0.3469"),
+        "roa": Decimal("0.0712"),
+        "debt_to_equity": Decimal("1.5"),
     }
-    stats = _build_local_stats(
-        local,
-        current_price=Decimal("180.00"),
-        dividend_yield=Decimal("0.5"),
-    )
+    stats = _build_local_stats(valuation, dividend_yield=Decimal("0.5"))
     assert stats is not None
-    # pe = 180 / 6 = 30
     assert stats.pe_ratio == Decimal("30")
-    # pb = 180 / 4 = 45
-    assert stats.pb_ratio == Decimal("45")
-    # debt/equity = 100B / 60B
-    assert stats.debt_to_equity is not None
-    # roe = 100B / 60B
-    assert stats.roe is not None
-    # roa = 100B / 350B
-    assert stats.roa is not None
+    assert stats.pb_ratio == Decimal("26.25")
+    assert stats.roe == Decimal("0.3469")
+    assert stats.roa == Decimal("0.0712")
+    assert stats.debt_to_equity == Decimal("1.5")
     # Dividend yield from #426 dividend summary, not yfinance.
     assert stats.dividend_yield == Decimal("0.5")
     assert stats.field_source is not None
@@ -360,7 +346,6 @@ def test_sec_path_populates_key_stats() -> None:
     # instrument_dividend_summary, NOT raw XBRL. Prevention assert
     # for the mislabel Codex caught on the first PR round.
     assert stats.field_source["dividend_yield"] == "sec_dividend_summary"
-    assert stats.field_source["dividend_yield"] != "sec_xbrl"
     # Fields the SEC pipeline doesn't yet derive — surfaced as
     # unavailable, never silently filled from elsewhere.
     assert stats.payout_ratio is None
@@ -369,39 +354,35 @@ def test_sec_path_populates_key_stats() -> None:
     assert stats.earnings_growth_yoy is None
 
 
-def test_price_blocked_pe_pb_signal_when_price_missing() -> None:
-    """When SEC EPS / book value exist but price is missing, the
-    field_source for pe/pb says ``sec_xbrl_price_missing`` so the UI
-    can render an actionable hint instead of an ambiguous '—'."""
+def test_refused_view_ratio_stays_null() -> None:
+    """#3942: a ratio the view refuses (NULL: a refused PIT cap, stale
+    equity, no complete TTM) is ``unavailable`` here too — the summary
+    does not fill it from another formula."""
     from app.api.instruments import _build_local_stats
 
-    local = {
-        "eps": Decimal("6.00"),
-        "book_value": Decimal("4.00"),
-        "shares_outstanding": None,
-        "net_debt": None,
-        "debt": None,
-        "net_income": None,
-        "shareholders_equity": None,
-        "total_assets": None,
-        "total_liabilities": None,
-        "revenue": None,
+    valuation: dict[str, Decimal | None] = {
+        "pe_ratio": None,
+        "pb_ratio": None,
+        "roe": None,
+        "roa": None,
+        "debt_to_equity": Decimal("0.4"),
     }
-    stats = _build_local_stats(local, current_price=None, dividend_yield=None)
+    stats = _build_local_stats(valuation, dividend_yield=None)
     assert stats is not None
-    assert stats.pe_ratio is None
-    assert stats.pb_ratio is None
     assert stats.field_source is not None
-    assert stats.field_source["pe_ratio"] == "sec_xbrl_price_missing"
-    assert stats.field_source["pb_ratio"] == "sec_xbrl_price_missing"
+    for field in ("pe_ratio", "pb_ratio", "roe", "roa"):
+        assert getattr(stats, field) is None
+        assert stats.field_source[field] == "unavailable"
+    assert stats.debt_to_equity == Decimal("0.4")
 
 
 def test_empty_input_returns_none() -> None:
-    """No SEC data, no price, no dividend yield → no stats block
-    rather than an all-null shell."""
+    """No view ratios and no dividend yield → no stats block rather
+    than an all-null shell."""
     from app.api.instruments import _build_local_stats
 
-    assert _build_local_stats({}, current_price=None, dividend_yield=None) is None
+    assert _build_local_stats({}, dividend_yield=None) is None
+    assert _build_local_stats({"pe_ratio": None, "roe": None}, dividend_yield=None) is None
 
 
 def test_id_override_pinned_lookup(client: TestClient) -> None:
