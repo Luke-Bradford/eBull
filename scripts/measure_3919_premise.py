@@ -76,11 +76,23 @@ LEFT JOIN instrument_valuation v USING (instrument_id)
 """
 
 
+# Each group says whether it can win the view's dedup: its period end is the instrument's latest quarter end and its
+# filed_date is the greatest there (DESC NULLS LAST). Only such a group can make the selected stock row ambiguous.
 _QUARTER_TIES_SQL: Final = """
+WITH elig AS (
+    SELECT instrument_id, period_end_date, filed_date
+    FROM financial_periods
+    WHERE period_type IN ('Q1','Q2','Q3','Q4') AND superseded_at IS NULL AND normalization_status = 'normalized'
+),
+winner AS (
+    SELECT DISTINCT ON (instrument_id) instrument_id, period_end_date, filed_date
+    FROM elig
+    ORDER BY instrument_id, period_end_date DESC, filed_date DESC NULLS LAST
+)
 SELECT g.instrument_id, g.period_end_date, g.filed_date, g.n,
-       g.period_end_date = (SELECT max(period_end_date) FROM financial_periods m
-                            WHERE m.instrument_id = g.instrument_id AND m.period_type IN ('Q1','Q2','Q3','Q4')
-                              AND m.superseded_at IS NULL AND m.normalization_status = 'normalized')
+       EXISTS (SELECT 1 FROM winner w
+               WHERE w.instrument_id = g.instrument_id AND w.period_end_date = g.period_end_date
+                 AND w.filed_date IS NOT DISTINCT FROM g.filed_date) AS can_win
 FROM (
     SELECT instrument_id, period_end_date, filed_date, count(*) AS n
     FROM financial_periods
@@ -119,10 +131,10 @@ def combined(r: dict[str, Any], c: str) -> Any:
 
 
 def cause(r: dict[str, Any]) -> str:
-    # Only a usable annual row can change a value (``combined`` returns the quarter's otherwise), so a changed row
-    # without one means the script and the view disagree on the quarter row: fail rather than misattribute.
-    if r["a_pe"] is None:
-        raise RuntimeError(f"instrument {r['instrument_id']} changed with no annual row")
+    # Only a usable annual row can change a value (``combined`` returns the quarter's otherwise, and section 1 has
+    # proved that equals the view's), so a changed row without one is a script defect: fail rather than misattribute.
+    if not annual_usable(r):
+        raise RuntimeError(f"instrument {r['instrument_id']} changed with no usable annual row")
     return "newer_fy" if r["a_pe"] > r["q_pe"] else "tie" if r["a_pe"] == r["q_pe"] else "fill"
 
 
@@ -153,6 +165,10 @@ def main() -> int:
     # The script's quarter row must be the view's: same dedup clause, so only a same-filed_date tie could differ.
     off = [r["instrument_id"] for r in rows if any(r[f"view_{c}"] != r[f"q_{c}"] for c in STOCK_ITEMS)]
     print(f"   view stock items != the script's latest-quarter row (must be 0): {len(off)} {off[:10]}")
+    if off:
+        # Every later figure attributes a change to the combine; with a different quarter row it would not be.
+        print("   FAIL: the script and the view select different quarter rows; no attribution is printed")
+        return 1
 
     print("2. per item: changed = newer FY + NULL-quarter fill + tie; to_null must be 0")
     changed: dict[int, dict[str, Any]] = {}
@@ -183,7 +199,8 @@ def main() -> int:
             )
     print(f"   quarter (instrument, period end, filed_date) groups with more than one row: {len(ties)}")
     for t in ties:
-        print(f"     instrument {t[0]} {t[1]} filed {t[2]}: {t[3]} rows, latest quarter of its instrument: {t[4]}")
+        print(f"     instrument {t[0]} {t[1]} filed {t[2]}: {t[3]} rows, can win the view's dedup: {t[4]}")
+    print(f"   of them able to win the dedup (ambiguous stock row): {sum(1 for t in ties if t[4])}")
 
     print("4. named rows (view -> combine):")
     for r in rows:
