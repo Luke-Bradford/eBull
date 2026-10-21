@@ -144,14 +144,16 @@ def _live(conn: psycopg.Connection[Any], *, apply: bool, parse_ab: bool) -> int:
         if parse_ab and kind == "def14a_body" and _parse(body) != _parse(clean):
             parse_diffs.append(accession)
             continue  # a body whose parse would change is reported, never rewritten or counted
-        changed[kind] += 1
-        if apply:
-            result = conn.execute(
-                "UPDATE filing_raw_documents SET payload = %s "
-                "WHERE accession_number = %s AND document_kind = %s AND payload = %s",
-                (clean, accession, kind, body),
-            )
-            lost_race += 1 - result.rowcount
+        if not apply:
+            changed[kind] += 1
+            continue
+        result = conn.execute(
+            "UPDATE filing_raw_documents SET payload = %s "
+            "WHERE accession_number = %s AND document_kind = %s AND payload = %s",
+            (clean, accession, kind, body),
+        )
+        changed[kind] += result.rowcount  # completed writes, not attempts
+        lost_race += 1 - result.rowcount
 
     print(f"=== #3899 live payload repair ({'APPLIED' if apply else 'DRY RUN'}) ===")
     for kind in sorted(candidates):
