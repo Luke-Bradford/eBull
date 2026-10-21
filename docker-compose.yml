@@ -164,6 +164,11 @@ services:
       - full_page_writes=off
       - -c
       - synchronous_commit=off
+      - -c
+      # sql/155 ALTER SYSTEMs shared_buffers=2GB into every cluster it migrates,
+      # this one included; the suite's data is ~126 MB, so that pinned ~1.75 GB
+      # of idle VM memory. A command-line -c outranks postgresql.auto.conf.
+      - shared_buffers=256MB
     environment:
       POSTGRES_DB: postgres
       POSTGRES_USER: postgres
