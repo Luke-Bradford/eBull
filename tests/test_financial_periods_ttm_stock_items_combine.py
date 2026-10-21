@@ -214,7 +214,16 @@ def _seed_cases(conn: psycopg.Connection[Any]) -> None:
     _period(conn, PB_CROSSING, cross_fy, "FY", shareholders_equity="2e9")
     for iid in (*PB_LEGACY[:3], *PB_COMPLETE):
         seed_pit_step(conn, iid, session=c.session, close=50, shares=1e8)
-    seed_pit_step(conn, PB_CROSSING, session=_months_back(c.today, 1) - timedelta(days=5), close=50, shares=1e8)
+    # Its own build, dated at its session: the shared build's date would age this session past #3923's one-month
+    # refusal (sql/513) on some calendar dates.
+    seed_pit_step(
+        conn,
+        PB_CROSSING,
+        session=_months_back(c.today, 1) - timedelta(days=5),
+        close=50,
+        shares=1e8,
+        build_id=PB_CROSSING,
+    )
     # 14. the latest quarter end duplicated on one filed_date with differing values; an older-filed duplicate.
     _period(conn, TIE_FILED, q, "Q2", filed=q + timedelta(days=40), shareholders_equity="1", cash="11")
     _period(conn, TIE_FILED, q, "Q3", filed=q + timedelta(days=40), shareholders_equity="2", cash="22")

@@ -20,7 +20,7 @@ import psycopg
 import psycopg.rows
 import pytest
 
-from tests.fixtures.pit_market_cap import seed_pit_step
+from tests.fixtures.pit_market_cap import BUILD_ID, seed_pit_step
 
 SESSION = date(2026, 10, 16)
 Q_END = date(2026, 6, 30)
@@ -127,7 +127,10 @@ def _seed(ebull_test_conn: psycopg.Connection[Any]) -> psycopg.Connection[Any]:
             seed_pit_step(conn, iid, session=session, close=25, shares=4e7)
         else:
             refusal = "no_left_anchor" if iid == REFUSED else None
-            seed_pit_step(conn, iid, session=session, close=50, shares=1e8, refusal=refusal)
+            # The 18-month boundary rows sit a year before SESSION: their own build, dated at their session, keeps
+            # #3923's age refusal (sql/513) out of this test.
+            build_id = BUILD_ID if session == SESSION else iid
+            seed_pit_step(conn, iid, session=session, close=50, shares=1e8, refusal=refusal, build_id=build_id)
     # The latest quarter's equity is NULL; an older quarter's is positive. No fallback.
     _quarter(conn, LATEST_NULL, date(2026, 3, 31), "Q1", "1e9", "1e7")
     _quarter(conn, LATEST_NULL, Q_END, "Q2", None, "1e7")

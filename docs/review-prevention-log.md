@@ -13594,3 +13594,17 @@ neighbouring container and match it.**
   error, add one DB-tier test that runs the real query on a seeded row and asserts the exact key set and one value.
   A mocked-connection test cannot see SQL.
 - Enforced in: `tests/test_summary_valuation_ratios_db.py`.
+
+### A view arm that reads an inlined lateral's expression can push a single-row read over `jit_above_cost` (#3923, 2026-10-21)
+
+- Symptom: sql/513's first draft compared `ses.session` in the `fr` lateral of `instrument_valuation`. Postgres
+  inlines `ses`, so its CASE (with a correlated subplan) was copied into every count-based column that reads
+  `market_cap_live`. The single-instrument plan's estimated cost rose from 34.8k to 114k, past `jit_above_cost`
+  (100k). Each per-instrument read then paid about 220 ms of JIT compilation, 13 ms → 233 ms, with an unchanged plan
+  shape. `EXPLAIN ANALYZE` charged the time to the first leaf node, which made it look like I/O.
+- Prevention: when a view change adds a reference to a lateral's computed column, compare the estimated cost of a
+  single-row read before and after (`EXPLAIN SELECT … WHERE instrument_id = …`), not only its timing. A jump past
+  `jit_above_cost` is the tell. Where the arm already guarantees an equal plain column (here `pit.price_date`, which
+  is matched on the session), read that column instead. A latency A/B against control is the gate.
+- Enforced in: `sql/513_instrument_valuation_session_stale.sql` (the `fr` comment), `scripts/ab_3923_session_stale.py`
+  item 4 (treatment within 2x control on 50 single reads, with the plan printed).
