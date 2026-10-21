@@ -47,7 +47,9 @@ def main() -> int:
         )
         print(f"{REASON_CLASS_COLUMN}: {len(hits)} (instrument, accession) pairs")
         for iid, symbol, accession, witness_title in hits:
-            rows = [locs for _, locs in load_row_locations(conn, accession, [iid], _no_fetch).by_instrument[iid]]
+            rows = [
+                locs for _, locs in load_row_locations(conn, accession, [iid], _no_fetch).by_instrument.get(iid, [])
+            ]
             letters = Counter(row_label(locs) for locs in rows)
             captions = sorted({" / ".join(loc.captions) for locs in rows for loc in locs if location_label(loc)})
             print(f"  {symbol:10} {accession}  witness: {witness_title}")
