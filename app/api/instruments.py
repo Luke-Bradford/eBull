@@ -4285,6 +4285,13 @@ def get_instrument_summary(
     except Exception:
         logger.warning("get_dividend_summary failed", exc_info=True)
 
+    # #1939: FPI ADR/ADS — the dividend yield (per-ordinary-share DPS ÷
+    # per-ADS price) is wrong by the un-ingested ADS ratio. Refused before the
+    # block and its source label are built, so neither credits it. P/E and P/B
+    # come from instrument_valuation (#3942), which already refuses them there.
+    if cap_basis == "fpi_adr_unavailable":
+        dividend_yield = None
+
     has_local_values = any(v is not None for v in valuation_ratios.values())
     # Build the stats block when ANY input is available — SEC
     # fundamentals, dividend yield, or both. Without this gate, an
@@ -4307,14 +4314,6 @@ def get_instrument_summary(
     else:
         stats_block = None
         key_stats_source = "unavailable"
-
-    # #1939: FPI ADR/ADS — the dividend yield (per-ordinary-share DPS ÷
-    # per-ADS price) is wrong by the un-ingested ADS ratio. P/E and P/B come
-    # from instrument_valuation (#3942), which already refuses them there.
-    if stats_block is not None and cap_basis == "fpi_adr_unavailable":
-        fpi_sources: dict[str, KeyStatsFieldSource] = dict(stats_block.field_source or {})
-        fpi_sources["dividend_yield"] = "unavailable"
-        stats_block = stats_block.model_copy(update={"dividend_yield": None, "field_source": fpi_sources})
 
     source = {
         "identity": "local_db",

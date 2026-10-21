@@ -13583,3 +13583,14 @@ neighbouring container and match it.**
 - Enforced in: `tests/test_financial_periods_ttm_dividend_window_guard.py`,
   `tests/test_instrument_valuation_dividend_yield_total_form.py` and `tests/test_instrument_valuation_pb_total_form.py`
   (`ROLLBACK_512` before each older body); `tests/test_financial_periods_ttm_stock_items_combine.py::test_13_*`.
+
+### A handler whose new query sits behind a swallowed `psycopg.Error` needs a test that executes it (#3942, 2026-10-21)
+
+- Symptom: #3942 pointed `/summary.key_stats` at `instrument_valuation` through `_fetch_valuation_ratios`, which
+  logs a `psycopg.Error` and returns `{}`. The summary tests mock the connection, so a column or alias typo
+  (`debt_equity_ratio AS debt_to_equity`) would have passed every gate and rendered on the operator page as "No key
+  stats". The review bot flagged it; the live panel run had caught nothing only because the SQL happened to be right.
+- Prevention: when a handler changes the table or view it reads, and the read falls back to empty on a database
+  error, add one DB-tier test that runs the real query on a seeded row and asserts the exact key set and one value.
+  A mocked-connection test cannot see SQL.
+- Enforced in: `tests/test_summary_valuation_ratios_db.py`.

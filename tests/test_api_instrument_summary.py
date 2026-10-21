@@ -497,6 +497,62 @@ def test_dividend_only_partial_stats_surface(client: TestClient) -> None:
     assert body["key_stats"]["field_source"]["dividend_yield"] == "sec_dividend_summary"
 
 
+def test_fpi_refused_yield_leaves_no_dividend_source(client: TestClient) -> None:
+    """#1939/#3942: an FPI ADR/ADS without a curated ratio refuses the
+    per-share yield BEFORE the block and its source label are built, so a
+    yield-only block is not published under ``sec_dividend_summary``."""
+    row = {
+        "instrument_id": 1235,
+        "symbol": "FADR",
+        "company_name": "Foreign Issuer Co",
+        "exchange": "NYSE",
+        "exchange_name": "NYSE",
+        "currency": "USD",
+        "sector": None,
+        "sector_name": None,
+        "industry": None,
+        "country": None,
+        "is_tradable": True,
+        "session_profile": "continuous",
+        "coverage_tier": 2,
+        "bid": Decimal("50"),
+        "ask": Decimal("50.10"),
+        "last": Decimal("50.05"),
+    }
+    conn = _make_conn(row=row)
+    _install_conn(conn)
+
+    from app.services.dividends import DividendSummary
+    from app.services.xbrl_derived_stats import MarketCapResolution
+
+    div_summary = DividendSummary(
+        has_dividend=True,
+        ttm_dps=None,
+        ttm_dividends_paid=None,
+        ttm_yield_pct=Decimal("3.50"),
+        latest_dps=None,
+        latest_dividend_at=None,
+        dividend_streak_q=4,
+        dividend_currency="USD",
+    )
+    with (
+        patch("app.services.dividends.get_dividend_summary", return_value=div_summary),
+        patch(
+            "app.services.xbrl_derived_stats.resolve_market_cap_basis",
+            return_value=MarketCapResolution(basis="fpi_adr_unavailable"),
+        ),
+    ):
+        try:
+            resp = client.get("/instruments/FADR/summary")
+        finally:
+            _clear_conn()
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["key_stats"] is None
+    assert body["source"]["key_stats"] == "unavailable"
+
+
 # ---------------------------------------------------------------------------
 # #819 — canonical_symbol redirect surface
 # ---------------------------------------------------------------------------

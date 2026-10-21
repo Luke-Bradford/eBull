@@ -63,9 +63,9 @@ def _cmp(old: Decimal | None, new: Decimal | None) -> str:
     if old is None and new is None:
         return "both_null"
     if old is None:
-        return "old_null"
+        return "view_only"
     if new is None:
-        return "new_null"
+        return "old_only"
     if new == 0:
         return "differ" if old != 0 else "agree"
     return "agree" if abs(old / new - 1) <= Decimal("0.01") else "differ"
@@ -102,7 +102,7 @@ def main() -> None:
     print(f"instruments with a primary SEC CIK: {len(rows)}")
     for f in fields:
         t = tally[f]
-        print(f, {k: t.get(k, 0) for k in ("agree", "differ", "old_null", "new_null", "both_null")})
+        print(f, {k: t.get(k, 0) for k in ("agree", "differ", "view_only", "old_only", "both_null")})
 
 
 if __name__ == "__main__":
