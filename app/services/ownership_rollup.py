@@ -40,7 +40,7 @@ import logging
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from types import MappingProxyType
 from typing import Any, Final, Literal
@@ -4365,14 +4365,15 @@ def _reconcile_insider_line_components(
 # The categories whose identities can join a co-filer group, and whose winning accessions the
 # caller reads co-filers for. An ``institutions`` identity joins only when none of its kept rows is
 # a 13F figure (``_COFILER_EXCLUDED_SOURCES``): a 13F row is investment discretion (Rule 13f-1), not
-# beneficial ownership, so it is not comparable with a co-filer's figure. ``etfs`` hold curated
-# family figures and never join.
+# beneficial ownership, so it is not comparable with a co-filer's figure. A 13F identity is never a
+# node; :func:`_fold_13f_duplicates` folds the one case the 13F position-scope spec defines before
+# the graph is built. ``etfs`` hold curated family figures and never join.
 _COFILER_CATEGORIES: Final[tuple[SliceCategory, ...]] = ("insiders", "blockholders", "institutions")
 # #3895's categories: the guard rebuilds #3895's graph on them (``_cofiler_graph``).
 _COFILER_BASE_CATEGORIES: Final[tuple[SliceCategory, ...]] = ("insiders", "blockholders")
 # An identity with a kept row from one of these sources is never a node: a matched proxy figure can
 # include holdings outside the group and its accession is not a co-filing (#3894); a 13F figure is a
-# discretion count (spec, proposition 3).
+# discretion count (spec, proposition 3; :func:`_fold_13f_duplicates` is the one 13F fold).
 _COFILER_EXCLUDED_SOURCES: Final[frozenset[str]] = frozenset({"def14a", "13f"})
 
 # accession → the canonical CIKs of its reporting owners, for accessions naming ≥2. Indexed on
@@ -4448,12 +4449,13 @@ def _is_clique(members: Sequence[str], edges: Mapping[frozenset[str], set[str]])
     return all(frozenset((a, b)) in edges for i, a in enumerate(members) for b in members[i + 1 :])
 
 
-def _cofiler_graph(
+def _cofiler_identities(
     by_category: Mapping[SliceCategory, Sequence[Holder]],
-    cofilers: Mapping[str, frozenset[str]],
-) -> _CofilerGraph:
-    """Nodes, edges and the collapse list for :func:`_reconcile_cofiler_groups` (its docstring
-    states the rules). Separate so the full-population A/B measures the pass's own cliques."""
+) -> tuple[dict[str, list[Holder]], dict[str, SliceCategory]]:
+    """Owner-once's output by identity key: the rows of each ``_COFILER_CATEGORIES`` identity
+    (input order), and every identity's category. Shared by :func:`_cofiler_graph` and
+    :func:`_fold_13f_duplicates`, so the category check runs on the original input before the
+    fold removes anything."""
     rows_by_identity: dict[str, list[Holder]] = {}
     category_of: dict[str, SliceCategory] = {}
     for category, holders in by_category.items():
@@ -4469,18 +4471,31 @@ def _cofiler_graph(
                 raise ValueError(f"owner-once placed {key!r} in two categories: {category_of[key]!r}, {category!r}")
             if category in _COFILER_CATEGORIES:
                 rows_by_identity.setdefault(key, []).append(h)
+    return rows_by_identity, category_of
 
-    totals = {k: sum((h.shares for h in rows), Decimal(0)) for k, rows in rows_by_identity.items()}
+
+def _identity_canon(key: str) -> str | None:
     # From the identity key itself (``CIK:<stripped filer_cik>``, else ``NAME:``), so every row of
     # one identity shares it by construction.
-    canon = {k: _canonical_cik(k[4:]) if k.startswith("CIK:") else None for k in rows_by_identity}
+    return _canonical_cik(key[4:]) if key.startswith("CIK:") else None
+
+
+def _is_cofiler_node(rows: Sequence[Holder], total: Decimal, canon: str | None, excluded: frozenset[str]) -> bool:
+    return total > 0 and canon is not None and not any(h.winning_source in excluded for h in rows)
+
+
+def _cofiler_graph(
+    by_category: Mapping[SliceCategory, Sequence[Holder]],
+    cofilers: Mapping[str, frozenset[str]],
+) -> _CofilerGraph:
+    """Nodes, edges and the collapse list for :func:`_reconcile_cofiler_groups` (its docstring
+    states the rules). Separate so the full-population A/B measures the pass's own cliques."""
+    rows_by_identity, category_of = _cofiler_identities(by_category)
+    totals = {k: sum((h.shares for h in rows), Decimal(0)) for k, rows in rows_by_identity.items()}
+    canon = {k: _identity_canon(k) for k in rows_by_identity}
 
     def _is_node(k: str, excluded: frozenset[str]) -> bool:
-        return (
-            totals[k] > 0
-            and canon[k] is not None
-            and not any(h.winning_source in excluded for h in rows_by_identity[k])
-        )
+        return _is_cofiler_node(rows_by_identity[k], totals[k], canon[k], excluded)
 
     # #3895's graph: its categories, its exclusion (``def14a``), and an edge only between the owner
     # of a row on the accession and another owner it names.
@@ -4576,7 +4591,9 @@ def _reconcile_cofiler_groups(
     over today's SUM, and the accepted undercount when members hold apart.
 
     * Nodes: identities in ``_COFILER_CATEGORIES`` with a CIK and an owner total (the sum of their
-      kept rows, what the pie adds) > 0, none of whose rows is a matched DEF 14A or a 13F figure.
+      kept rows, what the pie adds) > 0, none of whose rows is a matched DEF 14A or a 13F figure. A
+      13F identity is never a node; :func:`_fold_13f_duplicates` runs first and folds the one 13F
+      case the 13F position-scope spec defines, which leaves this pass's nodes and edges unchanged.
     * Edges: when a node's row with ``shares > 0`` sits on an accession whose co-filers include
       that node's canonical CIK, every pair of nodes the accession names links. A NAME-keyed
       identity never links.
@@ -4600,28 +4617,11 @@ def _reconcile_cofiler_groups(
         keeper, losers = members[0], members[1:]
         keeper_rows = rows_by_identity[keeper]
         primary = max(keeper_rows, key=lambda h: h.shares)
-        dropped = list(primary.dropped_sources)
-        seen = {(d.filer_cik, d.filer_name, d.source, d.accession_number, d.shares) for d in dropped}
         folded: list[str] = []
         for k in losers:
-            for h in rows_by_identity[k]:
-                own = DroppedSource(
-                    source=h.winning_source,
-                    accession_number=h.winning_accession,
-                    shares=h.shares,
-                    as_of_date=h.as_of_date,
-                    edgar_url=h.winning_edgar_url,
-                    filer_cik=h.filer_cik,
-                    filer_name=h.filer_name,
-                )
-                for d in (own, *h.dropped_sources):
-                    key = (d.filer_cik, d.filer_name, d.source, d.accession_number, d.shares)
-                    if key not in seen:
-                        seen.add(key)
-                        dropped.append(d)
             folded.append(f"{rows_by_identity[k][0].filer_name} ({rows_by_identity[k][0].filer_cik}) {totals[k]}")
             removed.add(k)
-        replacements[id(primary)] = replace(primary, dropped_sources=tuple(dropped))
+        replacements[id(primary)] = _fold_rows_into(primary, [h for k in losers for h in rows_by_identity[k]])
         group_sum = sum((totals[k] for k in members), Decimal(0))
         links = "; ".join(
             f"{rows_by_identity[a][0].filer_name} ↔ {rows_by_identity[b][0].filer_name} via {', '.join(sorted(accs))}"
@@ -4658,6 +4658,221 @@ def _reconcile_cofiler_groups(
             if category not in _COFILER_CATEGORIES or _identity_key(h.filer_cik, h.filer_name) not in removed
         ]
     return out, corrections
+
+
+def _fold_rows_into(primary: Holder, rows: Iterable[Holder]) -> Holder:
+    """``primary`` with each of ``rows`` appended to its dropped sources, followed by that row's own
+    dropped entries, de-duplicated on ``(filer_cik, filer_name, source, accession_number, shares)``
+    with order kept."""
+    dropped = list(primary.dropped_sources)
+    seen = {(d.filer_cik, d.filer_name, d.source, d.accession_number, d.shares) for d in dropped}
+    for h in rows:
+        own = DroppedSource(
+            source=h.winning_source,
+            accession_number=h.winning_accession,
+            shares=h.shares,
+            as_of_date=h.as_of_date,
+            edgar_url=h.winning_edgar_url,
+            filer_cik=h.filer_cik,
+            filer_name=h.filer_name,
+        )
+        for d in (own, *h.dropped_sources):
+            key = (d.filer_cik, d.filer_name, d.source, d.accession_number, d.shares)
+            if key not in seen:
+                seen.add(key)
+                dropped.append(d)
+    return replace(primary, dropped_sources=tuple(dropped))
+
+
+# ---------------------------------------------------------------------------
+# 13F duplicates — a manager's 13F figure counted once when its own joint 13D/G
+# reports the same block for a co-filer (#3227)
+# See docs/specs/ownership/2026-10-21-3227-13f-position-scope.md
+# ---------------------------------------------------------------------------
+
+# This instrument's Schedule 13D/G cover rows filed before a bound. Served by
+# ``idx_blockholder_filings_instrument_filed_at``; ``filing_id`` makes the row order total.
+_COVERS_13F_SQL: Final = """
+    SELECT reporter_cik, accession_number, filed_at,
+           sole_dispositive_power, shared_dispositive_power, aggregate_amount_owned
+      FROM blockholder_filings
+     WHERE instrument_id = %(iid)s AND filed_at < %(bound)s
+     ORDER BY filed_at, accession_number, filing_id
+"""
+
+
+@dataclass(frozen=True)
+class _CoverRow:
+    """One reporting person's block on a Schedule 13D/G cover (``blockholder_filings``), as
+    :func:`_fold_13f_duplicates` reads it. ``reporter_cik`` is as stored; the fold canonicalises it."""
+
+    reporter_cik: str | None
+    accession_number: str
+    filed_at: datetime
+    sole_dispositive: Decimal | None
+    shared_dispositive: Decimal | None
+    aggregate: Decimal | None
+
+    def reports(self, t: Decimal) -> bool:
+        """Both dispositive fields present, sole + shared = ``t``, and aggregate = ``t``."""
+        return (
+            self.sole_dispositive is not None
+            and self.shared_dispositive is not None
+            and self.sole_dispositive + self.shared_dispositive == t
+            and self.aggregate == t
+        )
+
+
+def _digit_cik(cik: str | None) -> str | None:
+    """:func:`_canonical_cik`, or ``None`` unless the result is all ASCII digits."""
+    canon = _canonical_cik(cik)
+    return canon if canon is not None and canon.isascii() and canon.isdigit() else None
+
+
+def _cover_bound(period: date) -> datetime:
+    """``P + 1 day`` at 00:00 UTC: a cover is in force for P when filed strictly before it."""
+    return datetime.combine(period + timedelta(days=1), time(), tzinfo=UTC)
+
+
+def _13f_candidates(
+    rows_by_identity: Mapping[str, Sequence[Holder]], category_of: Mapping[str, SliceCategory]
+) -> dict[str, date]:
+    """Candidate M (spec § Rule): an ``institutions`` identity with an all-digit canonical CIK,
+    total > 0, every kept row a 13F row, and one non-NULL period end P across them. Identity key →
+    P, input order."""
+    out: dict[str, date] = {}
+    for key, rows in rows_by_identity.items():
+        if category_of[key] != "institutions" or _digit_cik(_identity_canon(key)) is None:
+            continue
+        if sum((h.shares for h in rows), Decimal(0)) <= 0 or any(h.winning_source != "13f" for h in rows):
+            continue
+        periods = {h.as_of_date for h in rows}
+        period = next(iter(periods))
+        if len(periods) == 1 and period is not None:
+            out[key] = period
+    return out
+
+
+def _read_13f_covers(
+    conn: psycopg.Connection[Any], instrument_id: int, by_category: Mapping[SliceCategory, Sequence[Holder]]
+) -> list[_CoverRow]:
+    """The cover rows :func:`_fold_13f_duplicates` needs: this instrument's ``blockholder_filings``
+    rows filed before the latest candidate's ``P + 1 day`` (UTC). No candidate, no query."""
+    periods = _13f_candidates(*_cofiler_identities(by_category)).values()
+    if not periods:
+        return []
+    with conn.cursor(row_factory=psycopg.rows.tuple_row) as cur:
+        cur.execute(_COVERS_13F_SQL, {"iid": instrument_id, "bound": _cover_bound(max(periods))})
+        return [_CoverRow(*row) for row in cur.fetchall()]
+
+
+def _fold_13f_duplicates(
+    by_category: dict[SliceCategory, list[Holder]],
+    covers: Sequence[_CoverRow],
+) -> tuple[dict[SliceCategory, list[Holder]], list[CorrectionApplied]]:
+    """Fold a manager's 13F figure onto its co-filer when the manager's own joint 13D/G reports the
+    same block for both (#3227). Pure; runs on :func:`_reconcile_owner_once`'s output, before
+    :func:`_reconcile_cofiler_groups`.
+
+    A declared policy, not a proof: no rule identifies a 13F position (investment discretion,
+    Exchange Act §3(a)(35)) with a beneficial-ownership position (Rule 13d-3). The spec lists the
+    accepted identification risk. The rule (spec § Rule, frozen):
+
+    * Candidate M: :func:`_13f_candidates`, total T, period end P.
+    * Cover C: M's own row in ``covers`` (canonical CIK, all digits on both sides), the latest by
+      ``(filed_at, accession_number)`` filed before ``P + 1 day`` UTC. A newer cover that does not
+      match is not passed over for an older one that does. C matches when :meth:`_CoverRow.reports`
+      T.
+    * Twin k: a co-filer graph node (:func:`_cofiler_graph`'s widened node set) with a canonical CIK
+      other than M's, a row on C's accession reporting T, and an owner total of T.
+    * M is a duplicate when C matches, M has exactly one twin, and that twin is no other
+      cover-matching candidate's twin.
+
+    For each duplicate, M's rows leave ``institutions`` and are appended to the dropped sources of
+    k's largest row (shares, then the lowest ``winning_accession``, then input order), with one
+    ``cofiler_group_collapse`` correction naming k. k keeps its rows and category here. M is not a
+    node, so the co-filer pass that follows sees the same nodes and edges it would have without M."""
+    rows_by_identity, category_of = _cofiler_identities(by_category)
+    candidates = _13f_candidates(rows_by_identity, category_of)
+    if not candidates:
+        return by_category, []
+    totals = {k: sum((h.shares for h in rows), Decimal(0)) for k, rows in rows_by_identity.items()}
+    nodes_by_cik: dict[str, list[str]] = {}
+    for k, rows in rows_by_identity.items():
+        canon = _identity_canon(k)
+        if canon is not None and _is_cofiler_node(rows, totals[k], canon, _COFILER_EXCLUDED_SOURCES):
+            nodes_by_cik.setdefault(canon, []).append(k)
+    by_reporter: dict[str, list[_CoverRow]] = {}
+    by_accession: dict[str, list[tuple[str, _CoverRow]]] = {}
+    for c in covers:
+        cik = _digit_cik(c.reporter_cik)
+        if cik is not None:
+            by_reporter.setdefault(cik, []).append(c)
+            by_accession.setdefault(c.accession_number, []).append((cik, c))
+
+    matched: dict[str, tuple[list[str], _CoverRow]] = {}
+    for m, period in candidates.items():
+        t, m_cik = totals[m], _digit_cik(_identity_canon(m))
+        filed = [c for c in by_reporter.get(m_cik or "", ()) if c.filed_at < _cover_bound(period)]
+        if not filed:
+            continue
+        cover = max(filed, key=lambda c: (c.filed_at, c.accession_number))
+        if not cover.reports(t):
+            continue
+        twins = sorted(
+            {
+                k
+                for cik, row in by_accession[cover.accession_number]
+                if cik != m_cik and row.reports(t)
+                for k in nodes_by_cik.get(cik, ())
+                if totals[k] == t
+            }
+        )
+        if twins:
+            matched[m] = (twins, cover)
+    twin_count: dict[str, int] = {}
+    for twins, _ in matched.values():
+        for k in twins:
+            twin_count[k] = twin_count.get(k, 0) + 1
+
+    removed: set[str] = set()
+    replacements: dict[int, Holder] = {}
+    corrections: list[CorrectionApplied] = []
+    for m, (twins, cover) in matched.items():
+        if len(twins) != 1 or twin_count[twins[0]] != 1:
+            continue
+        k, t, manager = twins[0], totals[m], rows_by_identity[m][0]
+        _, primary = min(enumerate(rows_by_identity[k]), key=lambda ir: (-ir[1].shares, ir[1].winning_accession, ir[0]))
+        replacements[id(primary)] = _fold_rows_into(primary, rows_by_identity[m])
+        removed.add(m)
+        corrections.append(
+            CorrectionApplied(
+                kind="cofiler_group_collapse",
+                filer_name=primary.filer_name,
+                shares_removed=t,
+                filer_cik=primary.filer_cik,
+                source_channel="13f",
+                winning_source=primary.winning_source,
+                winning_accession=primary.winning_accession,
+                detail=(
+                    f"13F duplicate counted once (#3227): {manager.filer_name} ({manager.filer_cik}) 13F {t} "
+                    f"for {candidates[m].isoformat()}; on joint Schedule 13D/G {cover.accession_number} "
+                    f"(filed {cover.filed_at.astimezone(UTC).date().isoformat()}) {manager.filer_name} and "
+                    f"{primary.filer_name} each report dispositive power and aggregate amount {t}. Counted once "
+                    "by policy: overlap on that statement, across dates and in class scope is not verified."
+                ),
+            )
+        )
+    if not removed:
+        return by_category, corrections
+    return {
+        category: [
+            replacements.get(id(h), h)
+            for h in holders
+            if category != "institutions" or _identity_key(h.filer_cik, h.filer_name) not in removed
+        ]
+        for category, holders in by_category.items()
+    }, corrections
 
 
 def _bucket_into_slices(
@@ -6578,6 +6793,9 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
         conn,
         [h.winning_accession for c in _COFILER_CATEGORIES for h in by_category.get(c, []) if h.shares > 0],
     )
+    # #3227 13F duplicates: a manager's 13F figure folded onto the co-filer its own joint 13D/G
+    # reports the same block for. Before the co-filer pass, which it leaves unchanged (M is no node).
+    by_category, f13_corrections = _fold_13f_duplicates(by_category, _read_13f_covers(conn, instrument_id, by_category))
     by_category, cofiler_corrections = _reconcile_cofiler_groups(by_category, cofilers)
     for _cat, _fam_holders in family_by_category.items():
         by_category.setdefault(_cat, []).extend(_fam_holders)
@@ -6728,6 +6946,7 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
         *insider_group_corrections,
         *line_group_corrections,
         *group_corrections,
+        *f13_corrections,
         *cofiler_corrections,
     )
     return OwnershipRollup(
