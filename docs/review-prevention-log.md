@@ -13349,6 +13349,25 @@ neighbouring container and match it.**
   rather than folded.
 - Enforced in: `docs/specs/ownership/2026-10-19-3227-cofiler-links-widened.md` (proposition 3; deferred 13F stratum).
 
+### Equal counts do not identify sets, and a definition-chain "proof" of identity needs every inclusion entailed (#3227 13F scope, 2026-10-21)
+
+- Symptom: the 13F position-scope spec took three Codex checkpoint-1 rounds. Revision 1 argued from the rule texts:
+  13F discretion ⊆ dispositive power = aggregate, so equal counts make the sets equal. Round 1 broke two links. The
+  discretion definition covers authority over purchases *or* sales, so the first inclusion is not entailed. A cover
+  dated before the 13F period does not fix the set at that period: a block can be sold and an equal one bought.
+  Revision 2 swapped the proof for "exact non-round equality across four figures" plus a null test. Round 2 rejected
+  that too: count-preserving substitution is a structural defeat, not a coincidence, and a census of where equalities
+  occur is not a false-removal rate.
+- Prevention:
+  - Before writing "so the sets are equal", check that each inclusion is entailed by the rule text, not merely typical,
+    and that both sides are at the same date.
+  - Where no rule identifies the two positions, look for a structural link in one document (here, both owners
+    reporting the figure as joint reporting persons on one Schedule 13D/G).
+  - Then declare the rest as policy, listing its risks and every affected case. Do not dress a policy as a proof or as
+    a measured safety bound.
+- Enforced in: `docs/specs/ownership/2026-10-21-3227-13f-position-scope.md` (revision history, policy assumption,
+  accepted identification risk).
+
 ### A sibling archive URL is built from the CIK and accession, never from the primary document's directory (#3872, 2026-10-19)
 
 - Symptom: `sec_tender` derived `<acc>.hdr.sgml` from `dirname(primary_document_url)`. Index- and Atom-derived manifest
