@@ -128,7 +128,7 @@ _CANDIDATES_SQL = (
 _LEDGER_SQL = "SELECT instrument_id FROM sec_inline_scale_renormalise ORDER BY 1"
 # Any `running` row of either writer refuses the run, however old: `daily_financial_facts` runs can last many hours
 # (`SELECT max(finished_at - started_at) FROM job_runs WHERE job_name = 'daily_financial_facts'`), so no age window
-# is safe. A killed jobs child's stale row is listed by run id and fails closed.
+# is safe. A stale row left by an interrupted worker is listed by run id and fails closed.
 _LIVE_WRITERS_SQL = "SELECT run_id, job_name, started_at FROM job_runs WHERE status = 'running' AND job_name = ANY(%s)"
 
 
@@ -602,8 +602,8 @@ def run_snapshot(
     if live:
         failures.append(
             f"not quiescent: running {[list(map(str, r)) for r in live]}; pause the scan, wait for the run to finish,"
-            " and rerun. A row left by a killed jobs child is marked failed when the jobs process restarts"
-            " (app/jobs/__main__.py, reap_orphaned_job_runs)"
+            " and rerun. A job_runs row left running by an interrupted worker is normally marked status='failure'"
+            " during jobs-process startup (app/jobs/__main__.py calls reap_orphaned_job_runs(reap_all=True))"
         )
     ids = sorted(set(_scope(conn, mode)) | set(payloads) | set(unrefilled))
     # Before any write: every in-scope instrument's normaliser lock, in sorted order (the drain's order).
