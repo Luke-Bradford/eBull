@@ -4693,8 +4693,9 @@ def _fold_rows_into(primary: Holder, rows: Iterable[Holder]) -> Holder:
 # ---------------------------------------------------------------------------
 # 13F duplicates — a manager's 13F figure counted once when its own joint 13D/G
 # reports the same block for a co-filer (#3227)
-# See docs/specs/ownership/2026-10-21-3227-13f-position-scope.md (the 13D arm) and
-# docs/specs/ownership/2026-10-22-3227-13f-13g-covers.md (the 13G extension)
+# See docs/specs/ownership/2026-10-21-3227-13f-position-scope.md (the 13D arm),
+# docs/specs/ownership/2026-10-22-3227-13f-13g-covers.md (the 13G extension, tier (U)) and
+# docs/specs/ownership/2026-10-22-3227-13f-13g-observation-block.md (tier (O))
 # ---------------------------------------------------------------------------
 
 # This instrument's Schedule 13D/G cover rows filed before a bound. Served by
@@ -4712,15 +4713,21 @@ _COVERS_13F_SQL: Final = """
 
 _13G_SUBMISSION_TYPES: Final[frozenset[str]] = frozenset({"SCHEDULE 13G", "SCHEDULE 13G/A"})
 
-# The current 13G observations' ``reporter_cik`` for the given accessions: the filer of record when
-# the accession's blocks carry no CIK (``resolve_blockholder_reporter_identity``, #1638). Closed rows
+# One current 13G observation as :func:`_read_13g_filers` returns it:
+# ``(reporter_cik, reporter_name, aggregate_amount_owned)``.
+_Observed13G = tuple[str | None, str | None, Decimal | None]
+
+# The current 13G observations of the given accessions: ``reporter_cik`` is the filer of record when
+# the accession's blocks carry no CIK (``resolve_blockholder_reporter_identity``, #1638), and
+# ``reporter_name`` / ``aggregate_amount_owned`` are copied from the block the resolver chose, which
+# tier (O) locates (observation-block spec, Source rule). Closed rows
 # are excluded, as they can carry a pre-#1638 issuer CIK. The table is range-partitioned on
 # ``period_end``, which both 13D/G observation writers set to ``filed_at.date()`` (``blockholders.py``,
 # ``ownership_observations_sync.py``; 0 of 38,608 13G observations differ from the UTC filed date on dev,
 # 2026-10-22), so the window over the accessions' filed dates (±1 day for the session time zone) prunes
 # partitions and drops no row. Served by ``idx_block_obs_instrument_period``.
 _FILERS_13G_SQL: Final = """
-    SELECT source_accession, reporter_cik
+    SELECT source_accession, reporter_cik, reporter_name, aggregate_amount_owned
       FROM ownership_blockholders_observations
      WHERE instrument_id = %(iid)s AND period_end BETWEEN %(lo)s AND %(hi)s
        AND source_accession = ANY(%(accs)s::text[])
@@ -4797,10 +4804,11 @@ def _read_13f_covers(
 
 def _read_13g_filers(
     conn: psycopg.Connection[Any], instrument_id: int, covers: Sequence[_CoverRow]
-) -> dict[str, tuple[str | None, ...]]:
-    """Accession → the ``reporter_cik`` of each current 13G observation on it, for the 13G accessions
-    in ``covers``. :func:`_fold_13f_duplicates` derives the filer of record from these. No 13G
-    accession, no query."""
+) -> dict[str, tuple[_Observed13G, ...]]:
+    """Accession → each current 13G observation on it as ``(reporter_cik, reporter_name,
+    aggregate_amount_owned)``, for the 13G accessions in ``covers``. :func:`_fold_13f_duplicates`
+    derives the filer of record from the CIKs, and tier (O) locates the observation's block from the
+    name and aggregate. No 13G accession, no query."""
     g13 = [c for c in covers if c.submission_type in _13G_SUBMISSION_TYPES]
     if not g13:
         return {}
@@ -4811,30 +4819,60 @@ def _read_13g_filers(
         "hi": max(days) + timedelta(days=1),
         "accs": sorted({c.accession_number for c in g13}),
     }
-    out: dict[str, list[str | None]] = {}
+    out: dict[str, list[_Observed13G]] = {}
     with conn.cursor(row_factory=psycopg.rows.tuple_row) as cur:
         cur.execute(_FILERS_13G_SQL, params)
-        for accession, cik in cur.fetchall():
-            out.setdefault(accession, []).append(cik)
-    return {a: tuple(ciks) for a, ciks in out.items()}
+        for accession, cik, name, aggregate in cur.fetchall():
+            out.setdefault(accession, []).append((cik, name, aggregate))
+    return {a: tuple(rows) for a, rows in out.items()}
 
 
-def _13g_filer_of_record(blocks: Sequence[_CoverRow], observed: Sequence[str | None]) -> str | None:
+def _13g_filer_of_record(blocks: Sequence[_CoverRow], observed: Sequence[_Observed13G]) -> str | None:
     """The 13G accession's filer of record (13G-covers spec § Rule), or ``None`` when undefined: every
     block has a NULL ``reporter_cik``, and the current observations are at least one, each a digit
     CIK, all one value. A NULL or non-digit value makes it undefined rather than being filtered out."""
     if any(b.reporter_cik is not None for b in blocks):
         return None
-    ciks = {_digit_cik(c) for c in observed}
+    ciks = {_digit_cik(c) for c, _, _ in observed}
     if len(ciks) != 1 or None in ciks:
         return None
     return next(iter(ciks))
 
 
+def _o_cover_blocks(
+    blocks: Sequence[_CoverRow], observed: Sequence[_Observed13G], t: Decimal, m_names: set[str]
+) -> tuple[str, list[str]] | None:
+    """Tier (O)'s conditions on C itself (observation-block spec § Rule, conditions 3–6), or ``None``
+    when one fails. ``m_names`` are M's normalised 13F names. Returns the observation's name and the
+    distinct stored names of the blocks named as M, sorted.
+
+    Exactly one current observation of C, with aggregate T; exactly one stored block with the
+    observation's ``reporter_name``, byte for byte, which :meth:`_CoverRow.reports` T; no stored
+    block with a non-NULL aggregate above T; and at least one block named as M, every one of which
+    reports T. The existence half of the last is unreachable through C's selection (C was found by a
+    block named as M), and kept as a defensive predicate."""
+    if len(observed) != 1 or observed[0][2] != t or observed[0][1] is None:
+        return None
+    obs_name = observed[0][1]
+    # Byte for byte, not normalised (spec § Rule, condition 4): the name only locates the block the
+    # observation was copied from, on the accession it was copied from, and identifies no entity. On
+    # dev (2026-10-22) each of the 37,977 current 13G observations' names equals exactly one stored
+    # block's on its accession and instrument (spec § Source rule). A drifted name refuses the fold.
+    located = [b for b in blocks if b.reporter_name == obs_name]
+    if len(located) != 1 or not located[0].reports(t):
+        return None
+    if any(b.aggregate is not None and b.aggregate > t for b in blocks):
+        return None
+    m_blocks = [b for b in blocks if _normalised_name(b.reporter_name or "") in m_names]
+    if not m_blocks or not all(b.reports(t) for b in m_blocks):
+        return None
+    return obs_name, sorted({b.reporter_name or "" for b in m_blocks})
+
+
 def _fold_13f_duplicates(
     by_category: dict[SliceCategory, list[Holder]],
     covers: Sequence[_CoverRow],
-    filers_13g: Mapping[str, Sequence[str | None]],
+    filers_13g: Mapping[str, Sequence[_Observed13G]],
 ) -> tuple[dict[SliceCategory, list[Holder]], list[CorrectionApplied]]:
     """Fold a manager's 13F figure onto its co-filer when the manager's own joint 13D/G reports the
     same block for both (#3227). Pure; runs on :func:`_reconcile_owner_once`'s output, before
@@ -4868,6 +4906,20 @@ def _fold_13f_duplicates(
       of record, k has a Form 3/4/5 ``filer_name`` equal to a block name on C; otherwise k's
       canonical CIK is C's filer of record. A case never rests on two name identifications.
     * Duplicate: exactly one twin, no other 13G-matching candidate's twin, and not reserved.
+
+    Tier (O) (docs/specs/ownership/2026-10-22-3227-13f-13g-observation-block.md § Rule, frozen) runs
+    after the extension's folds, and nothing in it feeds back into the 13D arm or the extension
+    (tier (U)). It locates the twin's block by the provenance of C's observation, not by position:
+
+    * It considers candidates outside both matched sets whose C (selected as above) is a 13G that is
+      not uniform at T, with a defined filer of record that is not M.
+    * Twin k: a node on the filer's canonical CIK with an owner total of T whose every kept row is C's
+      ``13g`` observation. C has exactly one current observation, with aggregate T; exactly one stored
+      block has the observation's exact ``reporter_name``, and it :meth:`_CoverRow.reports` T; no
+      stored block has a non-NULL aggregate above T; at least one block is named as M (M's 13F
+      ``filer_name`` values, normalised), and every such block reports T.
+    * Duplicate: exactly one twin, no other (O) candidate's twin, and no twin of either earlier
+      matched set.
 
     For each duplicate, M's rows leave ``institutions`` and are appended to the dropped sources of
     k's largest row (shares, then the lowest ``winning_accession``, then input order), with one
@@ -4985,6 +5037,8 @@ def _fold_13f_duplicates(
     node_names: dict[str, set[str]] = {}
 
     g13_matched: dict[str, tuple[list[str], _CoverRow, str | None, bool]] = {}
+    # Candidate → (C, its filer of record) when C is a non-uniform 13G that tier (O) may take.
+    non_uniform: dict[str, tuple[str, str]] = {}
     for m, period in candidates.items() if g13_blocks else ():
         if m in matched:
             continue
@@ -5002,10 +5056,12 @@ def _fold_13f_duplicates(
             continue
         accession = latest[1]
         blocks = g13_blocks[accession]
-        if not all(b.reports(t) for b in blocks):
-            continue
         filer = g13_filer[accession]
         m_is_filer = filer is not None and filer == m_cik
+        if not all(b.reports(t) for b in blocks):
+            if filer is not None and not m_is_filer:
+                non_uniform[m] = (accession, filer)
+            continue
         if m_is_filer:
             # M is identified as the filer; k by name on C.
             if not node_names:
@@ -5045,6 +5101,52 @@ def _fold_13f_duplicates(
                 "Counted once by policy: the filer's presence on the statement, identity by name, completeness "
                 "of the stored blocks, overlap on that statement, across dates and in class scope are not "
                 "verified."
+            ),
+        )
+
+    # Tier (O). Its uniqueness count is its own; both earlier matched sets' twins are reserved.
+    reserved |= {k for twins, *_ in g13_matched.values() for k in twins}
+    # Candidate → (twins, C's accession, C's filed date, filer of record, observation name, M block names).
+    o_matched: dict[str, tuple[list[str], str, str, str, str, list[str]]] = {}
+    for m, (accession, filer) in non_uniform.items():
+        t, blocks = totals[m], g13_blocks[accession]
+        located = _o_cover_blocks(blocks, filers_13g.get(accession, ()), t, _names(m, frozenset({"13f"})))
+        if located is None:
+            continue
+        obs_name, m_block_names = located
+        twins = sorted(
+            k
+            for k in nodes_by_cik.get(filer, ())
+            if totals[k] == t
+            and all(h.winning_source == "13g" and h.winning_accession == accession for h in rows_by_identity[k])
+        )
+        if twins:
+            # ``filed_at`` is the accession's, so any block of C gives the same date.
+            o_matched[m] = (twins, accession, _filed(blocks[0]), filer, obs_name, m_block_names)
+    o_count: dict[str, int] = {}
+    for twins, *_ in o_matched.values():
+        for k in twins:
+            o_count[k] = o_count.get(k, 0) + 1
+    for m, (twins, accession, filed, filer, obs_name, m_block_names) in o_matched.items():
+        if len(twins) != 1 or o_count[twins[0]] != 1 or twins[0] in reserved:
+            continue
+        t = totals[m]
+        # The observation-block spec's single wording; ``same`` marks the observation's block as one
+        # of the blocks named as M.
+        on_c = f"on joint Schedule 13G {accession} (filed {filed}, filer of record {filer}) the block of {obs_name}"
+        named = "; ".join(m_block_names)
+        same = " (one of them is that block)" if obs_name in m_block_names else ""
+        _fold(
+            m,
+            twins[0],
+            lambda manager, primary, t=t, p=candidates[m], on_c=on_c, named=named, same=same: (
+                f"13F duplicate counted once (#3227): {manager.filer_name} ({manager.filer_cik}) 13F {t} "
+                f"for {p.isoformat()}; {on_c}, counted here as {primary.filer_name}'s figure, reports "
+                f"dispositive power and aggregate amount {t}; the block(s) named {named} each report the "
+                f"same{same}; no stored block has a non-NULL aggregate above {t}; {manager.filer_name} is "
+                "matched by name. Counted once by policy: identity by name, the observation's source block, "
+                "completeness of the stored blocks, overlap on that statement, across dates and in class "
+                "scope are not verified."
             ),
         )
     if not removed:

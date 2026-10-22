@@ -2,7 +2,8 @@
 
 Spec: docs/specs/ownership/2026-10-22-3227-13f-13g-covers.md (Acceptance, Tests, Read). Auto-marked
 ``db`` (pulls ``ebull_test_conn``). ``_read_13g_filers`` returns only the current ``13g`` observations
-of the requested accessions on this instrument.
+of the requested accessions on this instrument, each with its name and aggregate (observation-block spec,
+Read).
 """
 
 from __future__ import annotations
@@ -66,6 +67,6 @@ def test_the_read_keeps_current_13g_observations_of_this_instrument_and_accessio
     _observe(conn, _IID, _G2, "0000000555")
 
     assert _read_13g_filers(conn, _IID, [_block(_G), _block(_G2)]) == {
-        _G: ("0001527166",),
-        _G2: ("0000000555",),
+        _G: (("0001527166", "FILER", Decimal(1)),),
+        _G2: (("0000000555", "FILER", Decimal(1)),),
     }

@@ -23,6 +23,7 @@ from app.services.ownership_rollup import (
     SourceTag,
     _CoverRow,
     _fold_13f_duplicates,
+    _Observed13G,
     _read_13g_filers,
 )
 
@@ -88,6 +89,11 @@ def _13d(cik: str, accession: str = "D", *, filed: datetime = _FILED, t: int = _
     return _CoverRow(cik, accession, filed, Decimal(0), Decimal(t), Decimal(t), "x", "SCHEDULE 13D/A")
 
 
+def _obs(*ciks: str | None) -> tuple[_Observed13G, ...]:
+    """Current 13G observations carrying only a ``reporter_cik``: enough for the filer of record."""
+    return tuple((c, None, None) for c in ciks)
+
+
 def _cats(
     insiders: Sequence[Holder] = (), blockholders: Sequence[Holder] = (), institutions: Sequence[Holder] = ()
 ) -> dict[SliceCategory, list[Holder]]:
@@ -104,7 +110,7 @@ def _pie(by_category: Mapping[SliceCategory, Sequence[Holder]]) -> Decimal:
 
 
 def _run(
-    cats: dict[SliceCategory, list[Holder]], covers: list[_CoverRow], filers: Mapping[str, Sequence[str | None]]
+    cats: dict[SliceCategory, list[Holder]], covers: list[_CoverRow], filers: Mapping[str, Sequence[_Observed13G]]
 ) -> list[CorrectionApplied]:
     out, corrections = _fold_13f_duplicates(cats, covers, filers)
     assert _pie(cats) - _pie(out) == sum((c.shares_removed for c in corrections), Decimal(0))
@@ -119,7 +125,7 @@ def _saro_covers() -> list[_CoverRow]:
     return [_block("Carlyle Group Inc."), _block("CARLYLE PARTNERS VII S1 HOLDINGS II L.P."), _block("Carlyle Fund X")]
 
 
-_SARO_FILERS: Mapping[str, Sequence[str | None]] = {"G": (_CARLYLE,)}
+_SARO_FILERS: Mapping[str, Sequence[_Observed13G]] = {"G": _obs(_CARLYLE)}
 
 
 def _way() -> dict[SliceCategory, list[Holder]]:
@@ -130,7 +136,7 @@ def _way_covers() -> list[_CoverRow]:
     return [_block("Derby LuxCo S.a r.l."), _block("EQT FUND MANAGEMENT S.A R.L.")]
 
 
-_WAY_FILERS: Mapping[str, Sequence[str | None]] = {"G": (_DERBY,)}
+_WAY_FILERS: Mapping[str, Sequence[_Observed13G]] = {"G": _obs(_DERBY)}
 
 
 # --- Folds ---------------------------------------------------------------------------------------
@@ -179,7 +185,7 @@ def test_a_blockholders_twin_whose_row_is_c_itself_folds() -> None:
 def test_m_not_filer_with_k_named_but_not_filer_refuses() -> None:
     # Two name identifications (M and k both by name only) are never a case.
     cats = _cats(insiders=[_h(_FUND, _FUND_NAME)], institutions=[_13f(_CARLYLE, _CARLYLE_NAME)])
-    assert not _run(cats, _saro_covers(), {"G": (_OTHER,)})
+    assert not _run(cats, _saro_covers(), {"G": _obs(_OTHER)})
 
 
 def test_k_as_filer_with_a_matching_name_is_found_by_the_filer_route() -> None:
@@ -282,7 +288,7 @@ def test_an_undefined_filer_refuses_on_either_route(observed: tuple[str | None, 
     else:
         cats, covers, filer = _way(), _way_covers(), _DERBY
     swapped = tuple(filer if o == _CARLYLE else o for o in observed)
-    assert not _run(cats, covers, {"G": swapped})
+    assert not _run(cats, covers, {"G": _obs(*swapped)})
 
 
 @pytest.mark.parametrize("shape", ["saro", "way"])
@@ -296,7 +302,7 @@ def test_a_block_with_a_cik_makes_the_filer_undefined(shape: str) -> None:
 
 
 def test_padded_forms_of_one_cik_are_one_value() -> None:
-    assert _run(_saro(), _saro_covers(), {"G": ("0001527166", " 1527166 ", "1527166")})
+    assert _run(_saro(), _saro_covers(), {"G": _obs("0001527166", " 1527166 ", "1527166")})
 
 
 # --- C selection ----------------------------------------------------------------------------------
@@ -311,13 +317,13 @@ def test_a_newer_13d_row_by_cik_pre_empts_an_older_uniform_13g() -> None:
 def test_a_newer_non_uniform_13g_naming_m_pre_empts_an_older_uniform_one() -> None:
     newer = datetime(2026, 6, 1, tzinfo=UTC)
     covers = [*_way_covers(), _block("EQT Fund Management S.a r.l.", "G2", filed=newer, aggregate=_T - 1)]
-    assert not _run(_way(), covers, {**_WAY_FILERS, "G2": (_DERBY,)})
+    assert not _run(_way(), covers, {**_WAY_FILERS, "G2": _obs(_DERBY)})
 
 
 @pytest.mark.parametrize(("d_acc", "g_acc", "folds"), [("A1", "A2", True), ("A2", "A1", False)])
 def test_a_13d_and_a_13g_filed_together_order_by_accession(d_acc: str, g_acc: str, folds: bool) -> None:
     covers = [_13d(_CARLYLE, d_acc, t=_T - 1), *(replace(c, accession_number=g_acc) for c in _saro_covers())]
-    assert bool(_run(_saro(), covers, {g_acc: (_CARLYLE,)})) is folds
+    assert bool(_run(_saro(), covers, {g_acc: _obs(_CARLYLE)})) is folds
 
 
 def test_two_candidates_with_different_periods_each_take_their_own_c() -> None:
@@ -334,7 +340,7 @@ def test_two_candidates_with_different_periods_each_take_their_own_c() -> None:
         # After the 2026-03-31 candidate's P: not that candidate's C, though the batched read returns it.
         _block(_EQT_NAME, "W2", filed=datetime(2026, 5, 1, tzinfo=UTC), t=1),
     ]
-    corrections = _run(cats, covers, {**_SARO_FILERS, "W": (_DERBY,), "W2": (_DERBY,)})
+    corrections = _run(cats, covers, {**_SARO_FILERS, "W": _obs(_DERBY), "W2": _obs(_DERBY)})
     assert sorted(c.shares_removed for c in corrections) == [Decimal(4_000), Decimal(_T)]
 
 
@@ -392,7 +398,7 @@ def test_two_13g_candidates_sharing_a_twin_both_refuse() -> None:
     cats = _saro()
     cats["institutions"].append(_13f("0000000222", "Manager Two"))
     covers = [*_saro_covers(), *(_block(n, "G2") for n in ("Manager Two", _FUND_NAME))]
-    assert not _run(cats, covers, {**_SARO_FILERS, "G2": ("0000000222",)})
+    assert not _run(cats, covers, {**_SARO_FILERS, "G2": _obs("0000000222")})
 
 
 def test_a_13g_candidate_with_two_twins_refuses() -> None:
@@ -409,7 +415,7 @@ def test_a_refused_two_twin_candidate_still_reserves_its_twins(a_uniform: bool, 
     cats["institutions"].append(_13f("0000000222", "Manager Two"))
     a_covers = _saro_covers() if a_uniform else [*_saro_covers(), _block("Off", aggregate=1)]
     covers = [*a_covers, *(_block(n, "G2") for n in ("Manager Two", _FUND_NAME))]
-    corrections = _run(cats, covers, {**_SARO_FILERS, "G2": ("0000000222",)})
+    corrections = _run(cats, covers, {**_SARO_FILERS, "G2": _obs("0000000222")})
     assert [c.filer_cik for c in corrections] == ([_FUND] if b_folds else [])
 
 
@@ -462,9 +468,12 @@ class _FakeConn:
 
 
 def test_the_filer_read_queries_13g_accessions_once() -> None:
-    conn = _FakeConn([("G", _CARLYLE), ("G", " 1527166"), ("G2", _OTHER)])
+    conn = _FakeConn([("G", _CARLYLE, "A", Decimal(_T)), ("G", " 1527166", "B", None), ("G2", _OTHER, "C", Decimal(1))])
     covers = [*_saro_covers(), _block("x", "G2"), _13d(_CARLYLE)]
-    assert _read_13g_filers(conn, 9, covers) == {"G": (_CARLYLE, " 1527166"), "G2": (_OTHER,)}  # type: ignore[arg-type]
+    assert _read_13g_filers(conn, 9, covers) == {  # type: ignore[arg-type]
+        "G": ((_CARLYLE, "A", Decimal(_T)), (" 1527166", "B", None)),
+        "G2": ((_OTHER, "C", Decimal(1)),),
+    }
     day = _FILED.date()
     assert conn.params == [
         {"iid": 9, "lo": day - timedelta(days=1), "hi": day + timedelta(days=1), "accs": ["G", "G2"]}
