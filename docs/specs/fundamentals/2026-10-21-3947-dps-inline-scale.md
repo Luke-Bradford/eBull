@@ -587,6 +587,25 @@ Further points:
   - `ttm_dps` sums cells (sql/050:96). Every summed cell is consistent within its group, and the sum stays
     per-cell, as in v4.
 
+*Build note (PR d1).* PR (d) is split: (d1) is A3 in the normaliser; (d2) is `refill_and_normalise`, the sweep lock
+and the A/B rework.
+- The gate is `_gate_dps_groups`, called through `derive_gated_dps_periods` with the flag on. It returns each
+  group's `DpsGroupOutcome` (branch and reason), which (d2)'s A/B reads. `PeriodRow.dps_leaves` carries each cell's
+  leaves; `_resolve_flow_leaves` is the resolver variant.
+- **Same row, not same label.** An incomplete group's produced row takes the stored value of the same row
+  (`fiscal_year`, `period_type`, `period_end_date`). Completeness stays per label and type. The derivation can emit
+  several rows under one label (#1914/#541 collisions, which the canonical merge resolves), and a label-keyed copy put
+  one stored value on rows with other period ends: 381 cells moved off the decisions-off value on the dev DB, against
+  25 with the row key (2026-10-22, read-only census over 1,640 instruments).
+- **A row that differs between the two derivations** cannot occur by construction. If it does, every group of the
+  instrument takes decisions-off (`structure_mismatch`) and an error is logged.
+- **Flag off is unchanged.** The decisions-off derivation was compared old code against new over every instrument
+  holding a `dps_declared` fact: 1,588 instruments, 84,453 rows, every column, 0 differences.
+- **Flag on, dev DB, over today's swept raw (read-only):** groups `on` 7,193, `off` 15,591 (`unverified_leaf`
+  15,454, `other_concept` 137), `kept_stored` 958. Cells that differ from decisions-off: 8 `on` (the scanned EFC
+  restores) and 25 `kept_stored`. The kept cells are stored history that the swept raw now derives differently: the
+  stored value in place of a NULL or another value, and 4-dp storage against the unrounded derivation.
+
 ### A4. Candidates, the enqueue predicate, and the rollback set
 
 - **Candidate instrument.** A population instrument with an accession whose active generation holds a

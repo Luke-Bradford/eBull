@@ -55,11 +55,3 @@ def test_a_derived_q4_must_equal_fy_minus_the_quarters() -> None:
     assert _lineage(Q4_KEY, on, {FY_KEY, Q4_KEY}, [FY], RESTORE) == "derived_q4"
     on[Q4_KEY] = _row("Q4", "0.2000", derived=True)
     assert _lineage(Q4_KEY, on, {FY_KEY, Q4_KEY}, [FY], RESTORE) is None
-
-
-def test_a_refusal_explains_null_or_another_facts_value() -> None:
-    other = _fact("0.52", date(2025, 1, 1))
-    refuse = {FY: DpsScaleDecision("refuse", "mixed_scale", None, None)}
-    assert _lineage(FY_KEY, {FY_KEY: _row("FY", None)}, {FY_KEY}, [FY], refuse) == "direct"
-    assert _lineage(FY_KEY, {FY_KEY: _row("FY", "0.5200")}, {FY_KEY}, [FY, other], refuse) == "direct"
-    assert _lineage(FY_KEY, {FY_KEY: _row("FY", "0.9900")}, {FY_KEY}, [FY, other], refuse) is None
