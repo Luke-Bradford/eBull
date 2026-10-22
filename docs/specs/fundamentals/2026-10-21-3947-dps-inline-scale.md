@@ -738,6 +738,23 @@ and the A/B rework.
     - insert-only across a reselection that removes a `source_ref`;
     - discovery retry and exhaustion;
     - an undated row, skipped, while an existing generation is still used.
+*Build note (PR d2b).* `scripts/ab_3947_dps_inline_scale.py` takes `--stage 1|2` or `--verify-stored off|on`.
+- **Scope** is read before the prefetch and again in the snapshot; the locks cover both. An instrument the in-snapshot
+  seed adds to the scope fails the run ("rerun"), because it was neither prefetched nor locked. Prefetched payloads
+  are spilled to a temporary directory, so a full companyfacts payload per instrument does not stay in memory.
+- **Off before on.** The gated derivation reads the stored rows. The script runs the decisions-off normalisation in a
+  savepoint and undoes it before the decisions-on one, so `kept_stored` copies the stored value, not the off arm's
+  output.
+- **The expected branch** is computed from this section's rule in the script, not imported from `_gate_dps_groups`.
+  A changed cell (off against on, through the real normaliser) is explained only when it equals its gated value; the
+  v4 per-cell lineage (`direct` / `ytd` / `derived_q4`) is removed.
+- **`--verify-stored on`** is Stage 2's stored convergence; **`off`** is Rollback step 4. Both scope the ledger.
+- **Dry run, dev DB, 2026-10-22** (`--stage 1 --allow-incomplete`, rolled back): 16 candidate instruments, groups
+  `on` 69, `off`/`unverified_leaf` 153, `kept_stored` 1. 8 cells changed, all EFC and all explained. 1 unreachable
+  cell: instrument 8604's stored Q4 2025 at 0.0000, a label its refilled derivation no longer produces. Refill drift
+  touches one instrument (EFC: one row added, 15 cells). PASS apart from coverage. `--verify-stored off` fails on that
+  same EFC drift, as expected before rollback step 3.
+
 - **Enablement step 2** drains the candidate set with `refill_and_normalise`.
 - **Item 9, Stage 2.** It also checks the live pane: EFC's dividend history shows Q4 2022 and Q4 2023 as
   FY − Q1 − Q2 − Q3 from restored inputs, and WHR's Q2 and Q3 2023 show 1.75.

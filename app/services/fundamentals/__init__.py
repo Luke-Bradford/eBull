@@ -2789,6 +2789,10 @@ def normalize_financial_periods(
                     canonical_count,
                     snapshot_count,
                 )
+        except psycopg.errors.SerializationFailure:
+            # Only a REPEATABLE READ / SERIALIZABLE caller sees this (the #3947 A/B); every later statement of its
+            # snapshot would fail the same way, so the caller retries the whole transaction instead.
+            raise
         except Exception:
             logger.exception("Failed to normalize instrument %d", iid)
             total_failed += 1

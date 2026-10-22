@@ -13746,3 +13746,14 @@ neighbouring container and match it.**
   transaction commits.
 - Enforced in: `app/services/dps_inline_scale_scan.py::drain_renormalise_queue` and `::run_discovery`;
   `tests/test_3947_dps_inline_scale_correction_db.py::test_an_unexpected_error_still_finishes_the_drains_ingestion_run`.
+
+### An A/B whose second arm reads stored rows must undo the first arm before running it (#3947, 2026-10-22)
+
+- First seen in: #3947 build PR (d2b). The v4 A/B normalised decisions-off and then decisions-on in one transaction.
+  After A3, the decisions-on normaliser reads the instrument's stored `financial_periods` rows (an incomplete group
+  keeps its stored DPS), so it would have read the off arm's freshly written rows instead of the stored ones, and the
+  A/B would have reported `kept_stored` cells equal to decisions-off.
+- Prevention: when an arm's derivation reads the table the other arm writes, run each arm from the same starting state:
+  the first inside a savepoint that is rolled back (`raise psycopg.Rollback(tx)`), then the second.
+- Enforced in: `scripts/ab_3947_dps_inline_scale.py::_check_instrument`;
+  `tests/test_3947_ab_snapshot_db.py::test_the_on_arm_reads_the_stored_rows_not_the_off_arms_output`.
