@@ -2618,7 +2618,12 @@ def derive_gated_dps_periods(
         decisions = _dps_fact_inline_scale_decisions(fact_rows, scans, ciks, occurrences)
     dps_values = {f: d.value for f, d in decisions.items() if d.action == "restore"}
     off = _derive_periods_from_facts(fact_rows, reported_currency)
-    on = _derive_periods_from_facts(fact_rows, reported_currency, dps_values)
+    # Nothing restored: the on arm equals off, so copy the rows (the gate only reassigns ``dps_declared``).
+    on = (
+        _derive_periods_from_facts(fact_rows, reported_currency, dps_values)
+        if dps_values
+        else [replace(r) for r in off]
+    )
     stored = {
         (r[0], r[1], r[2]): r[3]
         for r in conn.execute(
