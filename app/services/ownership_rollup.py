@@ -4764,6 +4764,7 @@ class _CoverRow:
         stored and not after the filing date (``filed_at`` as a UTC date), else the filing date. The
         fallback keeps the row's filing-date eligibility; it is not a repair. :data:`_COVERS_13F_SQL`'s
         bound computes the same date."""
+        # ``filed_at`` is a non-optional ``datetime``; :data:`_COVERS_13F_SQL` excludes rows without one.
         filed = self.filed_at.astimezone(UTC).date()
         return filed if self.date_of_event is None else min(self.date_of_event, filed)
 
@@ -5006,7 +5007,9 @@ def _fold_13f_duplicates(
         )
 
     def _filed(cover: _CoverRow) -> str:
-        # The cover parenthetical's dates: the stored date of event as it is, only when stored.
+        # The cover parenthetical's dates: the stored date of event as it is, only when stored (statement-as-of
+        # spec § Rule, Wording, frozen). On a fallback row it is shown even though the filing date was the
+        # selection key: the text reports what the cover says, and "date of event" after "filed" marks the fallback.
         filed = cover.filed_at.astimezone(UTC).date().isoformat()
         return filed if cover.date_of_event is None else f"{filed}, date of event {cover.date_of_event.isoformat()}"
 

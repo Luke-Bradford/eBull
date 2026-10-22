@@ -234,10 +234,6 @@ def _texts(corrections: list[Any]) -> list[tuple[Any, ...]]:
     )
 
 
-def _p95(xs: list[float]) -> float:
-    return statistics.quantiles(xs, n=20)[-1] if len(xs) >= 20 else max(xs)
-
-
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", default="")
@@ -442,12 +438,19 @@ def main() -> int:
     for gate in ("error: treated", "error: base", "error: oracle"):
         if st[gate]:
             fails.append(f"{gate} = {st[gate]}")
+    # Below 20 samples the p95 is not evaluated (the exclusive estimator can exceed the max there, and a sample's max
+    # does not bound the population's p95). That fails a full run; a ``--limit`` run only reports it.
     for name, xs in lat.items():
-        if xs:
-            p95 = _p95(xs)
-            print(f"latency {name}: n {len(xs)} p50 {statistics.median(xs):.2%} p95 {p95:.2%} max {max(xs):.2%}")
-            if p95 > 0.10:
-                fails.append(f"latency {name}: p95 {p95:.1%} > 10%")
+        if len(xs) < 20:
+            msg = f"latency {name}: {len(xs)} samples, p95 not evaluated"
+            print(msg)
+            if not args.limit:
+                fails.append(msg)
+            continue
+        p95 = statistics.quantiles(xs, n=20)[-1]
+        print(f"latency {name}: n {len(xs)} p50 {statistics.median(xs):.2%} p95 {p95:.2%} max {max(xs):.2%}")
+        if p95 > 0.10:
+            fails.append(f"latency {name}: p95 {p95:.1%} > 10%")
     with open(args.out, "w") as fh:
         json.dump(
             {"head": head, "base": base_sha, "stats": st, "delta": str(delta), "cases": cases, "failures": fails},
