@@ -13735,3 +13735,14 @@ neighbouring container and match it.**
   before trusting the rule.
 - Enforced in: `app/services/fundamentals/__init__.py::_gate_dps_groups`;
   `tests/test_3947_dps_group_gate.py::test_an_incomplete_group_copies_a_stored_value_only_onto_the_same_row`.
+
+### An ingestion run opened before a loop must be finished in a `finally` (#3947, 2026-10-22)
+
+- First seen in: #3947 build PR (d2a) review. The drain and discovery each open a `data_ingestion_runs` row before
+  their per-instrument loop and finish it after the loop. Their handlers catch only the expected failures (a fetch
+  error, `RefillFailed`, `psycopg.Error`), so any other exception left the row `running` forever.
+- Prevention: after `start_ingestion_run`, run the loop in `try` / `except BaseException` (record the error, re-raise)
+  / `finally` (finish the run, `failed` when an error escaped). Count work into the run's totals only after its
+  transaction commits.
+- Enforced in: `app/services/dps_inline_scale_scan.py::drain_renormalise_queue` and `::run_discovery`;
+  `tests/test_3947_dps_inline_scale_correction_db.py::test_an_unexpected_error_still_finishes_the_drains_ingestion_run`.

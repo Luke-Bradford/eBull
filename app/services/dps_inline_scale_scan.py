@@ -602,50 +602,61 @@ def run_discovery(
             conn, source="sec_edgar", endpoint="/api/xbrl/companyfacts", instrument_count=len(due)
         )
     upserted = 0
-    for index, (instrument_id, symbol, cik) in enumerate(due):
-        if clock() >= admit_until:
-            result.deferred = len(due) - index
-            break
-        report_progress(index, len(due))
-        try:
-            if cik is None:
-                raise LookupError("no_primary_sec_cik")
-            facts, _catalog = facts_provider.extract_facts_and_catalog(symbol, cik)
-        except Exception as exc:  # noqa: BLE001 — a fetch/parse failure is one counted attempt, bounded by MAX_ATTEMPTS
-            logger.info("dps inline scale discovery: instrument %s failed: %r", instrument_id, exc)
-            with conn.transaction():
-                conn.execute(
-                    """
-                    UPDATE sec_inline_scale_discovery
-                    SET attempts = attempts + 1,
-                        next_attempt_at = now() + make_interval(hours => (2 ^ (attempts + 1))::int),
-                        last_error = %s
-                    WHERE instrument_id = %s
-                    """,
-                    (repr(exc)[:2000], instrument_id),
-                )
-            result.failed += 1
-            continue
-        # A write error is not the instrument's attempt to burn: it is counted, the discovery row is left as it was
-        # (the instrument is due again next run), and the run carries on to the scan.
-        try:
-            with conn.transaction():
-                upserted += upsert_facts_for_instrument(
-                    conn, instrument_id=instrument_id, facts=facts, ingestion_run_id=run_id, complete_payload=True
-                )[0]
-        except psycopg.Error as exc:
-            logger.warning("dps inline scale discovery: instrument %s write failed: %r", instrument_id, exc)
-            result.write_failed += 1
-            continue
-        result.discovered += 1
-    failed = result.failed + result.write_failed
-    with conn.transaction():
-        finish_ingestion_run(
-            conn,
-            run_id=run_id,
-            status="success" if failed == 0 else ("partial" if result.discovered else "failed"),
-            rows_upserted=upserted,
-        )
+    error: str | None = None
+    try:
+        for index, (instrument_id, symbol, cik) in enumerate(due):
+            if clock() >= admit_until:
+                result.deferred = len(due) - index
+                break
+            report_progress(index, len(due))
+            try:
+                if cik is None:
+                    raise LookupError("no_primary_sec_cik")
+                facts, _catalog = facts_provider.extract_facts_and_catalog(symbol, cik)
+            except Exception as exc:  # noqa: BLE001 — a fetch/parse failure is one counted attempt, bounded by MAX_ATTEMPTS
+                logger.info("dps inline scale discovery: instrument %s failed: %r", instrument_id, exc)
+                with conn.transaction():
+                    conn.execute(
+                        """
+                        UPDATE sec_inline_scale_discovery
+                        SET attempts = attempts + 1,
+                            next_attempt_at = now() + make_interval(hours => (2 ^ (attempts + 1))::int),
+                            last_error = %s
+                        WHERE instrument_id = %s
+                        """,
+                        (repr(exc)[:2000], instrument_id),
+                    )
+                result.failed += 1
+                continue
+            # A write error is not the instrument's attempt to burn: it is counted, the discovery row is left as it was
+            # (the instrument is due again next run), and the run carries on to the scan.
+            try:
+                with conn.transaction():
+                    upserted += upsert_facts_for_instrument(
+                        conn, instrument_id=instrument_id, facts=facts, ingestion_run_id=run_id, complete_payload=True
+                    )[0]
+            except psycopg.Error as exc:
+                logger.warning("dps inline scale discovery: instrument %s write failed: %r", instrument_id, exc)
+                result.write_failed += 1
+                continue
+            result.discovered += 1
+    except BaseException as exc:
+        error = repr(exc)[:2000]
+        raise
+    finally:
+        failed = result.failed + result.write_failed
+        with conn.transaction():
+            finish_ingestion_run(
+                conn,
+                run_id=run_id,
+                status="failed"
+                if error
+                else "success"
+                if failed == 0
+                else ("partial" if result.discovered else "failed"),
+                rows_upserted=upserted,
+                error=error,
+            )
     return result
 
 
@@ -818,43 +829,55 @@ def drain_renormalise_queue(
         run_id = start_ingestion_run(
             conn, source="sec_edgar", endpoint="/api/xbrl/companyfacts", instrument_count=len(queued)
         )
-    for index, (instrument_id, revision) in enumerate(queued):
-        if admit_until is not None and clock() >= admit_until:
-            result.deferred = len(queued) - index
-            break
-        report_progress(index, len(queued))
-        try:
-            facts = fetch_companyfacts(conn, facts_provider, instrument_id)
-        except Exception as exc:  # noqa: BLE001 — a fetch/parse failure keeps the row; the next drain retries it
-            logger.info("dps inline scale drain: instrument %s fetch failed: %r", instrument_id, exc)
-            _count_drain_failure(conn, instrument_id)
-            result.failed += 1
-            result.fetch_failed += 1
-            continue
-        try:
-            with conn.transaction():
-                upserted += refill_and_normalise(
-                    conn, instrument_id, facts, ingestion_run_id=run_id, dps_inline_scale=True
-                )
-                marked = conn.execute(
-                    "UPDATE sec_inline_scale_renormalise SET drained_revision = revision"
-                    " WHERE instrument_id = %s AND revision = %s",
-                    (instrument_id, revision),
-                ).rowcount
-        except (RefillFailed, psycopg.Error) as exc:
-            logger.warning("dps inline scale drain: instrument %s refill failed: %r", instrument_id, exc)
-            _count_drain_failure(conn, instrument_id)
-            result.failed += 1
-            continue
-        result.normalised += 1
-        result.requeued += int(marked == 0)
-    with conn.transaction():
-        finish_ingestion_run(
-            conn,
-            run_id=run_id,
-            status="success" if result.failed == 0 else ("partial" if result.normalised else "failed"),
-            rows_upserted=upserted,
-        )
+    error: str | None = None
+    try:
+        for index, (instrument_id, revision) in enumerate(queued):
+            if admit_until is not None and clock() >= admit_until:
+                result.deferred = len(queued) - index
+                break
+            report_progress(index, len(queued))
+            try:
+                facts = fetch_companyfacts(conn, facts_provider, instrument_id)
+            except Exception as exc:  # noqa: BLE001 — a fetch/parse failure keeps the row; the next drain retries it
+                logger.info("dps inline scale drain: instrument %s fetch failed: %r", instrument_id, exc)
+                _count_drain_failure(conn, instrument_id)
+                result.failed += 1
+                result.fetch_failed += 1
+                continue
+            try:
+                with conn.transaction():
+                    written = refill_and_normalise(
+                        conn, instrument_id, facts, ingestion_run_id=run_id, dps_inline_scale=True
+                    )
+                    marked = conn.execute(
+                        "UPDATE sec_inline_scale_renormalise SET drained_revision = revision"
+                        " WHERE instrument_id = %s AND revision = %s",
+                        (instrument_id, revision),
+                    ).rowcount
+            except (RefillFailed, psycopg.Error) as exc:
+                logger.warning("dps inline scale drain: instrument %s refill failed: %r", instrument_id, exc)
+                _count_drain_failure(conn, instrument_id)
+                result.failed += 1
+                continue
+            upserted += written
+            result.normalised += 1
+            result.requeued += int(marked == 0)
+    except BaseException as exc:
+        error = repr(exc)[:2000]
+        raise
+    finally:
+        with conn.transaction():
+            finish_ingestion_run(
+                conn,
+                run_id=run_id,
+                status="failed"
+                if error
+                else "success"
+                if result.failed == 0
+                else ("partial" if result.normalised else "failed"),
+                rows_upserted=upserted,
+                error=error,
+            )
     return result
 
 

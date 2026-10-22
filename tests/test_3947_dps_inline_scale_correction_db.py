@@ -376,3 +376,26 @@ def test_the_sweep_waits_for_a_refill_in_progress(ebull_test_conn: Conn) -> None
     assert conn.execute(
         "SELECT count(*) FROM financial_facts_raw WHERE accession_number = %s", (OLD_ACC,)
     ).fetchone() == (0,)
+
+
+def test_an_unexpected_error_still_finishes_the_drains_ingestion_run(
+    ebull_test_conn: Conn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = ebull_test_conn
+    _seed(conn)
+    scan_run(conn, _Provider(_doc(3)))
+    monkeypatch.setattr(settings, "dps_inline_scale_enabled", True)
+
+    def explode(*_: Any, **__: Any) -> NormalizationSummary:
+        raise ValueError("unexpected")
+
+    monkeypatch.setattr(fundamentals, "normalize_financial_periods", explode)
+    with pytest.raises(ValueError, match="unexpected"):
+        drain_renormalise_queue(conn, facts_provider=_Facts(), admit_until=None)
+    status = conn.execute(
+        "SELECT status, error FROM data_ingestion_runs WHERE endpoint = '/api/xbrl/companyfacts'"
+        " ORDER BY ingestion_run_id DESC LIMIT 1"
+    ).fetchone()
+    conn.rollback()
+    assert status is not None and status[0] == "failed" and "unexpected" in status[1]
+    assert [i for i, _ in _queue(conn)] == [1]  # the refill rolled back; the row stays queued
