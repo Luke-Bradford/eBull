@@ -303,9 +303,9 @@ def test_the_ab_coverage_seed_is_undone_by_the_snapshot_rollback(ebull_test_conn
         ).fetchone()
 
     conn.execute("SELECT 1")  # the A/B's snapshot: seed_population's transaction is a savepoint inside it
-    coverage = _coverage(conn)
+    coverage, gaps = _coverage(conn, "stage2", [1])
     # An unseeded table does not read as full coverage: the seed ran inside the snapshot, and wrote all three tables.
-    assert coverage["incomplete"] and coverage["work_state"]["raw"]["pending"] == 1
+    assert gaps and coverage["work_state"]["raw"]["pending"] == 1
     assert counts() == (1, 1, 1)
     conn.rollback()
     assert counts() == (0, 0, 0)
