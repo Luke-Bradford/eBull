@@ -4854,6 +4854,10 @@ def _o_cover_blocks(
     if len(observed) != 1 or observed[0][2] != t or observed[0][1] is None:
         return None
     obs_name = observed[0][1]
+    # Byte for byte, not normalised (spec § Rule, condition 4): the name only locates the block the
+    # observation was copied from, on the accession it was copied from, and identifies no entity. On
+    # dev (2026-10-22) each of the 37,977 current 13G observations' names equals exactly one stored
+    # block's on its accession and instrument (spec § Source rule). A drifted name refuses the fold.
     located = [b for b in blocks if b.reporter_name == obs_name]
     if len(located) != 1 or not located[0].reports(t):
         return None
@@ -5102,7 +5106,8 @@ def _fold_13f_duplicates(
 
     # Tier (O). Its uniqueness count is its own; both earlier matched sets' twins are reserved.
     reserved |= {k for twins, *_ in g13_matched.values() for k in twins}
-    o_matched: dict[str, tuple[list[str], _CoverRow, str, str, list[str]]] = {}
+    # Candidate → (twins, C's accession, C's filed date, filer of record, observation name, M block names).
+    o_matched: dict[str, tuple[list[str], str, str, str, str, list[str]]] = {}
     for m, (accession, filer) in non_uniform.items():
         t, blocks = totals[m], g13_blocks[accession]
         located = _o_cover_blocks(blocks, filers_13g.get(accession, ()), t, _names(m, frozenset({"13f"})))
@@ -5116,21 +5121,19 @@ def _fold_13f_duplicates(
             and all(h.winning_source == "13g" and h.winning_accession == accession for h in rows_by_identity[k])
         )
         if twins:
-            o_matched[m] = (twins, blocks[0], filer, obs_name, m_block_names)
+            # ``filed_at`` is the accession's, so any block of C gives the same date.
+            o_matched[m] = (twins, accession, _filed(blocks[0]), filer, obs_name, m_block_names)
     o_count: dict[str, int] = {}
     for twins, *_ in o_matched.values():
         for k in twins:
             o_count[k] = o_count.get(k, 0) + 1
-    for m, (twins, cover, filer, obs_name, m_block_names) in o_matched.items():
+    for m, (twins, accession, filed, filer, obs_name, m_block_names) in o_matched.items():
         if len(twins) != 1 or o_count[twins[0]] != 1 or twins[0] in reserved:
             continue
         t = totals[m]
         # The observation-block spec's single wording; ``same`` marks the observation's block as one
         # of the blocks named as M.
-        on_c = (
-            f"on joint Schedule 13G {cover.accession_number} (filed {_filed(cover)}, filer of record {filer}) "
-            f"the block of {obs_name}"
-        )
+        on_c = f"on joint Schedule 13G {accession} (filed {filed}, filer of record {filer}) the block of {obs_name}"
         named = "; ".join(m_block_names)
         same = " (one of them is that block)" if obs_name in m_block_names else ""
         _fold(

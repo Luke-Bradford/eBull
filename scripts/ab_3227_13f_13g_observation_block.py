@@ -65,7 +65,11 @@ _PANEL = ("AAPL", "GME", "MSFT", "JPM", "HD")
 
 
 def oracle_o(o: dict[str, Any], obs: list[tuple[Any, ...]], why: Counter[str]) -> dict[str, tuple[str, dict[str, Any]]]:
-    """Tier (O), written independently of ``_fold_13f_duplicates``, over the 13G-covers oracle's output ``o``."""
+    """Tier (O), written independently of ``_fold_13f_duplicates``, over the 13G-covers oracle's output ``o``.
+
+    ⚠ Tiers 1 and 2 are not copied here: ``o["matched_13d"]``, ``o["found"]`` and ``o["selected"]`` come from
+    ``scripts.ab_3227_13f_13g_covers.oracle``, so an edit to that oracle changes this A/B's reservations and C
+    selection too. Its own gate (the oracle's (U) duplicates equal the base's (U) corrections) catches a drift."""
     rows, tot, blocks, filer = o["rows"], o["tot"], o["blocks"], o["filer"]
     on: dict[str, list[tuple[Any, ...]]] = defaultdict(list)
     for r in obs:
