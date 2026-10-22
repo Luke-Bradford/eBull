@@ -13710,3 +13710,15 @@ neighbouring container and match it.**
   none.
 - Enforced in: `docs/specs/fundamentals/2026-10-21-3947-dps-inline-scale.md` (Amendment 1);
   `scripts/measure_3947_unreachable.py`.
+
+### A rolled-back A/B may call a writer only inside its snapshot, and a test must pin the rollback (#3947, 2026-10-22)
+
+- First seen in: #3947 build PR (c). The A/B's coverage step began calling `seed_population`, which writes the
+  population, discovery and queue tables, so its "writes nothing" claim now rested on the call sitting inside the
+  script's one transaction. The review bot could not tell from the diff whether it did.
+- Prevention: a read-only A/B that calls a function which writes must call it only after its snapshot is open
+  (`SELECT 1` first, so the callee's `conn.transaction()` is a savepoint and not a commit) and inside the
+  `finally: conn.rollback()` that closes it. Add a DB test that runs the step inside an open transaction, rolls back,
+  and asserts the written tables are unchanged.
+- Enforced in: `scripts/ab_3947_dps_inline_scale.py::_coverage`;
+  `tests/test_3947_dps_population_db.py::test_the_ab_coverage_seed_is_undone_by_the_snapshot_rollback`.

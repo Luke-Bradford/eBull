@@ -270,3 +270,42 @@ def test_order_is_raw_then_candidate_history_then_history(ebull_test_conn: Conn)
     assert state.classes["raw"]["pending"] == 2
     assert state.classes["history"]["pending"] == 2 and state.classes["history"]["done"] == 1
     assert state.classes["history_candidate"]["pending"] == 1
+
+
+def test_the_ab_coverage_seed_is_undone_by_the_snapshot_rollback(ebull_test_conn: Conn) -> None:
+    from scripts.ab_3947_dps_inline_scale import _coverage
+
+    conn = ebull_test_conn
+    _instrument(conn, 1)
+    conn.execute(
+        "INSERT INTO financial_facts_raw (instrument_id, concept, unit, period_start, period_end, val,"
+        " accession_number, form_type, filed_date)"
+        " VALUES (1, %s, 'USD/shares', '2025-07-01', '2025-09-30', 390, %s, '10-Q', '2025-11-01')",
+        (scan.CONCEPT, ACC),
+    )
+    # An already-scanned positive-scale accession, so the seed's new membership also writes the queue.
+    conn.execute(
+        "INSERT INTO sec_inline_scale_scan (accession_number, outcome, documents, parser_version, scanned_at,"
+        " attempt_version) VALUES (%s, 'inline', 1, 'an-earlier-version', now(), 'an-earlier-version')",
+        (ACC,),
+    )
+    conn.execute(
+        "INSERT INTO sec_inline_dps_occurrence (accession_number, document, element_ordinal, display_text, unresolved,"
+        " scale) VALUES (%s, 'a.htm', 0, '0.39', 'context_ref', 3)",
+        (ACC,),
+    )
+    conn.commit()
+
+    def counts() -> tuple[Any, ...] | None:
+        return conn.execute(
+            "SELECT (SELECT count(*) FROM sec_inline_scale_population),"
+            " (SELECT count(*) FROM sec_inline_scale_discovery), (SELECT count(*) FROM sec_inline_scale_renormalise)"
+        ).fetchone()
+
+    conn.execute("SELECT 1")  # the A/B's snapshot: seed_population's transaction is a savepoint inside it
+    coverage = _coverage(conn)
+    # An unseeded table does not read as full coverage: the seed ran inside the snapshot, and wrote all three tables.
+    assert coverage["incomplete"] and coverage["work_state"]["raw"]["pending"] == 1
+    assert counts() == (1, 1, 1)
+    conn.rollback()
+    assert counts() == (0, 0, 0)

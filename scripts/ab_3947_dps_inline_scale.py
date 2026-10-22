@@ -109,7 +109,10 @@ def _inputs(
 
 
 def _coverage(conn: psycopg.Connection[Any]) -> dict[str, Any]:
-    # Recompute the population inside the snapshot (A5), so an unseeded table cannot read as full coverage.
+    # Recompute the population inside the snapshot (A5), so an unseeded table cannot read as full coverage. The seed
+    # writes (population, discovery, queue rows), but only inside main()'s one REPEATABLE READ transaction, opened by
+    # `SELECT 1` so seed_population's `conn.transaction()` is a savepoint, and undone by its `finally: conn.rollback()`.
+    # The A/B persists nothing; tests/test_3947_dps_population_db.py pins that the seed is a savepoint here.
     scan.seed_population(conn)
     generation = conn.execute(
         scan._POPULATION_SQL + "SELECT COALESCE(s.outcome, 'none'), count(*) FROM pop p"
