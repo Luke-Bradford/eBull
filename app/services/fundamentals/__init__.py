@@ -2618,7 +2618,7 @@ def derive_gated_dps_periods(
         decisions = _dps_fact_inline_scale_decisions(fact_rows, scans, ciks, occurrences)
     dps_values = {f: d.value for f, d in decisions.items() if d.action == "restore"}
     off = _derive_periods_from_facts(fact_rows, reported_currency)
-    on = _derive_periods_from_facts(fact_rows, reported_currency, dps_values) if dps_values else off
+    on = _derive_periods_from_facts(fact_rows, reported_currency, dps_values)
     stored = {
         (r[0], r[1], r[2]): r[3]
         for r in conn.execute(
@@ -2627,7 +2627,6 @@ def derive_gated_dps_periods(
             (instrument_id,),
         ).fetchall()
     }
-    # ``on is off`` when nothing is restored: the gate then compares each row with itself, which is still right.
     outcomes = _gate_dps_groups(off, on, decisions, stored)
     return off, outcomes
 
