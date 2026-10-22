@@ -64,12 +64,12 @@ JOB_SEC_FSNDS_NOTES_INGEST: Final[str] = "sec_fsnds_notes_ingest"
 _REFRESH_BATCH_CHUNK_SIZE: Final[int] = 200
 
 
-def _bulk_dir() -> Path:
+def bulk_dir() -> Path:
     return resolve_data_dir() / "sec" / "bulk"
 
 
 def _archive_path(name: str) -> Path:
-    return _bulk_dir() / name
+    return bulk_dir() / name
 
 
 def _list_archives_matching(prefix: str) -> list[Path]:
@@ -86,7 +86,7 @@ def _list_archives_matching(prefix: str) -> list[Path]:
     ``BadZipFile`` ERROR per sidecar per run (caught per-archive, so pure noise +
     misleading "failed" lines). All callers only ever want the zips.
     """
-    base = _bulk_dir()
+    base = bulk_dir()
     if not base.exists():
         return []
     return sorted(p for p in base.iterdir() if p.is_file() and p.name.startswith(prefix) and p.name.endswith(".zip"))
@@ -187,7 +187,7 @@ def sec_submissions_ingest_job() -> None:
     # legacy "ingest if archive exists" path.
     if run_id is not None:
         with psycopg.connect(settings.database_url) as conn:
-            assert_c1a_preconditions(conn, bootstrap_run_id=run_id, bulk_dir=_bulk_dir())
+            assert_c1a_preconditions(conn, bootstrap_run_id=run_id, bulk_dir=bulk_dir())
         if not archive.exists():
             from app.services.sec_bulk_download import BootstrapPartialDownloadError
 
@@ -258,7 +258,7 @@ def sec_companyfacts_ingest_job() -> None:
 
     if run_id is not None:
         with psycopg.connect(settings.database_url) as conn:
-            assert_c2_preconditions(conn, bootstrap_run_id=run_id, bulk_dir=_bulk_dir())
+            assert_c2_preconditions(conn, bootstrap_run_id=run_id, bulk_dir=bulk_dir())
         if not archive.exists():
             from app.services.sec_bulk_download import BootstrapPartialDownloadError
 
@@ -335,7 +335,7 @@ def sec_13f_ingest_from_dataset_job() -> None:
             assert_c3_preconditions(
                 conn,
                 bootstrap_run_id=run_id,
-                bulk_dir=_bulk_dir(),
+                bulk_dir=bulk_dir(),
                 expected_archive_names=required,
             )
         # Restrict the loop to archives recorded in THIS run's manifest.
@@ -343,7 +343,7 @@ def sec_13f_ingest_from_dataset_job() -> None:
         # under the current bootstrap_run_id, so this is the provenance gate:
         # it admits a successfully-downloaded optional window while excluding
         # a stale same-name zip left on disk from a prior run (Codex ckpt-2).
-        manifest = read_run_manifest(_bulk_dir())
+        manifest = read_run_manifest(bulk_dir())
         manifest_names = {entry["name"] for entry in manifest.get("archives", [])} if manifest else set()
         archives = [a for a in archives if a.name in manifest_names]
         # Every REQUIRED file MUST be on disk after manifest provenance
@@ -551,7 +551,7 @@ def sec_insider_ingest_from_dataset_job() -> None:
             assert_c4_preconditions(
                 conn,
                 bootstrap_run_id=run_id,
-                bulk_dir=_bulk_dir(),
+                bulk_dir=bulk_dir(),
                 expected_archive_names=expected,
             )
         archives = [a for a in archives if a.name in set(expected)]
@@ -720,7 +720,7 @@ def sec_nport_ingest_from_dataset_job() -> None:
             assert_c5_preconditions(
                 conn,
                 bootstrap_run_id=run_id,
-                bulk_dir=_bulk_dir(),
+                bulk_dir=bulk_dir(),
                 expected_archive_names=expected,
             )
         archives = [a for a in archives if a.name in set(expected)]
@@ -917,7 +917,7 @@ def sec_fsds_class_shares_ingest_job() -> None:
 
     if run_id is not None:
         with psycopg.connect(settings.database_url) as conn:
-            assert_not_fallback_mode(_bulk_dir(), bootstrap_run_id=run_id)
+            assert_not_fallback_mode(bulk_dir(), bootstrap_run_id=run_id)
         # Manifest provenance gate (Codex ckpt-2): the per-run manifest lists only
         # archives that landed (or were ETag-reused) under THIS bootstrap_run_id,
         # so restricting to manifest names admits a freshly-downloaded optional
@@ -927,7 +927,7 @@ def sec_fsds_class_shares_ingest_job() -> None:
         # names happen to match (Codex ckpt-2b): a mismatched manifest is treated as
         # absent so the no-archives guard below raises rather than ingesting stale
         # zips. Mirrors ``assert_archives_in_manifest`` / the 13F ingester.
-        manifest = read_run_manifest(_bulk_dir())
+        manifest = read_run_manifest(bulk_dir())
         if manifest is not None and int(manifest.get("bootstrap_run_id", -1)) == run_id:
             manifest_names = {entry["name"] for entry in manifest.get("archives", [])}
         else:
@@ -1021,8 +1021,8 @@ def sec_fsds_dimensional_ingest_job() -> None:
 
     if run_id is not None:
         with psycopg.connect(settings.database_url) as conn:
-            assert_not_fallback_mode(_bulk_dir(), bootstrap_run_id=run_id)
-        manifest = read_run_manifest(_bulk_dir())
+            assert_not_fallback_mode(bulk_dir(), bootstrap_run_id=run_id)
+        manifest = read_run_manifest(bulk_dir())
         if manifest is not None and int(manifest.get("bootstrap_run_id", -1)) == run_id:
             manifest_names = {entry["name"] for entry in manifest.get("archives", [])}
         else:

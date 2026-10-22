@@ -25,7 +25,7 @@ import psycopg
 
 from app.config import settings
 from app.services.sec_13f_dataset_ingest import ingest_13f_dataset_archive
-from app.services.sec_bulk_orchestrator_jobs import _bulk_dir
+from app.services.sec_bulk_orchestrator_jobs import bulk_dir
 
 DEFAULT_ARCHIVES = (
     "form13f_01sep2025-30nov2025.zip",
@@ -53,7 +53,7 @@ def main(argv: list[str] | None = None) -> int:
         help="directory holding DEFAULT_ARCHIVES when no archive is given (default: the bulk job's own cache)",
     )
     args = parser.parse_args(argv)
-    archive_dir: Path = args.archive_dir or _bulk_dir()
+    archive_dir: Path = args.archive_dir or bulk_dir()
     archives: list[Path] = args.archives or [archive_dir / name for name in DEFAULT_ARCHIVES]
 
     for archive in archives:

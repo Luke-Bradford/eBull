@@ -81,7 +81,7 @@ import psycopg
 
 from app.config import settings
 from app.services.fsds_class_shares import iter_fsds_num, parse_class_member, read_fsds_sub
-from app.services.sec_bulk_orchestrator_jobs import _bulk_dir
+from app.services.sec_bulk_orchestrator_jobs import bulk_dir
 
 COVER_CONCEPT = "EntityCommonStockSharesOutstanding"
 CLASS_TAG = "CommonStockSharesOutstanding"
@@ -255,9 +255,9 @@ def main() -> None:
     parser.add_argument("--max-days", type=int, default=400, help="reject a comparison this far apart")
     args = parser.parse_args()
 
-    zips = sorted(_bulk_dir().glob("fsds_*.zip"))
+    zips = sorted(bulk_dir().glob("fsds_*.zip"))
     if not zips:
-        raise SystemExit(f"no cached FSDS archives under {_bulk_dir()}")
+        raise SystemExit(f"no cached FSDS archives under {bulk_dir()}")
     print(f"FSDS archives: {[z.name for z in zips]}")
 
     groups = _read_class_groups(zips)

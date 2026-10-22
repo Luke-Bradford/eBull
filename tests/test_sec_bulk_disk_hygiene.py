@@ -99,7 +99,7 @@ class TestSubmissionsJobPreservesArchive:
         # preconditions). Without this mock _current_running_bootstrap_run_id
         # tries to open a real DB connection and raises when PG is down.
         with (
-            patch.object(jobs, "_bulk_dir", return_value=archive.parent),
+            patch.object(jobs, "bulk_dir", return_value=archive.parent),
             patch.object(jobs, "_current_running_bootstrap_run_id", return_value=None),
             patch.object(jobs, "_run_with_conn") as run_with_conn,
         ):
@@ -163,7 +163,7 @@ class TestListArchivesExcludesSidecars:
         (base / "form13f_2024q4.zip").write_bytes(b"PK\x03\x04")
         (base / "nport_2025q1.zip").write_bytes(b"PK\x03\x04")  # different prefix
 
-        with patch.object(jobs, "_bulk_dir", return_value=base):
+        with patch.object(jobs, "bulk_dir", return_value=base):
             matched = jobs._list_archives_matching("form13f_")
 
         names = [p.name for p in matched]

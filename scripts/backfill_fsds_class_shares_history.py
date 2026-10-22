@@ -54,7 +54,7 @@ logger = logging.getLogger(__name__)
 
 
 def _bulk_dir() -> Path:
-    # Mirrors app.services.sec_bulk_orchestrator_jobs._bulk_dir without importing
+    # Mirrors app.services.sec_bulk_orchestrator_jobs.bulk_dir without importing
     # that module (it pulls in the insider-ingest import cycle).
     return resolve_data_dir() / "sec" / "bulk"
 
