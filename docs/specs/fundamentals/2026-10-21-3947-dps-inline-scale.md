@@ -210,8 +210,8 @@ Every occurrence is stored, scale 0 included, so each decision can be traced to 
 
 *Build note (PR b).* Draining admits no instrument at or after half of the scan's 45-minute start cap, measured
 from the run's start, so the scan keeps the other half. The uncapped enablement run (acceptance 5.2) is
-`drain_renormalise_queue(conn, admit_until=None)` in `app/services/dps_inline_scale_scan.py`, on an autocommit
-connection. A failed normalisation is read from `NormalizationSummary.instruments_failed`, which the normaliser now
+`drain_renormalise_queue(conn, admit_until=None)` in `app/services/dps_inline_scale_scan.py`, with the flag on and
+on a connection with no open transaction; it refuses otherwise. A failed normalisation is read from `NormalizationSummary.instruments_failed`, which the normaliser now
 counts, because it logs a per-instrument failure and does not re-raise it. Rollback step 4 (`--verify-stored off`)
 compares against a fresh normalisation, so it is meaningful only after step 3: stored rows drift as ingestion and
 code move, while two normalisations in one snapshot agree exactly.

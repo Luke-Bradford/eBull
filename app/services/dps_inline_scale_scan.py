@@ -331,11 +331,16 @@ def run_dps_inline_scale_scan(
     drain: bool = False,
 ) -> ScanResult:
     """One run: the drain (when ``drain``), then every eligible accession in order until :data:`START_CAP` of starts,
-    then the work-state report."""
+    then the work-state report.
+
+    ``drain`` is the caller's one read of ``EBULL_DPS_INLINE_SCALE_ENABLED`` (the job passes it), handed to the drain
+    as ``enabled`` so a run never reads the flag twice."""
     result = ScanResult()
     deadline = clock() + start_cap.total_seconds()
     if drain:
-        result.drain = drain_renormalise_queue(conn, admit_until=clock() + start_cap.total_seconds() / 2, clock=clock)
+        result.drain = drain_renormalise_queue(
+            conn, admit_until=clock() + start_cap.total_seconds() / 2, clock=clock, enabled=True
+        )
     targets = select_targets(conn, today=today or datetime.now(UTC).date())
     for index, target in enumerate(targets):
         if clock() >= deadline:
@@ -372,6 +377,7 @@ def drain_renormalise_queue(
     *,
     admit_until: float | None,
     clock: Callable[[], float] = time.monotonic,
+    enabled: bool | None = None,
 ) -> DrainResult:
     """Normalise the queued instruments in ``revision`` order; none is started at or after ``admit_until``.
 
@@ -379,13 +385,16 @@ def drain_renormalise_queue(
     conditional on the revision read: a scan that re-queued the instrument meanwhile took a new revision, and that
     row stays for the next drain.
 
-    Refuses with the flag off (draining would re-normalise without the decisions and then discard the queue), and on
-    a connection inside a transaction (each instrument must commit on its own, so its lock is released at once).
+    Refuses when ``enabled`` is false (``None`` reads ``EBULL_DPS_INLINE_SCALE_ENABLED`` once): with the flag off,
+    every other normaliser caller reads stored values, so a drain would correct instruments the next normalisation
+    reverts. Refuses on a connection with an open transaction: each instrument's normalisation and queue delete must
+    commit on their own, so its advisory lock is released at once. An autocommit connection, or an idle one without
+    autocommit, both qualify.
     """
     from app.config import settings
     from app.services.fundamentals import normalize_financial_periods  # cycle: fundamentals imports this module
 
-    if not settings.dps_inline_scale_enabled:
+    if not (settings.dps_inline_scale_enabled if enabled is None else enabled):
         raise RuntimeError("EBULL_DPS_INLINE_SCALE_ENABLED is off: draining would discard the queue uncorrected")
     if conn.info.transaction_status != psycopg.pq.TransactionStatus.IDLE:
         raise RuntimeError("drain_renormalise_queue needs a connection outside a transaction")

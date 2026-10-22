@@ -213,6 +213,8 @@ def test_the_drain_refuses_with_the_flag_off_or_inside_a_transaction(
     run_dps_inline_scale_scan(conn, _Provider(_doc(3)), today=TODAY)
     with pytest.raises(RuntimeError, match="off"):
         drain_renormalise_queue(conn, admit_until=None)
+    with pytest.raises(RuntimeError, match="off"):
+        drain_renormalise_queue(conn, admit_until=None, enabled=False)
     monkeypatch.setattr(settings, "dps_inline_scale_enabled", True)
     conn.execute("SELECT 1")  # an open transaction
     with pytest.raises(RuntimeError, match="outside a transaction"):
