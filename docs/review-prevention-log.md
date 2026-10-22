@@ -13757,3 +13757,14 @@ neighbouring container and match it.**
   the first inside a savepoint that is rolled back (`raise psycopg.Rollback(tx)`), then the second.
 - Enforced in: `scripts/ab_3947_dps_inline_scale.py::_check_instrument`;
   `tests/test_3947_ab_snapshot_db.py::test_the_on_arm_reads_the_stored_rows_not_the_off_arms_output`.
+
+### A rule keyed on a 13D/G reporting-person CIK is blind to every Schedule 13G (#3227, 2026-10-22)
+
+- First seen in: #3227 class-B research. The 13D arm's cover lookup (`reporter_cik` = M) never matched a 13G, because
+  `blockholder_filings.reporter_cik` is NULL on all 90,257 13G/13G-A rows. The schema's optional `reportingCik` appears
+  in none of the 41,580 stored public 13G bodies. Spec checkpoint 1, round 1, also refused stored NULLs as the source
+  rule: the XSD and the Filer Manual must be cited separately from the observed corpus.
+- Prevention: before keying a 13D/G rule on a person's CIK, check the form. On a 13G, only the filer of record
+  (`<filerCredentials><cik>`) is a CIK, and every other person is a name. Cite the schema
+  (`eis_Schedule13G_Filer.xsd`), the Filer Manual (Vol. II §8.1.12) and the measured corpus as three separate facts.
+- Enforced in: `docs/specs/ownership/2026-10-22-3227-13f-13g-covers.md` § Source rule (the build adds tests).
