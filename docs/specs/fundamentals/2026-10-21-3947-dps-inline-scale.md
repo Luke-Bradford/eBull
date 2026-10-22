@@ -1,6 +1,8 @@
 # #3947: dividend-per-share facts tagged with an inline `scale`
 
-**Ticket:** #3947 (refs #3943, #3903, #3915). **Status:** spec v4. Codex checkpoint 1 ran three rounds, the cap:
+**Ticket:** #3947 (refs #3943, #3903, #3915). **Status:** spec v4, plus Amendment 1 (durable rows beyond the swept
+raw layer, and one regime per difference-derived cell), which overrides the sections it names. Codex checkpoint 1
+on v4 ran three rounds, the cap:
 - round 1 raised 45 findings, applied in v2;
 - round 2 accepted the declared-policy framing and raised 31 implementation findings, applied in v3;
 - round 3 kept the framing accepted and raised 31 findings, applied in v4 without a fourth round, as #3910, #3915,
@@ -360,6 +362,347 @@ flag, reads every figure from that one snapshot, and rolls back.
 - Inline scale on other per-share concepts. #3344 covers part of EPS: it catches the "in millions" class when
   earnings, shares and cover shares are present, and deliberately not the "in thousands" class.
 
+## Amendment 1: durable rows beyond the swept raw layer
+
+PR (b)'s A/B on EFC and WHR (#3947, 2026-10-22) listed stored `dps_declared` cells that no normalisation rewrote:
+WHR Q2 and Q3 2023 at 1,750,000 each, and EFC's derived Q4 2022 and 2023 at 1,798.65 and 1,349.10. This amendment
+explains why. It changes the population, the drain, how decisions reach derived cells, the A/B, enablement and
+rollback. Figures marked [An] come from `PYTHONPATH=. uv run python -m scripts.measure_3947_unreachable` (dev DB and
+EDGAR, 2026-10-22). Each subsection names the v4 text it overrides. v4 text it does not name stands.
+
+### Finding
+
+- **Raw is a retention window; canonical rows are durable history.**
+  - `financial_facts_retention_sweep` runs daily at 02:45 UTC (`app/workers/scheduler.py:2016`). It keeps the latest
+    3 annual-family (10-K, 10-K/A) and 8 quarterly-family (10-Q, 10-Q/A) accessions per instrument in
+    `financial_facts_raw` (`app/services/financial_facts_retention.py:44-49`).
+  - Canonical rows whose facts aged out are kept as history, not deleted
+    (`app/services/fundamentals/__init__.py:2161-2170`).
+- **Every companyfacts refresh refills raw with full history first.**
+  - `daily_financial_facts` fetches the CIK's companyfacts with a 20-year cutoff, upserts every fact, then normalises
+    the touched instruments (`app/workers/scheduler.py:5246-5300`). `run_force_refresh` does the same for a chosen
+    set (`app/services/fundamentals/force_refresh.py:135-170`).
+  - On 2026-10-22, NFLX was fetched at 02:32 UTC and held 18 10-K accessions back to 2010. After the 02:45 sweep, no
+    instrument held more than 3 [A1].
+  - The FY guard spec already names re-ingesting and then re-deriving as the way to correct an aged-out wrong-value
+    row (`docs/specs/fundamentals/2026-06-29-fy-flow-duration-guard.md:133-138`).
+- **v4 has three gaps.**
+  - **G1, population.** The scan reads its population from raw at 00:30 UTC, when raw is swept. An accession that
+    aged out before the scan began is never scanned.
+  - **G2, drain.** The drain normalises over swept raw, and that cannot rewrite a cell whose facts are gone.
+  - **G3, mixed derivations.** Under v4, a cell derived by difference can mix a restored input with a kept raw input
+    that was never verified. Two derivations do this:
+    - Q4 = FY − Q1 − Q2 − Q3 (`app/services/fundamentals/__init__.py:1824-1839`);
+    - the YTD fill, which resolves a discrete quarter from the YTD pool (`_resolve_flow_value`, `:964`, applied at
+      `:1741-1753`).
+
+    A restored FY of 1.56 minus a kept quarter of 390 is negative. Nothing in v4 or the merged PR (b) prevents it.
+    The flag is off, so it has had no live effect.
+- **Size.** 4,625 stored `dps_declared` cells in 169 instruments have no `financial_periods_raw` row today [A2].
+  That depends on when each instrument was last normalised, so it does not size the work. The population below does.
+
+### A1. A durable, insert-only population (overrides "The scan → Population" and the ordering in "Order and budget")
+
+```sql
+CREATE TABLE sec_inline_scale_population (
+    accession_number TEXT   NOT NULL,
+    instrument_id    BIGINT NOT NULL REFERENCES instruments,
+    filed_date       DATE,               -- NULL: undated
+    PRIMARY KEY (accession_number, instrument_id)
+);
+
+CREATE TABLE sec_inline_scale_discovery (
+    instrument_id    BIGINT PRIMARY KEY REFERENCES instruments,
+    discovered_at    TIMESTAMPTZ,        -- set by any companyfacts upsert for the instrument after the migration
+    attempts         INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at  TIMESTAMPTZ,
+    last_error       TEXT
+);
+```
+
+- **What writes rows.** Population rows are only ever inserted, and a NULL `filed_date` is filled when a date
+  becomes known. Rows are written by:
+  1. **Every write of companyfacts facts into raw.** In the same transaction, `upsert_facts_for_instrument`
+     (`app/services/fundamentals/__init__.py:407`) does two things:
+     - records the instrument's accessions holding the concept, with the facts' filed date;
+     - sets the instrument's `discovered_at`, but only when the caller passes `complete_payload=True`.
+
+     A caller passes `complete_payload=True` only after fetching and parsing the CIK's whole companyfacts payload
+     successfully. Any other write records population rows but never marks discovery.
+     - **New membership can enqueue.** When a population insert adds an (accession, instrument) pair whose
+       accession already has an active generation, the A4 enqueue predicate is evaluated for that instrument in the
+       same transaction. An already-scanned accession can then still reach a newly attached instrument.
+
+     The build confirms by grep that the function is the only writer of these facts. The callers known today are
+     the daily refresh (`:3420`), the per-instrument refresh (`:630`) and the bulk ingest
+     (`app/services/sec_companyfacts_ingest.py:281`). So whenever raw holds full history, the population captures
+     it.
+  2. **The migration and each scan run, from durable records.** These rows come from the accessions holding the
+     concept in raw and from the accessions named in the `source_ref` of `sec_edgar` rows with `dps_declared` not
+     NULL. Their date resolves from raw (any concept), else `sec_filing_manifest.filed_at`, else the earliest
+     `filing_events.filing_date`. A population instrument with no discovery row gets one.
+  3. **Discovery.** Each scan run fetches companyfacts for discovery rows with no `discovered_at` and upserts it
+     through (1). Raw is then trimmed by the next sweep, as after every refresh.
+     - **Retries.** A failure follows v4's backoff, `attempts` and `next_attempt_at`. At 5 attempts the instrument's
+       discovery is exhausted, and it is reported.
+     - **Order.** Discovery runs after draining and before scanning.
+- **Why both (2) and (3).** The `source_ref` seed alone is incomplete.
+  - Of four issuers checked against SEC companyconcept [A4] (illustrative, not a completeness test), SCI and EFC each
+    have 2 concept accessions absent from the seed.
+  - A Q4 row copies only the FY row's `source_ref` (`:1816`), and YTD-pool facts are pooled separately (`:1738`).
+    So `source_ref` does not trace every derivation input.
+  - Discovery captures what companyfacts serves, whatever the provenance.
+- **Membership is never removed** except by rollback step 5. So a parser-version bump rescans aged-out accessions
+  too.
+- **The population** is the table's rows dated on or after 2019-06-15. An accession's instruments are its rows.
+- **Eligibility is unchanged.** v4's eligibility predicate on `parser_version`, `attempt_version`, `attempts` and
+  `next_attempt_at` applies to every population accession, and so do its version and backoff rules.
+- **Undated rows are not scanned.** An accession with no active generation then decides `untested`. One with an
+  active generation from an earlier dated scan keeps using it. Work state never overrides an active generation.
+- **Archive owner** follows the v4 query (`app/services/dps_inline_scale_scan.py:136-140`): the manifest CIK, else
+  the primary SEC CIK of the lowest instrument id that has one. A wrong owner fails the attempt and ends
+  `exhausted`, which is reported. It is not read as absence.
+- **Each run note reports:**
+  - work state for two classes, `raw` (the accession holds the concept in raw at that run) and `history`
+    (everything else);
+  - the undated count;
+  - discovery state: discovered, pending, retrying and exhausted.
+- **Order (replaces v4's).** Within each step, oldest first:
+  1. draining;
+  2. discovery;
+  3. filings from the last 7 days;
+  4. the `raw` backlog;
+  5. `history` accessions of candidate instruments (A4);
+  6. the remaining `history`.
+- **Seed size [A3].**
+  - 57,445 accessions over 1,731 instruments.
+  - 11,878 are `raw` and 17,232 are `history`, all dated on or after 2019-06-15.
+  - 9,331 are dated earlier.
+  - 19,004 are undated. By the accession number's year field, 328 of those are from 2020 to 2025 and 348 from 2019.
+
+  Discovery adds what the seed misses.
+
+### A2. Refill, then normalise, as one locked unit (overrides "Draining", where it says "normalises the instrument")
+
+The drain, enablement and rollback all use one per-instrument primitive, `refill_and_normalise`:
+
+1. **Fetch** the instrument's companyfacts (primary CIK, as the daily path) outside any transaction. A fetch or
+   parse failure increments `failures` and leaves the queue row.
+2. **In one transaction:**
+   1. `lock_instrument_for_normalize(iid)` (`:2473`);
+   2. upsert the facts through `upsert_facts_for_instrument`, which also records the population (A1 (1));
+   3. `normalize_financial_periods([iid])`, which nests in the transaction and holds its lock to the end
+     (`:2486-2560`);
+   4. mark the queue row drained at the revision it read (A4's ledger replaces v4's `DELETE … AND revision = %s`);
+   5. commit.
+
+   A normalisation failure (`instruments_failed`) rolls the transaction back and counts as a failure. Only a
+   successful refill **and** normalisation dequeues.
+3. **The sweep takes the same lock.** `financial_facts_retention_sweep` takes `lock_instrument_for_normalize(iid)`
+   before its per-instrument DELETE. It therefore cannot remove facts between step 2's upsert and its normalisation,
+   whatever the hour or caller. The sweep holds one instrument lock per transaction, so it cannot form a lock-order
+   cycle with the normaliser's sorted order. The daily path keeps its existing commit between upsert and
+   normalisation; it is unchanged here.
+
+Further points:
+- **Data treatment.** This is the daily path's data treatment (settled "Fundamentals provider posture", #532),
+  triggered early. A refill also rewrites other columns of aged-out rows: the values the instrument's next filing
+  would write anyway. The A/B reports that drift and does not attribute it to this policy.
+- **Requests.** One companyfacts request per instrument, through the shared SEC limiter.
+- **Rejected, option (b): repairing a cell from an occurrence.** That would be a second writer into
+  `financial_periods`, re-implementing value selection and both derivations outside the normaliser.
+
+### A3. Decisions reach a derivation group only when every leaf is verified (overrides "Where decisions act" and decision row 8's action)
+
+- **Two derivations, same selection.** With the flag on, the normaliser derives each instrument's periods twice over
+  the same inputs: decisions off and decisions on.
+  - The decisions-on derivation replaces a `scaled` fact's value with its restored value, and changes nothing else.
+  - It skips no fact. A `mixed_scale` fact (v4 row 8) keeps its raw value in that derivation and is unverified, so
+    any cell it reaches takes the decisions-off value below. The refusal therefore acts as "keep", which is v4's
+    "doubt keeps".
+  - The two derivations thus select the same facts, produce the same NULL cells, and take the same Q4 and YTD
+    branches. Only values differ.
+- **Leaves.** Every `dps_declared` cell carries its leaf facts:
+  - a directly selected cell: its selected fact;
+  - a YTD-filled cell: the facts the resolver combined. `_resolve_flow_value` (`:964`) gains a variant that returns
+    them, on its direct and its subtraction branches;
+  - a derived Q4: the leaves of its FY and Q1–Q3 cells.
+
+  A NULL cell has no value to gate and is NULL in both derivations.
+- **Verified decisions:**
+  - `scaled` and `unscaled`;
+  - `not_inline`, an instance value the filer authored directly.
+
+  Every other decision is unverified: `untested`, `unresolved`, `no_match`, `entity_mismatch`, `mixed_scale`,
+  `unsupported_unit` and `out_of_scope`. `out_of_scope` is included because v4 policy 6 counts earlier facts as
+  untested, not as non-inline.
+  - **A leaf of another `dps_declared` concept** (the aliases of v4 policy 5, which are not scanned) has no
+    decision. It is unverified, with reason `other_concept`.
+- **Derivation group.** For each `fiscal_year` label, the group is that label's FY, Q1, Q2, Q3 and Q4 cells,
+  counting both the cells this normalisation produces and the label's stored `financial_periods` rows. These are
+  the cells the Q4 derivation (`:1787-1839`) and the YTD fill (`:1741-1753`) link.
+- **An incomplete group keeps its stored DPS.**
+  - A group is complete when the normalisation produces a row for every member the stored rows hold.
+  - Over swept raw, a label's FY can be produced while its aged-out quarters are not. That group is incomplete,
+    and the produced members are written with their stored `dps_declared`, unchanged.
+  - So a normalisation over swept raw never pairs a newly restored FY with stored quarters of the other regime.
+    The only change is to `dps_declared` of the incomplete group's produced rows; every other column is written as
+    today.
+  - A complete group is gated by the rule below. `refill_and_normalise` always produces complete groups for the
+    years companyfacts still serves.
+- **Rule.** A group takes its decisions-on values only when two conditions hold:
+  - every leaf of every cell in it is verified;
+  - no cell in it is negative in the decisions-on derivation while the same cell is non-negative or NULL in the
+    decisions-off derivation.
+
+  Otherwise every cell of the group takes its decisions-off value, with reason `unverified_leaf`, `other_concept`
+  or `negative_derived`. Each group therefore takes one of three branches: `on`, `off` or `kept_stored`. Gating the whole group keeps displayed arithmetic consistent: a derived Q4 always equals
+  FY − Q1 − Q2 − Q3 over the cells shown beside it.
+- **The fallback** is the decisions-off value over the same (possibly refilled) inputs. It is not necessarily
+  today's stored value, because a refill can move inputs.
+- **Negativity.** XBRL US DQC.US.0015 ("Negative Values") lists `CommonStockDividendsPerShareDeclared` as rule
+  element 5748, an element that should not be negative (`dqc_us_rules/resources/DQC_US_0015/
+  dqc_15_usgaap_2026_concepts.csv`). That rule tests filed facts. Applying it to derived cells is this spec's
+  regression gate: a decision may not introduce a negative the decisions-off derivation does not have. The gate claims
+  nothing about which value is right.
+- **v4's guarantee, restated.**
+  - v4 says no other column, period row or date can change. That now holds between the two derivations over
+    identical inputs.
+  - `ttm_dps` sums cells (sql/050:96). Every summed cell is consistent within its group, and the sum stays
+    per-cell, as in v4.
+
+### A4. Candidates, the enqueue predicate, and the rollback set
+
+- **Candidate instrument.** A population instrument with an accession whose active generation holds a
+  positive-scale or unresolved occurrence.
+- **The enqueue predicate** (this overrides only the "when" clause of v4's "Queue"). A successful scan enqueues the
+  accession's population instruments when either:
+  - its old or new generation holds a positive-scale or unresolved occurrence (as in v4); or
+  - the instrument is a candidate, because a rescan can flip a leaf from unverified to verified and so unlock a
+    group.
+
+  v4's other queue guarantees stand: the enqueue happens in the generation-publication transaction, each enqueue
+  takes a fresh sequence-backed revision, and a later scan never clears queued work.
+- **The queue is also a durable ledger.** `sec_inline_scale_renormalise` gains `drained_revision BIGINT`. A
+  successful drain sets `drained_revision = revision`, conditioned on the revision it read, and no longer deletes
+  the row. An instrument is queued while `drained_revision IS DISTINCT FROM revision`.
+  - The ledger lists every instrument whose cells a decision could have changed: a restored or refused leaf
+    requires a positive-scale or unresolved occurrence, and publishing one enqueues.
+  - **Verification scope.** Stage 2 convergence, the `unreachable` report and rollback verification all use the
+    ledger's instruments, including former candidates.
+- **The rollback set** (step 3's rebuild) is every population instrument, not a candidate set. A rescan can drop an instrument from
+  the candidates before its reversal drains, so the broad set is used, and it needs no ledger. On [A3] that is
+  about 1,731 companyfacts requests.
+
+### A5. Enablement in two stages
+
+- **Readiness.** The scan's run note decides when a stage may start. The stage's A/B then recomputes the
+  population, classes, discovery state and coverage inside its own snapshot, as v4 requires, and fails if the
+  stage's coverage condition does not hold there.
+- **Stage 1** runs when two conditions hold in the snapshot, with 0 pending and 0 retrying in each:
+  - the `raw` class and the `history` accessions of candidate instruments;
+  - discovery of every candidate instrument.
+
+  It is v4 acceptance 1–8, as amended below.
+  - The A/B's refill can reveal concept accessions not in the table. They are listed as `undiscovered`, their
+    groups fall back under A3, and they do not fail the gate.
+  - A3 gates every group at runtime. Partial coverage therefore leaves each group either verified or at its
+    decisions-off value, and a later scan can activate a group only under the same rule.
+- **Stage 2** runs when two conditions hold:
+  - full coverage of both classes;
+  - discovery complete for every population instrument, with exhausted instruments listed as unknown coverage.
+
+  Stage 2 then runs:
+  1. an uncapped drain to empty;
+  2. the A/B;
+  3. **stored convergence:** in one snapshot, the stored rows of every ledger instrument (A4) equal a fresh refill
+     and gated normalisation. Any difference is listed and fails, except `unreachable` cells (defined below), which are
+     listed.
+
+  A Stage 2 failure starts the rollback.
+- **Convergence to the gated result.** A group's stored cells equal its gated result once every leaf's accession is
+  dated and in the population, each was scanned at the current version, and the instrument drained after the last
+  of those scans. The gated result is the decisions-on values only if every leaf is verified and the negative gate
+  passes. `unresolved`, `no_match` and `entity_mismatch` leaves keep the group at decisions-off while those decisions
+  remain unverified. The A/B
+  lists every group by state. There is no fixed bound on the number of cycles.
+- **Pace [A5], an optimistic extrapolation.** The 2026-10-22 01:54 UTC run, with draining off, scanned 628
+  accessions in its 45-minute cap and fetched 6,227 documents (9.9 per accession). That projects about 18 more runs
+  for the 11,437 pending `raw` accessions and about 28 for 17,232 `history` ones. After enablement, draining and
+  discovery can take up to half of each run's admission window, and history documents may cost differently.
+- **Cadence stays daily.** A run holds the `sec_rate` lane, and `sec_atom_fast_lane` skips its fires while one runs
+  (`app/workers/scheduler.py:1731-1732`).
+
+### Acceptance and rollback, as amended
+
+- **The A/B (items 1, 2 and 4).**
+  - **Quiescence and retry.** The script runs with `sec_dps_inline_scale_scan` paused and no
+    `daily_financial_facts` run in progress.
+    - Its first statements take `lock_instrument_for_normalize` for every instrument in scope, in sorted order,
+      before any write. That matches A2's lock-before-upsert order, so it cannot deadlock with a drain.
+    - A `REPEATABLE READ` serialization failure is an operational retry of the whole transaction, at most 3 times.
+      It is reported, and it is not an acceptance failure.
+  - **Scope.** Stage 1 covers the candidate instruments; Stage 2 and rollback verification cover the ledger's
+    instruments (A4). Each refill writes one instrument's full history inside the snapshot.
+  - **Prefetch.** It fetches and parses the companyfacts payload of every in-scope instrument before it opens the
+    snapshot. No SEC request runs while it holds the locks or the snapshot, as in A2. A fetch failure is reported,
+    and that instrument is listed as unrefilled.
+  - **Refill.** Inside the snapshot, after the locks, it upserts each prefetched payload with
+    `upsert_facts_for_instrument` in the snapshot's transaction. It does not call `refresh_financial_facts`, which commits
+    (`app/services/fundamentals/__init__.py:580`).
+  - **Both derivations** then run over the refilled raw. The script computes each group's expected branch (`on`,
+    `off` or `kept_stored`) independently from A3's rule and records the branch each final cell took.
+  - **Lineage** (v4 item 2) covers YTD-filled cells as well as derived Q4s, through their leaves.
+  - **It reports:**
+    - refill drift between the stored rows and the decisions-off result: cells by column, plus row additions and
+      removals, date changes and `source_ref` changes. This is informational;
+    - `unreachable`: a stored `dps_declared` cell of an in-scope instrument whose key (`period_type`,
+      `period_end_date`) has no `dps_declared` value in the decisions-off result over the refilled inputs. That is
+      the actual selection and derivation output.
+      - A row the normaliser deletes under its structural rules (B2 sub-annual FY, `:2151-2179`; B3 future period)
+        is a deletion. It is reported in refill drift and is not `unreachable`.
+      - Unreachable cells are kept and listed;
+    - work state per class, with the undated, undiscovered and discovery-exhausted counts;
+    - groups by A3 reason.
+  - **It fails on** any of these invariant violations:
+    - a group member that did not take its group's expected branch;
+    - a final value that differs from its branch's result: the decisions-on result, the decisions-off result, or
+      the stored value;
+    - an `on` group with an unverified leaf, or with a cell negative where the decisions-off cell is not.
+- **Fixtures**, added to v4 acceptance 3. v4's "refused FY member with its derived Q4" fixture is replaced by the
+  `mixed_scale` fixture below, because A3 keeps the fact:
+  - A Q4 whose Q2 is YTD-filled with an unverified leaf. The whole fiscal-year group takes decisions-off values.
+  - A `mixed_scale` fact. Its group takes decisions-off values, equal to the decisions-off derivation.
+  - A group with all leaves verified but a negative YTD-filled quarter. The whole group falls back, and the
+    displayed Q4 equals FY − ΣQ.
+  - An `untested` → `unscaled` rescan on a candidate. It enqueues the instrument, and the group activates on drain.
+  - The sweep blocked by the lock during `refill_and_normalise`. This is a DB test with a stubbed provider.
+  - Refill, then the sweep, then an ordinary normalisation over swept raw. The incomplete group keeps its stored
+    DPS.
+  - A group with an alias-concept leaf takes decisions-off values (`other_concept`).
+  - Discovery attaches an instrument to an already-scanned positive-scale accession, which enqueues it.
+  - A partial write (`complete_payload=False`) records population rows but no `discovered_at`.
+  - A drain that sets `drained_revision`, after which a re-enqueue makes the instrument queued again.
+  - The A/B's sorted locks taken before its first write.
+  - A fetch failure and a normalisation failure. Each leaves the queue row and increments `failures`.
+  - Population and discovery writes:
+    - from `upsert_facts_for_instrument`, which also sets `discovered_at`;
+    - from `source_ref`;
+    - insert-only across a reselection that removes a `source_ref`;
+    - discovery retry and exhaustion;
+    - an undated row, skipped, while an existing generation is still used.
+- **Enablement step 2** drains the candidate set with `refill_and_normalise`.
+- **Item 9, Stage 2.** It also checks the live pane: EFC's dividend history shows Q4 2022 and Q4 2023 as
+  FY − Q1 − Q2 − Q3 from restored inputs, and WHR's Q2 and Q3 2023 show 1.75.
+- **Rollback.**
+  - **Step 3:** run `refill_and_normalise` with the flag off for every population instrument. Normalising over
+    swept raw cannot revert a restored aged-out cell.
+  - **Step 4:** verify the ledger's instruments in decisions-off mode with the same locked, in-snapshot refill.
+  - **Rollback exceptions.** A ledger instrument's stored cell that the decisions-off result over the refilled
+    inputs does not produce (the `unreachable` definition, structural deletions excluded) cannot be reverted. Each one is listed with its stored value as a rollback
+    exception, and the rollback is not complete until the list is empty or each exception is accepted on #3947.
+  - **Step 5** also drops `sec_inline_scale_population` and `sec_inline_scale_discovery`.
+
 ## Checkpoint record
 
 - **Round 1** (Codex, 45 findings), applied in v2:
@@ -424,3 +767,45 @@ flag, reads every figure from that one snapshot, and rolls back.
     verification, including downstream (27).
   - Measurement: regex-detected labels (28); a tie report for the FY/YTD selection (29); an empty-arm guard and
     `min(150, n)` (30); the script's request pacing documented, since it runs outside the jobs limiter (31).
+- **Amendment 1, round 1** (Codex, 25 findings, 12 blocking), applied in the amendment's second draft:
+  - Derivations: the per-input A3 became a leaf rule over the whole expression, with a fallback to the
+    decisions-off derivation's own value (findings 2, 3); the YTD citation was corrected (25).
+  - Queue and rollback: candidate rescans enqueue (4); rollback refills every population instrument (8);
+    unreachable cells are rollback exceptions (12).
+  - Refill: one locked transaction, with the sweep taking the same lock (5, 6); a failed refill never dequeues (7).
+  - Population: a durable insert-only table fed by every write into raw, so discovery is not limited to
+    `source_ref` (1, 9, 14, 16, 21); undated rows do not override an active generation (20); the archive-owner
+    fallback is stated (22).
+  - Enablement: a runtime negative gate citing DQC.US.0015 element 5748 (10, 18); Stage 2 checks stored
+    convergence (11); coverage is read before the A/B, with undiscovered accessions listed (13); convergence
+    conditions replace the one-cycle claim (17); the pace is labelled optimistic (23).
+  - Overrides are named per subsection, and v4's guarantee is restated between the arms (19). The script uses the
+    population's own dating (15). The retention wording covers amendments (24).
+- **Amendment 1, round 2** (Codex, 13 findings, 7 blocking; round-1 findings 3–8, 14, 15, 18, 20 and 23–25 judged
+  resolved), applied in the third draft:
+  - Gating moved to a derivation group (a fiscal-year label's FY and Q1–Q4), so a derived Q4 always equals the
+    cells beside it (8). `mixed_scale` keeps its raw value and is unverified, so both derivations select the same
+    facts and NULLs. Leaves are the selected facts, and the resolver returns its combined facts (2).
+  - The A/B records which value each cell took and checks each branch's invariant (3). It takes sorted locks before
+    any refill write (1). It recomputes coverage inside its snapshot (5). `unreachable` is defined by the
+    decisions-off result over refilled inputs (7).
+  - A4 overrides only v4's enqueue predicate, and the other queue guarantees stand (4).
+  - Discovery has its own table, retries and completion gate for each stage (6).
+  - Convergence is stated to the gated result (9), and the fallback baseline is decisions-off over the same inputs
+    (10).
+  - A1 names the ordering it replaces and keeps v4's eligibility predicate (11). The script's `[A2]` label was
+    corrected (12), and so was the archive-owner wording (13).
+- **Amendment 1, round 3** (Codex, the cap; 10 findings, 5 blocking; round-1 findings judged resolved apart from
+  2, 11, 12, 19 and 21, and round-2 findings apart from 2, 3, 6, 7 and 8). Applied without a fourth round, as v4
+  did:
+  - A group includes the label's stored rows, and an incomplete group keeps its stored DPS, so a normalisation over
+    swept raw cannot pair regimes (1).
+  - An alias-concept leaf is unverified, `other_concept` (2).
+  - The A/B checks each group's expected branch and that every value equals its branch's result (3).
+  - The queue keeps rows with a `drained_revision`, giving a durable ledger that scopes Stage 2 and rollback
+    verification (4).
+  - Structural deletions are excluded from `unreachable` (5).
+  - New population membership on a scanned accession enqueues (6).
+  - `discovered_at` is set only from a complete payload (7).
+  - The A/B runs quiesced and retries a serialization failure (8).
+  - v4's refusal fixture is replaced (9), and "permanently" became conditional (10).

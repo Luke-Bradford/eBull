@@ -13696,3 +13696,17 @@ neighbouring container and match it.**
   the check is documented. A difference found before the rebuild is drift, not a regression.
 - Enforced in: `scripts/ab_3947_dps_inline_scale.py` (module docstring);
   `docs/specs/fundamentals/2026-10-21-3947-dps-inline-scale.md` (PR b build note).
+
+### A correction applied inside the normaliser does not reach durable rows whose raw facts were retention-swept (#3947, 2026-10-22)
+
+- First seen in: #3947 build PR (b)'s A/B. WHR's Q2 and Q3 2023 DPS stayed at 1,750,000 under decisions on: the
+  normaliser rewrites only the periods it can rebuild from `financial_facts_raw`, which keeps the latest 3 10-K and 8
+  10-Q accessions, while `financial_periods` keeps older rows as durable history. The scan also read its population
+  from raw, so the aged-out accessions were never scanned.
+- Prevention: before relying on a normalisation to apply a fix, check which stored rows it can still rebuild. A row
+  whose facts have aged out is reached only by refilling raw first (the companyfacts refresh path) and then
+  normalising. Take a per-accession population from a durable record (the rows' `source_ref`), not from raw. A fix
+  that changes some inputs of a difference-derived cell (Q4 = FY − ΣQ, a YTD difference) must change all of them or
+  none.
+- Enforced in: `docs/specs/fundamentals/2026-10-21-3947-dps-inline-scale.md` (Amendment 1);
+  `scripts/measure_3947_unreachable.py`.
