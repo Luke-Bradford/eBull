@@ -54,7 +54,7 @@ import psycopg
 
 from app.config import settings
 from app.providers.implementations.sec_13f import (
-    parse_infotable,
+    parse_infotable_with_controls,
     parse_primary_doc,
 )
 from app.providers.implementations.sec_edgar import SecFilingsProvider
@@ -72,6 +72,7 @@ from app.services.institutional_holdings import (
     acquire_13f_accession_write_lock,
     parse_archive_index,
     thirteen_f_within_retention,
+    write_filing_capture,
 )
 from app.services.ownership_observations import refresh_institutions_current_batch
 from app.services.raw_filings import store_raw, stored_body
@@ -425,7 +426,7 @@ def _parse_13f_hr(
             return _failed_outcome(f"store_raw error: {exc}", raw_status="stored")
 
     try:
-        holdings: list[ThirteenFHolding] = parse_infotable(infotable_xml)
+        holdings, infotable_controls = parse_infotable_with_controls(infotable_xml)
     except Exception as exc:  # noqa: BLE001
         is_schema = isinstance(exc, (ValueError, ET.ParseError))
         kind = "infotable.xml parse failed" if is_schema else "infotable.xml parse failed (unexpected)"
@@ -483,6 +484,9 @@ def _parse_13f_hr(
             acquire_13f_accession_write_lock(conn, accession)
 
             filer_id = _upsert_filer(conn, info)
+            capture = write_filing_capture(
+                conn, accession_number=accession, info=info, controls=infotable_controls, holdings=holdings
+            )
 
             normalised = normalise_13f_holdings(holdings, filed_at=filed_at)
             resolved: list[tuple[int, ThirteenFHolding]] = []
@@ -520,6 +524,7 @@ def _parse_13f_hr(
                     period_of_report=period,
                     filed_at=filed_at,
                     resolved_holdings=resolved_holdings,
+                    capture=capture,
                 )
                 # #1703 — ONE batched MERGE for every held instrument, not a
                 # per-holding loop. A 13F carries hundreds–thousands of holdings;

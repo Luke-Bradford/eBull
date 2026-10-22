@@ -33,6 +33,14 @@ pytestmark = pytest.mark.integration
 # ---------------------------------------------------------------------------
 
 
+def _with_controls(parse):  # #3227 (IM): the per-filing writers call parse_infotable_with_controls
+    from decimal import Decimal as _D
+
+    from app.providers.implementations.sec_13f import ThirteenFInfotableControls
+
+    return lambda xml: (parse(xml), ThirteenFInfotableControls(line_count=0, value_total=_D(0)))
+
+
 def _seed_instrument(conn: psycopg.Connection[tuple], *, iid: int, symbol: str, company_name: str) -> None:
     conn.execute(
         """
@@ -848,8 +856,8 @@ class TestSweepResolvableUnresolvedCusips:
             ),
         ]
         monkeypatch.setattr(
-            "app.providers.implementations.sec_13f.parse_infotable",
-            lambda _xml: fake_holdings,
+            "app.providers.implementations.sec_13f.parse_infotable_with_controls",
+            _with_controls(lambda _xml: fake_holdings),
         )
 
         report = sweep_resolvable_unresolved_cusips(conn)
@@ -954,8 +962,8 @@ class TestSweepResolvableUnresolvedCusips:
             ),
         ]
         monkeypatch.setattr(
-            "app.providers.implementations.sec_13f.parse_infotable",
-            lambda _xml: fake_holdings,
+            "app.providers.implementations.sec_13f.parse_infotable_with_controls",
+            _with_controls(lambda _xml: fake_holdings),
         )
 
         report = sweep_resolvable_unresolved_cusips(conn)
@@ -1040,8 +1048,8 @@ class TestSweepResolvableUnresolvedCusips:
             raise RuntimeError("synthetic parser blowup")
 
         monkeypatch.setattr(
-            "app.providers.implementations.sec_13f.parse_infotable",
-            _exploding_parse,
+            "app.providers.implementations.sec_13f.parse_infotable_with_controls",
+            _with_controls(_exploding_parse),
         )
 
         report = sweep_resolvable_unresolved_cusips(conn)

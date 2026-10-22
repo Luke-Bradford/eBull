@@ -13781,3 +13781,27 @@ neighbouring container and match it.**
   full population before relying on it, and widen the window by the time-zone slack.
 - Enforced in: `app/services/ownership_rollup.py` `_FILERS_13G_SQL` (window over the accessions' filed dates ±1 day);
   `tests/test_3227_13f_13g_covers.py::test_the_filer_read_queries_13g_accessions_once` pins the bounds.
+
+### Evidence written beside the observation writer is skipped when nothing resolves, and needs the writers' lock order (#3227 (IM), 2026-10-22)
+
+- First seen in: the #3227 tier (IM) capture build, Codex checkpoint 2 (two P1). The accession's capture record was
+  written inside `_record_13f_observations_for_filing`, whose callers skip it when no CUSIP resolves; a later CUSIP
+  rewash then found no stored capture to recapture from. The rewash also wrote the capture after deleting the
+  accession's observations, while the bulk path writes captures first, so the two could deadlock on one accession.
+- Prevention: write accession-level evidence before the per-holding resolution filter, in the writer itself, not in
+  the helper that writes resolved rows. When several writers touch the same two tables, give every one the same order
+  (here capture rows, then observation rows) and name the order at each site.
+- Enforced in: `app/services/institutional_holdings.py::write_filing_capture` (legacy and manifest paths) and
+  `app/services/rewash_filings.py::_apply_13f_infotable` (capture before the observation DELETE).
+
+### A backfill that reuses a write path inherits its gates (#3227 (IM), 2026-10-22)
+
+- First seen in: the #3227 (IM) capture-only backfill reused the bulk 13F drain and so its 8-quarter retention gate.
+  35,445 existing observations of late filings (periods before the 2024-12-31 cut-off, filed inside the archives)
+  were left uncaptured; the ingest A/B's exact population gate caught it.
+- Prevention: when a backfill describes rows that already exist, list the write path's admission gates (retention,
+  bounds, filters) and decide each one for the backfill: a gate on what may be *written* does not apply to what is
+  *described*. Gate the backfill's A/B on the existing population, not on what the write path would admit.
+- Enforced in: `app/services/sec_13f_dataset_ingest.py` (`capture_only` bypasses the retention gate only);
+  `tests/test_thirteen_f_capture_db.py::test_capture_only_reaches_a_late_filing_behind_the_retention_cap`;
+  `scripts/ab_3227_13f_included_managers_ingest.py`.

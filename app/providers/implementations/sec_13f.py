@@ -85,6 +85,38 @@ def _edgar_parsers() -> tuple[Any, Any]:
 # ---------------------------------------------------------------------------
 
 
+# One information-table line group (#3227 (IM)): (Column 6 as filed, sorted Column 7 numbers or None when Column 7
+# breaks the sequence-number grammar, shares). Built by ``app.services.thirteen_f_normalise``.
+Segment = tuple[str | None, tuple[int, ...] | None, Decimal]
+
+
+@dataclass(frozen=True)
+class ThirteenFOtherManager:
+    """One entry of the summary page's List of Other Included Managers, as filed (#3227 (IM); Form 13F Special
+    Instruction 7.b). ``sequence_number_raw`` is the element text unparsed: EdgarTools' ``OtherManager`` int-coerces
+    it, which admits non-ASCII digits and ``+1``, so the grammar check lives in ``app.services.thirteen_f_capture``."""
+
+    sequence_number_raw: str | None
+    cik: str | None
+    name: str | None
+    form13f_file_number: str | None
+
+
+@dataclass(frozen=True)
+class ThirteenFSummaryPage:
+    """The summary page's controls and list, as filed (#3227 (IM); Special Instructions 6.a-6.c, 7.b).
+
+    A control is None when its element is absent or not a number. Read directly rather than from EdgarTools'
+    ``SummaryPage``, which turns an absent control into 0 and drops a list entry that has no ``otherManager`` child;
+    the capture status needs both distinctions (``institutional_13f_captures``).
+    """
+
+    other_included_managers_count: int | None
+    table_entry_total: int | None
+    table_value_total: Decimal | None
+    other_managers: tuple[ThirteenFOtherManager, ...]
+
+
 @dataclass(frozen=True)
 class ThirteenFFilerInfo:
     """Header + cover-page metadata extracted from primary_doc.xml.
@@ -111,6 +143,7 @@ class ThirteenFFilerInfo:
     period_of_report: date
     filed_at: datetime | None
     table_value_total_usd: Decimal | None
+    summary_page: ThirteenFSummaryPage | None = None
 
 
 @dataclass(frozen=True)
@@ -174,6 +207,11 @@ class ThirteenFHolding:
     voting_sole: Decimal
     voting_shared: Decimal
     voting_none: Decimal
+    # #3227 (IM): Column 7 as filed (stripped), and the aggregation state ``thirteen_f_normalise`` fills in: the
+    # summed line groups and the CUSIPs aggregated into this holding.
+    other_managers_raw: str | None = None
+    segments: tuple[Segment, ...] = ()
+    cusips: tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -223,6 +261,65 @@ def _parse_signature_date(text: str | None) -> datetime | None:
             continue
         return datetime(parsed.year, parsed.month, parsed.day, tzinfo=UTC)
     return None
+
+
+def _child(parent: ET.Element, name: str) -> ET.Element | None:
+    for el in parent:
+        if _strip_ns(el.tag) == name:
+            return el
+    return None
+
+
+def _child_text(parent: ET.Element | None, name: str) -> str | None:
+    if parent is None:
+        return None
+    el = _child(parent, name)
+    if el is None or el.text is None:
+        return None
+    return el.text.strip() or None
+
+
+def _control_int(text: str | None) -> int | None:
+    if text is None or not text.isascii() or not text.isdigit():
+        return None
+    return int(text)
+
+
+def _control_decimal(text: str | None) -> Decimal | None:
+    if text is None:
+        return None
+    try:
+        value = Decimal(text)
+    except ArithmeticError:
+        return None
+    return value if value.is_finite() else None
+
+
+def _parse_summary_page(root: ET.Element) -> ThirteenFSummaryPage | None:
+    summary = next((el for el in root.iter() if _strip_ns(el.tag) == "summaryPage"), None)
+    if summary is None:
+        return None
+    entries: list[ThirteenFOtherManager] = []
+    info = _child(summary, "otherManagers2Info")
+    if info is not None:
+        for wrapper in info:
+            if _strip_ns(wrapper.tag) != "otherManager2":
+                continue
+            manager = _child(wrapper, "otherManager")
+            entries.append(
+                ThirteenFOtherManager(
+                    sequence_number_raw=_child_text(wrapper, "sequenceNumber"),
+                    cik=_child_text(manager, "cik"),
+                    name=_child_text(manager, "name"),
+                    form13f_file_number=_child_text(manager, "form13FFileNumber"),
+                )
+            )
+    return ThirteenFSummaryPage(
+        other_included_managers_count=_control_int(_child_text(summary, "otherIncludedManagersCount")),
+        table_entry_total=_control_int(_child_text(summary, "tableEntryTotal")),
+        table_value_total=_control_decimal(_child_text(summary, "tableValueTotal")),
+        other_managers=tuple(entries),
+    )
 
 
 # Type-code map: EdgarTools rewrites the SEC two-letter codes; we want the
@@ -289,6 +386,7 @@ def parse_primary_doc(xml: str) -> ThirteenFFilerInfo:
         period_of_report=period_of_report,
         filed_at=filed_at,
         table_value_total_usd=table_value_total_usd,
+        summary_page=_parse_summary_page(root),
     )
 
 
@@ -339,7 +437,21 @@ def _normalise_put_call(raw: Any) -> Literal["PUT", "CALL"] | None:
     return None
 
 
+@dataclass(frozen=True)
+class ThirteenFInfotableControls:
+    """What the parse saw, for the summary page's controls (#3227 (IM); Special Instructions 6.b, 6.c): every
+    ``<infoTable>`` element EdgarTools surfaced, before any row is dropped, and the sum of their Column 4."""
+
+    line_count: int
+    value_total: Decimal
+
+
 def parse_infotable(xml: str) -> list[ThirteenFHolding]:
+    """Parse a 13F-HR ``infotable.xml`` payload; see :func:`parse_infotable_with_controls`."""
+    return parse_infotable_with_controls(xml)[0]
+
+
+def parse_infotable_with_controls(xml: str) -> tuple[list[ThirteenFHolding], ThirteenFInfotableControls]:
     """Parse a 13F-HR ``infotable.xml`` payload.
 
     Returns one :class:`ThirteenFHolding` per ``<infoTable>`` element
@@ -362,7 +474,11 @@ def parse_infotable(xml: str) -> list[ThirteenFHolding]:
 
     holdings: list[ThirteenFHolding] = []
     if len(df) == 0:
-        return holdings
+        return holdings, ThirteenFInfotableControls(line_count=0, value_total=Decimal(0))
+    controls = ThirteenFInfotableControls(
+        line_count=len(df),
+        value_total=sum((Decimal(int(v or 0)) for v in df["Value"]), Decimal(0)),
+    )
 
     for record in df.to_dict(orient="records"):
         cusip = str(record.get("Cusip") or "").strip()
@@ -408,10 +524,11 @@ def parse_infotable(xml: str) -> list[ThirteenFHolding]:
                 voting_sole=Decimal(int(record.get("SoleVoting") or 0)),
                 voting_shared=Decimal(int(record.get("SharedVoting") or 0)),
                 voting_none=Decimal(int(record.get("NonVoting") or 0)),
+                other_managers_raw=(str(record.get("OtherManager") or "").strip() or None),
             )
         )
 
-    return holdings
+    return holdings, controls
 
 
 def dominant_voting_authority(holding: ThirteenFHolding) -> Literal["SOLE", "SHARED", "NONE"] | None:

@@ -488,7 +488,7 @@ def test_redrain_reuse_parse_failure_preserves_stored_raw(
     def _raising_infotable(*args, **kwargs):  # noqa: ARG001
         raise RuntimeError("synthetic infotable parse crash on reuse")
 
-    monkeypatch.setattr(parser_module, "parse_infotable", _raising_infotable)
+    monkeypatch.setattr(parser_module, "parse_infotable_with_controls", _raising_infotable)
 
     stats = run_manifest_worker(ebull_test_conn, source="sec_13f_hr", max_rows=10)
     ebull_test_conn.commit()

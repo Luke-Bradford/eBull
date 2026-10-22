@@ -70,6 +70,14 @@ _MIN_PARSEABLE_13D_XML = """<?xml version="1.0" encoding="UTF-8"?>
 """
 
 
+def _with_controls(parse):  # #3227 (IM): the per-filing writers call parse_infotable_with_controls
+    from decimal import Decimal as _D
+
+    from app.providers.implementations.sec_13f import ThirteenFInfotableControls
+
+    return lambda xml: (parse(xml), ThirteenFInfotableControls(line_count=0, value_total=_D(0)))
+
+
 @pytest.fixture
 def isolated_registry() -> Iterator[None]:
     """Snapshot + restore both parser registries around each test."""
@@ -1802,22 +1810,24 @@ def test_13f_infotable_rescue_branch_pre_cap_period_returns_false(
     conn.commit()
 
     monkeypatch.setattr(
-        "app.providers.implementations.sec_13f.parse_infotable",
-        lambda _xml: [
-            ThirteenFHolding(
-                name_of_issuer="PreCap Issuer",
-                title_of_class="COM",
-                cusip="PRECAP13F0",
-                value_usd=Decimal("1000"),
-                shares_or_principal=Decimal("100"),
-                shares_or_principal_type="SH",
-                investment_discretion="SOLE",
-                voting_sole=Decimal("100"),
-                voting_shared=Decimal("0"),
-                voting_none=Decimal("0"),
-                put_call=None,
-            )
-        ],
+        "app.providers.implementations.sec_13f.parse_infotable_with_controls",
+        _with_controls(
+            lambda _xml: [
+                ThirteenFHolding(
+                    name_of_issuer="PreCap Issuer",
+                    title_of_class="COM",
+                    cusip="PRECAP13F0",
+                    value_usd=Decimal("1000"),
+                    shares_or_principal=Decimal("100"),
+                    shares_or_principal_type="SH",
+                    investment_discretion="SOLE",
+                    voting_sole=Decimal("100"),
+                    voting_shared=Decimal("0"),
+                    voting_none=Decimal("0"),
+                    put_call=None,
+                )
+            ]
+        ),
     )
 
     rewash_filings._REGISTRY.clear()
@@ -1892,8 +1902,8 @@ def test_13f_infotable_apply_raises_on_empty_parse(
     conn.commit()
 
     monkeypatch.setattr(
-        "app.providers.implementations.sec_13f.parse_infotable",
-        lambda _xml: [],  # empty parse — regression
+        "app.providers.implementations.sec_13f.parse_infotable_with_controls",
+        _with_controls(lambda _xml: []),  # empty parse — regression
     )
 
     rewash_filings._REGISTRY.clear()
@@ -1984,8 +1994,8 @@ def test_13f_infotable_apply_replaces_holdings_with_re_resolved_instrument(
         ),
     ]
     monkeypatch.setattr(
-        "app.providers.implementations.sec_13f.parse_infotable",
-        lambda _xml: fake_holdings,
+        "app.providers.implementations.sec_13f.parse_infotable_with_controls",
+        _with_controls(lambda _xml: fake_holdings),
     )
 
     rewash_filings._REGISTRY.clear()
@@ -2084,11 +2094,13 @@ def test_13f_infotable_rewash_sums_duplicate_xml_rows(
     conn.commit()
 
     monkeypatch.setattr(
-        "app.providers.implementations.sec_13f.parse_infotable",
-        lambda _xml: [
-            _mk_13f_holding(cusip="DUP13FCSP", shares="100", value="1000"),
-            _mk_13f_holding(cusip="DUP13FCSP", shares="999", value="9990"),
-        ],
+        "app.providers.implementations.sec_13f.parse_infotable_with_controls",
+        _with_controls(
+            lambda _xml: [
+                _mk_13f_holding(cusip="DUP13FCSP", shares="100", value="1000"),
+                _mk_13f_holding(cusip="DUP13FCSP", shares="999", value="9990"),
+            ]
+        ),
     )
     rewash_filings._REGISTRY.clear()
     register_parser(
@@ -2188,8 +2200,8 @@ def test_13f_infotable_rewash_clears_stale_observations_for_dropped_instrument(
     assert row is not None and int(row[0]) >= 1  # stale state seeded
 
     monkeypatch.setattr(
-        "app.providers.implementations.sec_13f.parse_infotable",
-        lambda _xml: [_mk_13f_holding(cusip="NEWOBSCSP", shares="200", value="2000")],
+        "app.providers.implementations.sec_13f.parse_infotable_with_controls",
+        _with_controls(lambda _xml: [_mk_13f_holding(cusip="NEWOBSCSP", shares="200", value="2000")]),
     )
     rewash_filings._REGISTRY.clear()
     register_parser(
@@ -2303,8 +2315,8 @@ def test_13f_infotable_apply_returns_false_when_cusip_unresolved(
         ),
     ]
     monkeypatch.setattr(
-        "app.providers.implementations.sec_13f.parse_infotable",
-        lambda _xml: fake_holdings,
+        "app.providers.implementations.sec_13f.parse_infotable_with_controls",
+        _with_controls(lambda _xml: fake_holdings),
     )
 
     rewash_filings._REGISTRY.clear()
@@ -2432,8 +2444,8 @@ def test_13f_infotable_apply_rescues_tombstoned_accession(
         ),
     ]
     monkeypatch.setattr(
-        "app.providers.implementations.sec_13f.parse_infotable",
-        lambda _xml: fake_holdings,
+        "app.providers.implementations.sec_13f.parse_infotable_with_controls",
+        _with_controls(lambda _xml: fake_holdings),
     )
 
     rewash_filings._REGISTRY.clear()
@@ -2494,8 +2506,8 @@ def test_13f_infotable_apply_handles_legal_empty_filing(
     conn.commit()
 
     monkeypatch.setattr(
-        "app.providers.implementations.sec_13f.parse_infotable",
-        lambda _xml: [],
+        "app.providers.implementations.sec_13f.parse_infotable_with_controls",
+        _with_controls(lambda _xml: []),
     )
 
     rewash_filings._REGISTRY.clear()
@@ -2602,8 +2614,8 @@ def test_13f_infotable_apply_preserves_existing_when_all_cusips_unresolved(
         ),
     ]
     monkeypatch.setattr(
-        "app.providers.implementations.sec_13f.parse_infotable",
-        lambda _xml: fake_holdings,
+        "app.providers.implementations.sec_13f.parse_infotable_with_controls",
+        _with_controls(lambda _xml: fake_holdings),
     )
 
     rewash_filings._REGISTRY.clear()
@@ -2743,8 +2755,8 @@ def test_13f_infotable_apply_preserves_existing_when_some_cusips_unresolved(
         ),
     ]
     monkeypatch.setattr(
-        "app.providers.implementations.sec_13f.parse_infotable",
-        lambda _xml: fake_holdings,
+        "app.providers.implementations.sec_13f.parse_infotable_with_controls",
+        _with_controls(lambda _xml: fake_holdings),
     )
 
     rewash_filings._REGISTRY.clear()

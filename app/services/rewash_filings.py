@@ -1550,7 +1550,7 @@ def _apply_13f_infotable(
     Returns ``False`` when no existing institutional_holdings row
     is found (re-wash isn't a first-time ingester). Raises
     ``RewashParseError`` on parser failure."""
-    from app.providers.implementations.sec_13f import ThirteenFHolding, parse_infotable
+    from app.providers.implementations.sec_13f import ThirteenFHolding, parse_infotable_with_controls
     from app.services.institutional_holdings import (
         _resolve_cusip_to_instrument_id,
         _upsert_holding,
@@ -1643,7 +1643,7 @@ def _apply_13f_infotable(
         return False
 
     try:
-        holdings = parse_infotable(raw_doc.require_payload())
+        holdings, infotable_controls = parse_infotable_with_controls(raw_doc.require_payload())
     except Exception as exc:
         raise RewashParseError(f"parse_infotable failed for accession={raw_doc.accession_number}: {exc}") from exc
 
@@ -1765,6 +1765,23 @@ def _apply_13f_infotable(
     # #1542 Task A — same per-accession lock as live ingest; serialises this
     # DELETE+INSERT against a concurrent _ingest_single_accession holdings write.
     acquire_13f_accession_write_lock(conn, raw_doc.accession_number)
+
+    # #3227 (IM) — the primary document is swept, so the list and the
+    # summary-page controls come from the accession's stored capture; the line
+    # count and value total come from this parse. A never-captured accession
+    # writes NULL segments. Written before the observation DELETE below: the
+    # bulk path's lock order (capture rows, then observation rows).
+    from app.services.thirteen_f_capture import recapture_from_stored, write_captures
+
+    capture = recapture_from_stored(
+        conn,
+        accession_number=raw_doc.accession_number,
+        line_count=infotable_controls.line_count,
+        value_total=infotable_controls.value_total,
+    )
+    if capture is not None:
+        write_captures(conn, [capture])
+
     with conn.cursor() as cur:
         cur.execute(
             "DELETE FROM institutional_holdings WHERE accession_number = %s",
@@ -1832,6 +1849,7 @@ def _apply_13f_infotable(
             period_of_report=period_of_report,
             filed_at=filed_at,
             resolved_holdings=resolved,
+            capture=capture,
         )
     # #953 — refresh over the UNION of prior + new instruments, not just
     # new: an instrument the re-parse dropped needs its _current row
