@@ -332,7 +332,7 @@ def test_two_candidates_with_different_period_ends() -> None:
 
     conn = _FakeConn([])
     _read_13f_covers(conn, 42, cats)  # type: ignore[arg-type]
-    assert conn.params == [{"iid": 42, "bound": datetime(2026, 7, 1, tzinfo=UTC)}]
+    assert conn.params == [{"iid": 42, "period": _P}]
 
 
 @pytest.mark.parametrize("reporter", ["921669", " 0000921669 ", "\t921669\n", "00921669"])
@@ -424,10 +424,20 @@ def test_no_candidate_means_no_cover_query() -> None:
 
 
 def test_the_read_maps_rows_in_column_order() -> None:
-    row = (" 0000921669", "C", _FILED, Decimal(0), Decimal(_T), Decimal(_T), "Carl C. Icahn", "SCHEDULE 13D/A")
+    row = (
+        " 0000921669",
+        "C",
+        _FILED,
+        Decimal(0),
+        Decimal(_T),
+        Decimal(_T),
+        "Carl C. Icahn",
+        "SCHEDULE 13D/A",
+        date(2026, 2, 20),
+    )
     conn = _FakeConn([row])
     assert _read_13f_covers(conn, 7, _cvi()) == [_CoverRow(*row)]  # type: ignore[arg-type]
-    assert conn.params == [{"iid": 7, "bound": datetime(2026, 7, 1, tzinfo=UTC)}]
+    assert conn.params == [{"iid": 7, "period": _P}]
 
 
 def _rollup(corrections: tuple[Any, ...]) -> OwnershipRollup:

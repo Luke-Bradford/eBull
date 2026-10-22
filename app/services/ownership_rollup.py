@@ -41,7 +41,7 @@ import logging
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from types import MappingProxyType
 from typing import Any, Final, Literal
@@ -4695,19 +4695,27 @@ def _fold_rows_into(primary: Holder, rows: Iterable[Holder]) -> Holder:
 # reports the same block for a co-filer (#3227)
 # See docs/specs/ownership/2026-10-21-3227-13f-position-scope.md (the 13D arm),
 # docs/specs/ownership/2026-10-22-3227-13f-13g-covers.md (the 13G extension, tier (U)) and
-# docs/specs/ownership/2026-10-22-3227-13f-13g-observation-block.md (tier (O))
+# docs/specs/ownership/2026-10-22-3227-13f-13g-observation-block.md (tier (O)); every tier selects M's
+# statement by its date of event (docs/specs/ownership/2026-10-22-3227-13f-statement-as-of.md)
 # ---------------------------------------------------------------------------
 
-# This instrument's Schedule 13D/G cover rows filed before a bound. Served by
-# ``idx_blockholder_filings_instrument_filed_at``; ``filing_id`` makes the row order total. One read
-# serves both arms: the 13D arm keys on ``reporter_cik``, the 13G extension on ``submission_type`` and
-# ``reporter_name`` (13G rows carry a NULL ``reporter_cik``; 13G-covers spec, Source rule).
+# This instrument's Schedule 13D/G cover rows whose statement date (:attr:`_CoverRow.statement_date`) is at
+# most a period end. ``LEAST`` is the fallback: a date of event after the filing date gives way to the
+# filing date. ``LEAST`` ignores a NULL operand, so a row with no ``filed_at`` (the schema allows it; 0 of
+# 122,225 rows on dev, 2026-10-22) is excluded explicitly, as the built filing-date bound excluded it. No
+# filing-date bound, since a quarter-end 13G is filed after the date it reports
+# (statement-as-of spec § Source rule), so only the instrument prefix of
+# ``idx_blockholder_filings_instrument_filed_at`` serves it; ``filing_id`` makes the row order total. One
+# read serves both arms: the 13D arm keys on ``reporter_cik``, the 13G extension on ``submission_type``
+# and ``reporter_name`` (13G rows carry a NULL ``reporter_cik``; 13G-covers spec, Source rule).
 _COVERS_13F_SQL: Final = """
     SELECT reporter_cik, accession_number, filed_at,
            sole_dispositive_power, shared_dispositive_power, aggregate_amount_owned,
-           reporter_name, submission_type
+           reporter_name, submission_type, date_of_event
       FROM blockholder_filings
-     WHERE instrument_id = %(iid)s AND filed_at < %(bound)s
+     WHERE instrument_id = %(iid)s AND filed_at IS NOT NULL
+       AND LEAST(COALESCE(date_of_event, (filed_at AT TIME ZONE 'UTC')::date),
+                 (filed_at AT TIME ZONE 'UTC')::date) <= %(period)s
      ORDER BY filed_at, accession_number, filing_id
 """
 
@@ -4748,6 +4756,16 @@ class _CoverRow:
     aggregate: Decimal | None
     reporter_name: str | None = None
     submission_type: str | None = None
+    date_of_event: date | None = None
+
+    @property
+    def statement_date(self) -> date:
+        """The date the statement is selected by (statement-as-of spec § Rule): ``date_of_event`` when
+        stored and not after the filing date (``filed_at`` as a UTC date), else the filing date. The
+        fallback keeps the row's filing-date eligibility; it is not a repair. :data:`_COVERS_13F_SQL`'s
+        bound computes the same date."""
+        filed = self.filed_at.astimezone(UTC).date()
+        return filed if self.date_of_event is None else min(self.date_of_event, filed)
 
     def reports(self, t: Decimal) -> bool:
         """Both dispositive fields present, sole + shared = ``t``, and aggregate = ``t``."""
@@ -4763,11 +4781,6 @@ def _digit_cik(cik: str | None) -> str | None:
     """:func:`_canonical_cik`, or ``None`` unless the result is all ASCII digits."""
     canon = _canonical_cik(cik)
     return canon if canon is not None and canon.isascii() and canon.isdigit() else None
-
-
-def _cover_bound(period: date) -> datetime:
-    """``P + 1 day`` at 00:00 UTC: a cover is in force for P when filed strictly before it."""
-    return datetime.combine(period + timedelta(days=1), time(), tzinfo=UTC)
 
 
 def _13f_candidates(
@@ -4793,12 +4806,12 @@ def _read_13f_covers(
     conn: psycopg.Connection[Any], instrument_id: int, by_category: Mapping[SliceCategory, Sequence[Holder]]
 ) -> list[_CoverRow]:
     """The cover rows :func:`_fold_13f_duplicates` needs: this instrument's ``blockholder_filings``
-    rows filed before the latest candidate's ``P + 1 day`` (UTC). No candidate, no query."""
+    rows whose statement date is at most the latest candidate's P. No candidate, no query."""
     periods = _13f_candidates(*_cofiler_identities(by_category)).values()
     if not periods:
         return []
     with conn.cursor(row_factory=psycopg.rows.tuple_row) as cur:
-        cur.execute(_COVERS_13F_SQL, {"iid": instrument_id, "bound": _cover_bound(max(periods))})
+        cur.execute(_COVERS_13F_SQL, {"iid": instrument_id, "period": max(periods)})
         return [_CoverRow(*row) for row in cur.fetchall()]
 
 
@@ -4884,8 +4897,10 @@ def _fold_13f_duplicates(
 
     * Candidate M: :func:`_13f_candidates`, total T, period end P.
     * Cover C: M's own row in ``covers`` (canonical CIK, all digits on both sides), the latest by
-      ``(filed_at, accession_number)`` filed before ``P + 1 day`` UTC. A newer cover that does not
-      match is not passed over for an older one that does. C matches when :meth:`_CoverRow.reports`
+      ``(statement_date, filed_at, accession_number)`` with :attr:`_CoverRow.statement_date` ≤ P
+      (docs/specs/ownership/2026-10-22-3227-13f-statement-as-of.md § Rule, frozen, which applies to
+      every selection below). A newer cover that does not match is not passed over for an older one
+      that does. C matches when :meth:`_CoverRow.reports`
       T.
     * Twin k: a co-filer graph node (:func:`_cofiler_graph`'s widened node set) with a canonical CIK
       other than M's, a row on C's accession reporting T, and an owner total of T.
@@ -4897,10 +4912,10 @@ def _fold_13f_duplicates(
 
     * It considers only candidates outside the 13D arm's matched set (cover reports T and has a
       twin, before uniqueness); every twin in that set is reserved.
-    * M's statements, filed before ``P + 1 day``: its rows by CIK, the 13G accessions whose filer of
+    * M's statements, with statement date ≤ P: its rows by CIK, the 13G accessions whose filer of
       record (:func:`_13g_filer_of_record`) is M, and the 13G accessions with a block named as one of
       M's 13F ``filer_name`` values (:func:`_normalise_holder_text` equality). C is the latest by
-      ``(filed_at, accession_number)``; if that is a row found by CIK, the extension does nothing.
+      ``(statement_date, filed_at, accession_number)``; if that is a row found by CIK, the extension does nothing.
     * C matches when every stored block on it :meth:`_CoverRow.reports` T.
     * Twin k: a node with a canonical CIK other than M's and an owner total of T. If M is C's filer
       of record, k has a Form 3/4/5 ``filer_name`` equal to a block name on C; otherwise k's
@@ -4946,10 +4961,10 @@ def _fold_13f_duplicates(
     matched: dict[str, tuple[list[str], _CoverRow]] = {}
     for m, period in candidates.items():
         t, m_cik = totals[m], _digit_cik(_identity_canon(m))
-        filed = [c for c in by_reporter.get(m_cik or "", ()) if c.filed_at < _cover_bound(period)]
-        if not filed:
+        in_force = [c for c in by_reporter.get(m_cik or "", ()) if c.statement_date <= period]
+        if not in_force:
             continue
-        cover = max(filed, key=lambda c: (c.filed_at, c.accession_number))
+        cover = max(in_force, key=lambda c: (c.statement_date, c.filed_at, c.accession_number))
         if not cover.reports(t):
             continue
         twins = sorted(
@@ -4991,7 +5006,9 @@ def _fold_13f_duplicates(
         )
 
     def _filed(cover: _CoverRow) -> str:
-        return cover.filed_at.astimezone(UTC).date().isoformat()
+        # The cover parenthetical's dates: the stored date of event as it is, only when stored.
+        filed = cover.filed_at.astimezone(UTC).date().isoformat()
+        return filed if cover.date_of_event is None else f"{filed}, date of event {cover.date_of_event.isoformat()}"
 
     for m, (twins, cover) in matched.items():
         if len(twins) != 1 or twin_count[twins[0]] != 1:
@@ -5042,19 +5059,25 @@ def _fold_13f_duplicates(
     for m, period in candidates.items() if g13_blocks else ():
         if m in matched:
             continue
-        t, m_cik, bound = totals[m], _digit_cik(_identity_canon(m)), _cover_bound(period)
+        t, m_cik = totals[m], _digit_cik(_identity_canon(m))
         accs = {
             *g13_by_filer.get(m_cik or "", ()),
             *(a for n in _names(m, frozenset({"13f"})) for a in g13_by_name.get(n, ())),
         }
-        by_cik = {(c.filed_at, c.accession_number) for c in by_reporter.get(m_cik or "", ()) if c.filed_at < bound}
-        statements = by_cik | {(b.filed_at, a) for a in accs for b in g13_blocks[a] if b.filed_at < bound}
+        by_cik = {
+            (c.statement_date, c.filed_at, c.accession_number)
+            for c in by_reporter.get(m_cik or "", ())
+            if c.statement_date <= period
+        }
+        statements = by_cik | {
+            (b.statement_date, b.filed_at, a) for a in accs for b in g13_blocks[a] if b.statement_date <= period
+        }
         if not statements:
             continue
         latest = max(statements)
         if latest in by_cik:
             continue
-        accession = latest[1]
+        accession = latest[2]
         blocks = g13_blocks[accession]
         filer = g13_filer[accession]
         m_is_filer = filer is not None and filer == m_cik
@@ -5121,7 +5144,7 @@ def _fold_13f_duplicates(
             and all(h.winning_source == "13g" and h.winning_accession == accession for h in rows_by_identity[k])
         )
         if twins:
-            # ``filed_at`` is the accession's, so any block of C gives the same date.
+            # ``filed_at`` and ``date_of_event`` are the accession's, so any block of C gives the same dates.
             o_matched[m] = (twins, accession, _filed(blocks[0]), filer, obs_name, m_block_names)
     o_count: dict[str, int] = {}
     for twins, *_ in o_matched.values():
