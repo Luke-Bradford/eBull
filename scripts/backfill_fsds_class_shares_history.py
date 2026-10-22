@@ -39,7 +39,6 @@ from pathlib import Path
 import psycopg
 
 from app.config import settings
-from app.security.master_key import resolve_data_dir
 from app.services.fsds_class_shares import ingest_fsds_class_shares_archive
 from app.services.sec_bulk_download import (
     SEC_BASE_URL,
@@ -48,19 +47,14 @@ from app.services.sec_bulk_download import (
     last_n_quarters,
     purge_archive_artifacts,
 )
+from app.services.sec_bulk_orchestrator_jobs import bulk_dir
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 
-def _bulk_dir() -> Path:
-    # Mirrors app.services.sec_bulk_orchestrator_jobs._bulk_dir without importing
-    # that module (it pulls in the insider-ingest import cycle).
-    return resolve_data_dir() / "sec" / "bulk"
-
-
 def _archive_path(name: str) -> Path:
-    return _bulk_dir() / name
+    return bulk_dir() / name
 
 
 def _fsds_archives(quarters: list[str]) -> list[BulkArchive]:
@@ -98,7 +92,7 @@ def main(argv: list[str] | None = None) -> int:
     # skip); the orchestrator's probe is for the live bootstrap, not a backfill.
     result = asyncio.run(
         download_bulk_archives(
-            target_dir=_bulk_dir(),
+            target_dir=bulk_dir(),
             user_agent=settings.sec_user_agent,
             archives=archives,
             bandwidth_threshold_mbps=0,
@@ -127,7 +121,7 @@ def main(argv: list[str] | None = None) -> int:
         if not args.keep:
             # Sidecars go with the ZIP (#3113) — unlinking the .zip alone is
             # what left the 9 orphan fsds_*.sha256 files on the dev cache.
-            purge_archive_artifacts(_bulk_dir(), path.name)
+            purge_archive_artifacts(bulk_dir(), path.name)
 
     logger.info("FSDS history backfill: complete. quarters_ingested=%d rows_written=%d", ingested, total_written)
     return 0

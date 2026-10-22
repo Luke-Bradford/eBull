@@ -67,7 +67,7 @@ from scripts.audit_2790_insider_future_period import _SCOPE
 
 
 def _default_archive_dir() -> Path:
-    """The bulk cache the ingest orchestrator itself uses (``_bulk_dir``)."""
+    """The bulk cache the ingest orchestrator itself uses (``bulk_dir``)."""
     return resolve_data_dir() / "sec" / "bulk"
 
 

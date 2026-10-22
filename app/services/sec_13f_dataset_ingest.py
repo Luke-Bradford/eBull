@@ -40,11 +40,12 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import logging
 import re
 import zipfile
-from collections.abc import Iterator
-from dataclasses import dataclass, field
+from collections.abc import Iterable, Iterator
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -59,6 +60,16 @@ from app.services.cusip_resolver import (
 )
 from app.services.institutional_holdings import thirteen_f_retention_cutoff
 from app.services.ownership_observations import period_end_within_bounds
+from app.services.thirteen_f_capture import (
+    SEGMENTS_ON_CONFLICT_SQL,
+    AccessionCapture,
+    OtherManagerEntry,
+    new_capture,
+    normalise_discretion,
+    other_managers_sort_key,
+    parse_column7,
+    write_captures,
+)
 
 # SEC FORM13F_metadata.json column description: "Starting on
 # January 3, 2023, market value is reported rounded to the nearest
@@ -103,6 +114,9 @@ class Form13FIngestResult:
     figi_identifiers_seen: int = 0  # #1302 — distinct FIGIs collected this archive
     figi_identifiers_written: int = 0  # #1302 — newly inserted external_identifiers rows
     touched_instrument_ids: set[int] = field(default_factory=set)
+    # #3227 (IM) — capture records written, by status; 0 when the archive has no OTHERMANAGER2.tsv.
+    captures_by_status: dict[str, int] = field(default_factory=dict)
+    column7_invalid_lines: int = 0
 
 
 # #1302 — the 13F INFOTABLE gained a ``FIGI`` column on 2023-01-03 (NOT
@@ -330,6 +344,11 @@ _STG_COPY_COLUMNS = (
     "voting_shared",
     "voting_none",
     "exposure_kind",
+    "capture_id",
+    "cusip",
+    "discretion",
+    "om_json",
+    "om_sort",
 )
 
 
@@ -361,7 +380,12 @@ CREATE TEMP TABLE _stg_13f (
     voting_sole        NUMERIC(24, 4),
     voting_shared      NUMERIC(24, 4),
     voting_none        NUMERIC(24, 4),
-    exposure_kind      TEXT
+    exposure_kind      TEXT,
+    capture_id         UUID,
+    cusip              TEXT,
+    discretion         TEXT,
+    om_json            JSONB,
+    om_sort            TEXT
 ) ON COMMIT DROP
 """
 
@@ -395,35 +419,79 @@ CREATE TEMP TABLE _stg_13f (
 # source_field, source_url, filed_at, period_start, ingest_run_id) are
 # identical within a (filer, accession) group, so max() is a safe
 # deterministic pick.
-_INSERT_FROM_STG_SQL = """
+# #3227 (IM) — the position's segments (§ Change 1 of
+# docs/specs/ownership/2026-10-22-3227-13f-included-managers.md), aggregated
+# in SQL by (Column 6, Column 7) over the staged lines, sorted as
+# ``thirteen_f_capture.segments_payload`` sorts them (``COLLATE "C"``; Column 7
+# by ``om_sort``). NULL when the archive has no OTHERMANAGER2.tsv (no
+# ``capture_id``). ``tests/test_thirteen_f_capture.py`` pins the parity.
+_SEGMENTS_CTE_SQL = """
+WITH seg AS (
+    SELECT instrument_id, filer_cik, ownership_nature, period_end, source_document_id, exposure_kind,
+           discretion, om_sort, om_json, SUM(shares) AS shares
+    FROM _stg_13f
+    GROUP BY instrument_id, filer_cik, ownership_nature, period_end, source_document_id, exposure_kind,
+             discretion, om_sort, om_json
+), lines AS (
+    SELECT instrument_id, filer_cik, ownership_nature, period_end, source_document_id, exposure_kind,
+           jsonb_agg(
+               jsonb_build_object(
+                   'discretion', discretion, 'other_managers', om_json, 'shares', trim_scale(shares)::text
+               )
+               ORDER BY COALESCE(discretion, '') COLLATE "C", om_sort COLLATE "C"
+           ) AS lines
+    FROM seg
+    GROUP BY instrument_id, filer_cik, ownership_nature, period_end, source_document_id, exposure_kind
+), cus AS (
+    SELECT instrument_id, filer_cik, ownership_nature, period_end, source_document_id, exposure_kind,
+           max(capture_id::text) AS capture_id,
+           to_jsonb(array_agg(DISTINCT cusip COLLATE "C" ORDER BY cusip COLLATE "C")) AS cusips
+    FROM _stg_13f
+    GROUP BY instrument_id, filer_cik, ownership_nature, period_end, source_document_id, exposure_kind
+), payload AS (
+    SELECT c.instrument_id, c.filer_cik, c.ownership_nature, c.period_end, c.source_document_id, c.exposure_kind,
+           c.cusips,
+           CASE WHEN c.capture_id IS NULL THEN NULL
+                ELSE jsonb_build_object('capture_id', c.capture_id, 'cusips', c.cusips, 'lines', l.lines)
+           END AS segments
+    FROM cus c
+    JOIN lines l USING (instrument_id, filer_cik, ownership_nature, period_end, source_document_id, exposure_kind)
+)
+"""
+
+_INSERT_FROM_STG_SQL: Final = (
+    _SEGMENTS_CTE_SQL
+    + """
 INSERT INTO ownership_institutions_observations (
     instrument_id, filer_cik, filer_name, filer_type, ownership_nature,
     source, source_document_id, source_accession, source_field, source_url,
     filed_at, period_start, period_end, ingest_run_id,
-    shares, market_value_usd, voting_authority, exposure_kind
+    shares, market_value_usd, voting_authority, exposure_kind, thirteen_f_segments
 )
 SELECT
-    instrument_id, filer_cik, max(filer_name), max(filer_type), ownership_nature,
-    max(source), source_document_id, max(source_accession), max(source_field), max(source_url),
-    max(filed_at), max(period_start), period_end,
+    g.instrument_id, g.filer_cik, max(g.filer_name), max(g.filer_type), g.ownership_nature,
+    max(g.source), g.source_document_id, max(g.source_accession), max(g.source_field), max(g.source_url),
+    max(g.filed_at), max(g.period_start), g.period_end,
     -- ingest_run_id is constant across a single archive drain; PG has no
     -- max(uuid), so pick the (identical) value via a text round-trip.
-    max(ingest_run_id::text)::uuid,
-    SUM(shares), SUM(market_value_usd),
+    max(g.ingest_run_id::text)::uuid,
+    SUM(g.shares), SUM(g.market_value_usd),
     CASE
-        WHEN COALESCE(SUM(voting_sole), 0) = 0
-         AND COALESCE(SUM(voting_shared), 0) = 0
-         AND COALESCE(SUM(voting_none), 0) = 0 THEN NULL
-        WHEN COALESCE(SUM(voting_sole), 0) >= COALESCE(SUM(voting_shared), 0)
-         AND COALESCE(SUM(voting_sole), 0) >= COALESCE(SUM(voting_none), 0) THEN 'SOLE'
-        WHEN COALESCE(SUM(voting_shared), 0) >= COALESCE(SUM(voting_none), 0) THEN 'SHARED'
+        WHEN COALESCE(SUM(g.voting_sole), 0) = 0
+         AND COALESCE(SUM(g.voting_shared), 0) = 0
+         AND COALESCE(SUM(g.voting_none), 0) = 0 THEN NULL
+        WHEN COALESCE(SUM(g.voting_sole), 0) >= COALESCE(SUM(g.voting_shared), 0)
+         AND COALESCE(SUM(g.voting_sole), 0) >= COALESCE(SUM(g.voting_none), 0) THEN 'SOLE'
+        WHEN COALESCE(SUM(g.voting_shared), 0) >= COALESCE(SUM(g.voting_none), 0) THEN 'SHARED'
         ELSE 'NONE'
     END,
-    exposure_kind
-FROM _stg_13f
+    g.exposure_kind,
+    p.segments
+FROM _stg_13f g
+JOIN payload p USING (instrument_id, filer_cik, ownership_nature, period_end, source_document_id, exposure_kind)
 GROUP BY
-    instrument_id, filer_cik, ownership_nature, period_end,
-    source_document_id, exposure_kind
+    g.instrument_id, g.filer_cik, g.ownership_nature, g.period_end,
+    g.source_document_id, g.exposure_kind, p.segments
 ON CONFLICT (
     instrument_id, filer_cik, ownership_nature, period_end,
     source_document_id, exposure_kind
@@ -440,8 +508,49 @@ DO UPDATE SET
     market_value_usd = EXCLUDED.market_value_usd,
     voting_authority = EXCLUDED.voting_authority,
     ingest_run_id = EXCLUDED.ingest_run_id,
-    ingested_at = clock_timestamp()
+    ingested_at = clock_timestamp(),
+    """
+    + SEGMENTS_ON_CONFLICT_SQL
+)
+
+# #3227 (IM) — an archive without OTHERMANAGER2.tsv cannot capture. Before its
+# drain, clear the stored segments of every observation it rewrites under a
+# different CUSIP set; the drain's ``SEGMENTS_ON_CONFLICT_SQL`` then keeps the
+# rest only when shares are equal (risk 18's bulk fingerprint).
+_CLEAR_SEGMENTS_ON_CUSIP_CHANGE_SQL: Final = (
+    _SEGMENTS_CTE_SQL
+    + """
+UPDATE ownership_institutions_observations o
+SET thirteen_f_segments = NULL
+FROM payload p
+WHERE o.instrument_id = p.instrument_id
+  AND o.filer_cik = p.filer_cik
+  AND o.ownership_nature = p.ownership_nature
+  AND o.period_end = p.period_end
+  AND o.source_document_id = p.source_document_id
+  AND o.exposure_kind = p.exposure_kind
+  AND o.thirteen_f_segments IS NOT NULL
+  AND (o.thirteen_f_segments -> 'cusips') IS DISTINCT FROM p.cusips
 """
+)
+
+# #3227 (IM) — the capture-only backfill (``scripts/backfill_13f_included_managers.py``):
+# writes ``thirteen_f_segments`` on the existing 13F observations and nothing else.
+_UPDATE_SEGMENTS_FROM_STG_SQL: Final = (
+    _SEGMENTS_CTE_SQL
+    + """
+UPDATE ownership_institutions_observations o
+SET thirteen_f_segments = p.segments
+FROM payload p
+WHERE o.instrument_id = p.instrument_id
+  AND o.filer_cik = p.filer_cik
+  AND o.ownership_nature = p.ownership_nature
+  AND o.period_end = p.period_end
+  AND o.source_document_id = p.source_document_id
+  AND o.exposure_kind = p.exposure_kind
+  AND o.source = '13f'
+"""
+)
 
 
 def _build_copy_row(
@@ -466,6 +575,10 @@ def _build_copy_row(
     voting_shared: Decimal,
     voting_none: Decimal,
     exposure_kind: str,
+    capture_id: UUID | None,
+    cusip: str,
+    discretion: str | None,
+    other_managers: tuple[int, ...] | None,
 ) -> tuple[Any, ...]:
     """Return one staged row in the column order _STG_COPY_COLUMNS expects.
 
@@ -494,7 +607,68 @@ def _build_copy_row(
         voting_shared,
         voting_none,
         exposure_kind,
+        str(capture_id) if capture_id is not None else None,
+        cusip,
+        discretion,
+        json.dumps(list(other_managers)) if other_managers is not None else "null",
+        other_managers_sort_key(other_managers),
     )
+
+
+def _control_int(text: str | None) -> int | None:
+    value = (text or "").strip()
+    return int(value) if value.isascii() and value.isdigit() else None
+
+
+def _accession_captures(
+    *,
+    accessions: Iterable[str],
+    summary_by_accession: dict[str, dict[str, str]],
+    entries_by_accession: dict[str, list[OtherManagerEntry]],
+    line_stats: dict[str, list[Any]],
+    capture_ids: dict[str, UUID],
+) -> list[AccessionCapture]:
+    """#3227 (IM) — one capture per SUBMISSION accession, against SUMMARYPAGE's
+    controls (Special Instructions 6.a-6.c). The line count and value total are
+    over every INFOTABLE row of the accession, before any row is filtered."""
+    captures: list[AccessionCapture] = []
+    for accession in accessions:
+        summary = summary_by_accession.get(accession) or {}
+        count, value_total = line_stats.get(accession, (0, Decimal(0)))
+        capture = new_capture(
+            accession_number=accession,
+            source="dataset",
+            entries=entries_by_accession.get(accession, ()),
+            expected_list_count=_control_int(summary.get("OTHERINCLUDEDMANAGERSCOUNT")),
+            line_count=count,
+            expected_line_count=_control_int(summary.get("TABLEENTRYTOTAL")),
+            value_total=value_total,
+            expected_value_total=_parse_decimal(summary.get("TABLEVALUETOTAL")),
+        )
+        captures.append(replace(capture, capture_id=capture_ids[accession]))
+    return captures
+
+
+def _index_other_managers(zf: zipfile.ZipFile) -> dict[str, list[OtherManagerEntry]]:
+    """OTHERMANAGER2.tsv grouped by accession, entries in file order, as filed."""
+    entries: dict[str, list[OtherManagerEntry]] = {}
+    for row in _iter_tsv(zf, "OTHERMANAGER2.tsv"):
+        accession = (row.get("ACCESSION_NUMBER") or "").strip()
+        if not accession:
+            continue
+        entries.setdefault(accession, []).append(
+            OtherManagerEntry(
+                sequence_number_raw=(row.get("SEQUENCENUMBER") or "").strip() or None,
+                cik=(row.get("CIK") or "").strip() or None,
+                name=(row.get("NAME") or "").strip() or None,
+                form13f_file_number=(row.get("FORM13FFILENUMBER") or "").strip() or None,
+            )
+        )
+    return entries
+
+
+def _has_member(zf: zipfile.ZipFile, name: str) -> bool:
+    return any(n == name or n.endswith("/" + name) for n in zf.namelist())
 
 
 def _flush_unresolved_buffer(
@@ -550,8 +724,17 @@ def ingest_13f_dataset_archive(
     conn: psycopg.Connection[Any],
     archive_path: Path,
     ingest_run_id: UUID | None = None,
+    capture_only: bool = False,
 ) -> Form13FIngestResult:
     """Walk one Form 13F Data Set ZIP and append observations.
+
+    #3227 (IM): an archive with OTHERMANAGER2.tsv also captures every
+    accession (``institutional_13f_captures`` + the List of Other Included
+    Managers) and writes each observation's ``thirteen_f_segments`` under its
+    accession's ``capture_id``. ``capture_only=True`` is the backfill: it
+    writes the captures and UPDATEs ``thirteen_f_segments`` on the existing
+    13F observations, and writes nothing else (no observation upsert, no
+    unresolved-CUSIP or FIGI write).
 
     The 13F dataset's three TSVs join on ``ACCESSION_NUMBER``. The
     primary loop iterates ``INFOTABLE.tsv`` (one row per holding) and
@@ -622,6 +805,20 @@ def ingest_13f_dataset_archive(
         sub_by_accession, result.submissions_seen = _index_tsv_by_accession(zf, "SUBMISSION.tsv")
         cover_by_accession, result.coverpage_seen = _index_tsv_by_accession(zf, "COVERPAGE.tsv")
 
+        # #3227 (IM) — capture inputs. An archive without OTHERMANAGER2.tsv
+        # (form13f_01jun2025-31aug2025 and older) cannot capture.
+        has_list = _has_member(zf, "OTHERMANAGER2.tsv")
+        if capture_only and not has_list:
+            raise ValueError(f"{archive_path.name} has no OTHERMANAGER2.tsv; nothing to capture")
+        summary_by_accession: dict[str, dict[str, str]] = {}
+        entries_by_accession: dict[str, list[OtherManagerEntry]] = {}
+        capture_ids: dict[str, UUID] = {}
+        if has_list:
+            summary_by_accession, _ = _index_tsv_by_accession(zf, "SUMMARYPAGE.tsv")
+            entries_by_accession = _index_other_managers(zf)
+            capture_ids = {accession: uuid4() for accession in sub_by_accession}
+        line_stats: dict[str, list[Any]] = {}
+
         # Stream INFOTABLE → pre-validate → COPY into _stg_13f. Single
         # cursor.copy() context spans every validated row in the
         # archive so the wire-level COPY drains in one pass. PG17
@@ -652,6 +849,10 @@ def ingest_13f_dataset_archive(
                     if not accession:
                         result.rows_skipped_orphan_accession += 1
                         continue
+                    if has_list:
+                        stats = line_stats.setdefault(accession, [0, Decimal(0)])
+                        stats[0] += 1
+                        stats[1] += _parse_decimal(row.get("VALUE")) or Decimal(0)
                     sub = sub_by_accession.get(accession)
                     cover = cover_by_accession.get(accession)
                     if sub is None or cover is None:
@@ -685,6 +886,8 @@ def ingest_13f_dataset_archive(
                     instrument_id = cusip_map.get(cusip)
                     if instrument_id is None:
                         result.rows_skipped_unresolved_cusip += 1
+                        if capture_only:
+                            continue
                         # PR-1a — record (cusip, filer, period) so the
                         # PR-1b OpenFIGI sweep can rewash. period_end is
                         # guaranteed in-window (non-None) by the #1433 guard
@@ -722,7 +925,11 @@ def ingest_13f_dataset_archive(
                     # archives can span 30+ years; the per-row check honours
                     # the calendar-quarter cap regardless of the archive's
                     # nominal coverage window.
-                    if period_end < retention_cutoff:
+                    #
+                    # #3227 (IM) — the capture-only backfill describes observations
+                    # that already exist, including late filings whose period has
+                    # since fallen behind the cap; it writes no new observation.
+                    if period_end < retention_cutoff and not capture_only:
                         result.rows_skipped_retention += 1
                         continue
 
@@ -760,6 +967,10 @@ def ingest_13f_dataset_archive(
                     voting_sole, voting_shared, voting_none = _read_voting_components(row)
                     exposure_kind = _map_putcall(row.get("PUTCALL"))
 
+                    other_managers = parse_column7(row.get("OTHERMANAGER"))
+                    if other_managers is None:
+                        result.column7_invalid_lines += 1
+
                     accession_no_dashes = accession.replace("-", "")
                     source_url = f"https://www.sec.gov/Archives/edgar/data/{int(filer_cik)}/{accession_no_dashes}/"
 
@@ -793,6 +1004,10 @@ def ingest_13f_dataset_archive(
                             voting_shared=voting_shared,
                             voting_none=voting_none,
                             exposure_kind=exposure_kind,
+                            capture_id=capture_ids.get(accession),
+                            cusip=cusip,
+                            discretion=normalise_discretion(row.get("INVESTMENTDISCRETION")),
+                            other_managers=other_managers,
                         )
                     )
                     copy_attempted += 1
@@ -822,6 +1037,24 @@ def ingest_13f_dataset_archive(
     # later violates a target-table CHECK constraint at INSERT raises;
     # the orchestrator records the archive as failed and rolls back
     # cleanly via the per-archive boundary.
+    if has_list:
+        captures = _accession_captures(
+            accessions=sub_by_accession,
+            summary_by_accession=summary_by_accession,
+            entries_by_accession=entries_by_accession,
+            line_stats=line_stats,
+            capture_ids=capture_ids,
+        )
+        write_captures(conn, captures)
+        for capture in captures:
+            result.captures_by_status[capture.status] = result.captures_by_status.get(capture.status, 0) + 1
+    if result.column7_invalid_lines:
+        logger.warning(
+            "13F dataset %s: %d staged lines carry a Column 7 outside the sequence-number grammar",
+            archive_path.name,
+            result.column7_invalid_lines,
+        )
+
     accepted_via_copy = 0
     with conn.cursor() as cur:
         cur.execute("SELECT COUNT(*) FROM _stg_13f")
@@ -836,6 +1069,12 @@ def ingest_13f_dataset_archive(
         skipped_by_copy = copy_attempted - accepted_via_copy
         if skipped_by_copy > 0:
             result.rows_skipped_bad_data += skipped_by_copy
+        if capture_only:
+            cur.execute(_UPDATE_SEGMENTS_FROM_STG_SQL)
+            result.rows_written = max(cur.rowcount, 0)
+            return result
+        if not has_list:
+            cur.execute(_CLEAR_SEGMENTS_ON_CUSIP_CHANGE_SQL)
         cur.execute(_INSERT_FROM_STG_SQL)
         # cur.rowcount counts inserts + updates (ON CONFLICT DO UPDATE).
         # Both paths represent successful writes from the operator's

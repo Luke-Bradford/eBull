@@ -87,7 +87,7 @@ def test_cancel_signal_aborts_before_first_archive(
     from app.services.processes.bootstrap_cancel_signal import active_bootstrap_run
 
     with (
-        patch.object(jobs, "_bulk_dir", return_value=bulk_dir),
+        patch.object(jobs, "bulk_dir", return_value=bulk_dir),
         patch.object(jobs, "_current_running_bootstrap_run_id", return_value=None),
         patch.object(jobs, "ingest_13f_dataset_archive", side_effect=_record),
         patch.object(jobs, "ingest_insider_dataset_archive", side_effect=_record),
@@ -183,7 +183,7 @@ def test_each_job_calls_only_its_own_ingester(
     job = getattr(jobs, job_name)
 
     patches = [
-        patch.object(jobs, "_bulk_dir", return_value=bulk_dir),
+        patch.object(jobs, "bulk_dir", return_value=bulk_dir),
         patch.object(jobs, "_current_running_bootstrap_run_id", return_value=None),
         patch.object(jobs, expected_ingester, side_effect=_make_recorder(expected_calls)),
         # The ingesters are recorders, so the job's per-archive connection is
@@ -244,7 +244,7 @@ def test_no_archives_skips_loop_without_cancel_check(
     job = getattr(jobs, job_name)
 
     with (
-        patch.object(jobs, "_bulk_dir", return_value=bulk_dir),
+        patch.object(jobs, "bulk_dir", return_value=bulk_dir),
         patch.object(jobs, "_current_running_bootstrap_run_id", return_value=None),
     ):
         # Returns cleanly with no archives present, no exception.

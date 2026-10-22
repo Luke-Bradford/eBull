@@ -65,6 +65,8 @@ from uuid import UUID
 import psycopg
 import psycopg.rows
 
+from app.services.thirteen_f_capture import SEGMENTS_ON_CONFLICT_SQL, segments_jsonb
+
 # Pinned to the SEC series identifier shape ``S0000xxxxx``. Used by
 # the fund-observation write-side guard (Codex pre-impl review #2 +
 # #8) and asserted by the ``ownership_funds_observations`` /
@@ -1026,6 +1028,7 @@ def record_institution_observation(
     market_value_usd: Decimal | None,
     voting_authority: str | None,
     exposure_kind: Literal["EQUITY", "PUT", "CALL"] = "EQUITY",
+    thirteen_f_segments: dict[str, Any] | None = None,
 ) -> None:
     """Append one institution observation. Idempotent on
     ``(instrument_id, filer_cik, ownership_nature, period_end, source_document_id, exposure_kind)``.
@@ -1048,7 +1051,12 @@ def record_institution_observation(
     full reported position. ``'voting'`` is reserved for an explicit
     voting-authority overlay row that operator UI gains in a future
     phase. Mapping pinned here so the per-source default is
-    consistent across the codebase."""
+    consistent across the codebase.
+
+    ``thirteen_f_segments`` (#3227 (IM)): a capture-capable 13F writer passes
+    the position's segments and replaces the stored ones; None is a write that
+    cannot capture (the weekly ``sync_institutions``), which keeps the stored
+    segments only when its shares are equal (``SEGMENTS_ON_CONFLICT_SQL``)."""
     if filer_cik is None or not filer_cik.strip():
         raise ValueError("record_institution_observation: filer_cik is required")
     with conn.cursor() as cur:
@@ -1058,12 +1066,12 @@ def record_institution_observation(
                 instrument_id, filer_cik, filer_name, filer_type, ownership_nature,
                 source, source_document_id, source_accession, source_field, source_url,
                 filed_at, period_start, period_end, ingest_run_id,
-                shares, market_value_usd, voting_authority, exposure_kind
+                shares, market_value_usd, voting_authority, exposure_kind, thirteen_f_segments
             ) VALUES (
                 %(iid)s, %(cik)s, %(name)s, %(ftype)s, %(nature)s,
                 %(source)s, %(doc_id)s, %(accession)s, %(field)s, %(url)s,
                 %(filed_at)s, %(period_start)s, %(period_end)s, %(run_id)s,
-                %(shares)s, %(mv)s, %(voting)s, %(exp)s
+                %(shares)s, %(mv)s, %(voting)s, %(exp)s, %(segments)s
             )
             ON CONFLICT (instrument_id, filer_cik, ownership_nature, period_end, source_document_id, exposure_kind)
             DO UPDATE SET
@@ -1078,8 +1086,9 @@ def record_institution_observation(
                 market_value_usd = EXCLUDED.market_value_usd,
                 voting_authority = EXCLUDED.voting_authority,
                 ingest_run_id = EXCLUDED.ingest_run_id,
-                ingested_at = clock_timestamp()
-            """,
+                ingested_at = clock_timestamp(),
+                """
+            + SEGMENTS_ON_CONFLICT_SQL,
             {
                 "iid": instrument_id,
                 "cik": filer_cik.strip(),
@@ -1099,6 +1108,7 @@ def record_institution_observation(
                 "mv": market_value_usd,
                 "voting": voting_authority,
                 "exp": exposure_kind,
+                "segments": segments_jsonb(thirteen_f_segments),
             },
         )
 

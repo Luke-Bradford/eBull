@@ -388,6 +388,8 @@ _PLANNER_TABLES: tuple[str, ...] = (
     "unresolved_13f_cusips",
     "institutional_holdings_ingest_log",
     "institutional_holdings",
+    "institutional_13f_captures",
+    "institutional_13f_other_managers",
     # ⚠ These three are ALSO migration-seeded (5 / 6 / 1 rows in a pristine
     # template), which makes them the one case that looks like #2224 cause 3
     # and is not. They stay WIPED, deliberately (#2224 residual 1, settled

@@ -9,6 +9,7 @@ the real Vanguard Group Q4-2025 13F-HR (SEC EDGAR accession
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -131,7 +132,12 @@ class TestSumAggregation:
     def test_single_row_passthrough_identity(self) -> None:
         only = _h(shares=10)
         out = normalise_13f_holdings([only], filed_at=_POST_CUTOVER)
-        assert out[0] is only  # _sum_group short-circuits len==1
+        # _sum_group short-circuits len==1; only the #3227 (IM) segment state is added.
+        assert out[0] == replace(
+            only,
+            segments=((only.investment_discretion, (), only.shares_or_principal),),
+            cusips=(only.cusip,),
+        )
 
     def test_first_seen_order_preserved(self) -> None:
         out = normalise_13f_holdings(

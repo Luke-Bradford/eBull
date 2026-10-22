@@ -50,8 +50,9 @@ from app.jobs.job_connection import job_statement_timeout_ms
 from app.providers.implementations.sec_13f import (
     ThirteenFFilerInfo,
     ThirteenFHolding,
+    ThirteenFInfotableControls,
     dominant_voting_authority,
-    parse_infotable,
+    parse_infotable_with_controls,
     parse_primary_doc,
 )
 from app.services import raw_filings
@@ -69,6 +70,13 @@ from app.services.sec_filer_concurrency import (
     FilerWorkResult,
     drain_filers_concurrently,
     make_filer_runner,
+)
+from app.services.thirteen_f_capture import (
+    AccessionCapture,
+    new_capture,
+    parse_column7,
+    segments_payload,
+    write_captures,
 )
 from app.services.thirteen_f_normalise import (
     merge_resolved_by_instrument,
@@ -872,9 +880,17 @@ def _record_13f_observations_for_filing(
     period_of_report: date,
     filed_at: datetime,
     resolved_holdings: list[tuple[int, ThirteenFHolding]],
+    capture: AccessionCapture | None,
 ) -> None:
     """Record one ``ownership_institutions_observations`` row per
     (instrument, exposure_kind) within a single 13F accession.
+
+    #3227 (IM): every observation written here carries its segments under
+    ``capture``'s ``capture_id``. The caller writes the capture first
+    (:func:`write_filing_capture` / ``write_captures``), in the same
+    transaction and before any observation write, which is the bulk path's
+    lock order. None (the rewash of a never-captured accession) writes NULL
+    segments.
 
     Mirrors the legacy batch-sync rule in
     ``ownership_observations_sync.sync_institutions``:
@@ -917,7 +933,47 @@ def _record_13f_observations_for_filing(
             market_value_usd=Decimal(holding.value_usd) if holding.value_usd is not None else None,
             voting_authority=dominant_voting_authority(holding),
             exposure_kind=exposure,
+            thirteen_f_segments=(
+                segments_payload(capture.capture_id, holding.cusips, holding.segments) if capture is not None else None
+            ),
         )
+
+
+def write_filing_capture(
+    conn: psycopg.Connection[Any],
+    *,
+    accession_number: str,
+    info: ThirteenFFilerInfo,
+    controls: ThirteenFInfotableControls,
+    holdings: list[ThirteenFHolding],
+) -> AccessionCapture:
+    """Write the #3227 (IM) capture of a per-filing accession: the primary
+    document's summary page plus what the information-table parse saw. Written
+    whether or not any holding resolves, so a later CUSIP rewash can recapture
+    from it (``recapture_from_stored``), and before any observation write, the
+    bulk path's lock order (capture rows, then observation rows). Logs one WARN per
+    accession whose lines carry a Column 7 outside the sequence-number grammar
+    (``parse_infotable`` has no accession to log with)."""
+    invalid = sum(1 for h in holdings if parse_column7(h.other_managers_raw) is None)
+    if invalid:
+        logger.warning(
+            "13F accession=%s: %d information-table lines carry a Column 7 outside the sequence-number grammar",
+            accession_number,
+            invalid,
+        )
+    page = info.summary_page
+    capture = new_capture(
+        accession_number=accession_number,
+        source="xml",
+        entries=page.other_managers if page is not None else (),
+        expected_list_count=page.other_included_managers_count if page is not None else None,
+        line_count=controls.line_count,
+        expected_line_count=page.table_entry_total if page is not None else None,
+        value_total=controls.value_total,
+        expected_value_total=page.table_value_total if page is not None else None,
+    )
+    write_captures(conn, [capture])
+    return capture
 
 
 def acquire_13f_accession_write_lock(conn: psycopg.Connection[Any], accession_number: str) -> None:
@@ -1614,7 +1670,7 @@ def _ingest_single_accession(
     conn.commit()
 
     try:
-        holdings = parse_infotable(infotable_xml)
+        holdings, infotable_controls = parse_infotable_with_controls(infotable_xml)
     except (ValueError, ET.ParseError) as exc:
         logger.exception(
             "13F ingest: infotable.xml parse failed for cik=%s accession=%s",
@@ -1661,6 +1717,10 @@ def _ingest_single_accession(
     # fetches, inside the holdings-write transaction) so the lock is held only
     # across the institutional_holdings mutation, not the network fetches.
     acquire_13f_accession_write_lock(conn, ref.accession_number)
+
+    capture = write_filing_capture(
+        conn, accession_number=ref.accession_number, info=info, controls=infotable_controls, holdings=holdings
+    )
 
     # #1567/#1566 — normalise BEFORE resolution/upsert via the shared
     # helper: drop PRN (bond-principal) + bad-quantity rows, scale
@@ -1734,6 +1794,7 @@ def _ingest_single_accession(
             period_of_report=period,
             filed_at=filed_at,
             resolved_holdings=resolved_holdings,
+            capture=capture,
         )
         # Dedupe touched instruments → ONE batched refresh for the whole
         # filing. A single 13F can carry 1000+ holdings; the per-instrument

@@ -24,6 +24,7 @@ from app.services.cusip_resolver import (
     sweep_resolvable_unresolved_cusips,
 )
 from tests.fixtures.ebull_test_db import ebull_test_conn  # noqa: F401 — fixture re-export
+from tests.fixtures.thirteen_f import with_controls
 
 pytestmark = pytest.mark.integration
 
@@ -848,8 +849,8 @@ class TestSweepResolvableUnresolvedCusips:
             ),
         ]
         monkeypatch.setattr(
-            "app.providers.implementations.sec_13f.parse_infotable",
-            lambda _xml: fake_holdings,
+            "app.providers.implementations.sec_13f.parse_infotable_with_controls",
+            with_controls(lambda _xml: fake_holdings),
         )
 
         report = sweep_resolvable_unresolved_cusips(conn)
@@ -954,8 +955,8 @@ class TestSweepResolvableUnresolvedCusips:
             ),
         ]
         monkeypatch.setattr(
-            "app.providers.implementations.sec_13f.parse_infotable",
-            lambda _xml: fake_holdings,
+            "app.providers.implementations.sec_13f.parse_infotable_with_controls",
+            with_controls(lambda _xml: fake_holdings),
         )
 
         report = sweep_resolvable_unresolved_cusips(conn)
@@ -1040,8 +1041,8 @@ class TestSweepResolvableUnresolvedCusips:
             raise RuntimeError("synthetic parser blowup")
 
         monkeypatch.setattr(
-            "app.providers.implementations.sec_13f.parse_infotable",
-            _exploding_parse,
+            "app.providers.implementations.sec_13f.parse_infotable_with_controls",
+            with_controls(_exploding_parse),
         )
 
         report = sweep_resolvable_unresolved_cusips(conn)

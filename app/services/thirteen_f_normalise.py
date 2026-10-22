@@ -34,6 +34,7 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from app.providers.implementations.sec_13f import ThirteenFHolding
+from app.services.thirteen_f_capture import merge_segments, normalise_discretion, parse_column7
 
 # 13F-HR Column 4 (VALUE) unit cutover. SEC EDGAR Release 22.4.1 switched
 # VALUE from $thousands to whole $dollars effective 2023-01-03. Single
@@ -62,6 +63,8 @@ def _sum_group(rows: list[ThirteenFHolding]) -> ThirteenFHolding:
     class / put_call) come from the first row. ``investment_discretion``
     is audit-only free text — kept when the group is unanimous, else
     ``None`` (a summed multi-discretion position has no single label).
+    The #3227 (IM) segments and CUSIP set are merged, so they survive both
+    aggregation stages where ``investment_discretion`` does not.
     """
     first = rows[0]
     if len(rows) == 1:
@@ -69,6 +72,8 @@ def _sum_group(rows: list[ThirteenFHolding]) -> ThirteenFHolding:
     discretions = {r.investment_discretion for r in rows}
     return replace(
         first,
+        segments=merge_segments(seg for r in rows for seg in r.segments),
+        cusips=tuple(sorted({c for r in rows for c in r.cusips})),
         value_usd=sum((r.value_usd for r in rows), Decimal(0)),
         shares_or_principal=sum((r.shares_or_principal for r in rows), Decimal(0)),
         voting_sole=sum((r.voting_sole for r in rows), Decimal(0)),
@@ -92,6 +97,9 @@ def normalise_13f_holdings(holdings: list[ThirteenFHolding], *, filed_at: dateti
        is None → no scale (fail-safe; mirrors the manifest parser).
     4. Aggregate by ``(cusip, exposure)`` and SUM (see :func:`_sum_group`).
 
+    Each kept line becomes one #3227 (IM) segment, ``(Column 6, parsed
+    Column 7, shares)``, before aggregation.
+
     Returns one holding per ``(cusip, exposure)`` in first-seen order
     (deterministic).
     """
@@ -104,6 +112,17 @@ def normalise_13f_holdings(holdings: list[ThirteenFHolding], *, filed_at: dateti
             continue
         if scale:
             holding = replace(holding, value_usd=holding.value_usd * Decimal("1000"))
+        holding = replace(
+            holding,
+            segments=(
+                (
+                    normalise_discretion(holding.investment_discretion),
+                    parse_column7(holding.other_managers_raw),
+                    holding.shares_or_principal,
+                ),
+            ),
+            cusips=(holding.cusip,),
+        )
         groups.setdefault((holding.cusip, exposure_key(holding)), []).append(holding)
     return [_sum_group(rows) for rows in groups.values()]
 
