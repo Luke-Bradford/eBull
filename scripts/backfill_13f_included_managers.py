@@ -25,6 +25,7 @@ import psycopg
 
 from app.config import settings
 from app.services.sec_13f_dataset_ingest import ingest_13f_dataset_archive
+from app.services.sec_bulk_orchestrator_jobs import _bulk_dir
 
 DEFAULT_ARCHIVES = (
     "form13f_01sep2025-30nov2025.zip",
@@ -48,17 +49,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--archive-dir",
         type=Path,
-        default=Path.home() / "Library/Application Support/eBull/sec/bulk",
-        help="directory holding DEFAULT_ARCHIVES when no archive is given",
+        default=None,
+        help="directory holding DEFAULT_ARCHIVES when no archive is given (default: the bulk job's own cache)",
     )
     args = parser.parse_args(argv)
-    archives: list[Path] = args.archives or [args.archive_dir / name for name in DEFAULT_ARCHIVES]
+    archive_dir: Path = args.archive_dir or _bulk_dir()
+    archives: list[Path] = args.archives or [archive_dir / name for name in DEFAULT_ARCHIVES]
 
     for archive in archives:
         sha = _sha256(archive)
         sidecar = archive.with_name(archive.name + ".sha256")
-        if sidecar.exists() and sidecar.read_text().split()[0] != sha:
-            print(f"FAIL {archive.name}: sha256 {sha} differs from {sidecar.name}", flush=True)
+        recorded = sidecar.read_text().split() if sidecar.exists() else None
+        if recorded is not None and (not recorded or recorded[0] != sha):
+            print(f"FAIL {archive.name}: sha256 {sha} differs from {sidecar.name} ({recorded})", flush=True)
             return 1
         print(f"{archive.name} sha256={sha}", flush=True)
 

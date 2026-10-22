@@ -42,6 +42,7 @@ from app.services.rewash_filings import (
     run_rewash,
 )
 from tests.fixtures.ebull_test_db import ebull_test_conn  # noqa: F401 — fixture re-export
+from tests.fixtures.thirteen_f import with_controls
 
 pytestmark = pytest.mark.integration
 
@@ -68,14 +69,6 @@ _MIN_PARSEABLE_13D_XML = """<?xml version="1.0" encoding="UTF-8"?>
   </formData>
 </edgarSubmission>
 """
-
-
-def _with_controls(parse):  # #3227 (IM): the per-filing writers call parse_infotable_with_controls
-    from decimal import Decimal as _D
-
-    from app.providers.implementations.sec_13f import ThirteenFInfotableControls
-
-    return lambda xml: (parse(xml), ThirteenFInfotableControls(line_count=0, value_total=_D(0)))
 
 
 @pytest.fixture
@@ -1811,7 +1804,7 @@ def test_13f_infotable_rescue_branch_pre_cap_period_returns_false(
 
     monkeypatch.setattr(
         "app.providers.implementations.sec_13f.parse_infotable_with_controls",
-        _with_controls(
+        with_controls(
             lambda _xml: [
                 ThirteenFHolding(
                     name_of_issuer="PreCap Issuer",
@@ -1903,7 +1896,7 @@ def test_13f_infotable_apply_raises_on_empty_parse(
 
     monkeypatch.setattr(
         "app.providers.implementations.sec_13f.parse_infotable_with_controls",
-        _with_controls(lambda _xml: []),  # empty parse — regression
+        with_controls(lambda _xml: []),  # empty parse — regression
     )
 
     rewash_filings._REGISTRY.clear()
@@ -1995,7 +1988,7 @@ def test_13f_infotable_apply_replaces_holdings_with_re_resolved_instrument(
     ]
     monkeypatch.setattr(
         "app.providers.implementations.sec_13f.parse_infotable_with_controls",
-        _with_controls(lambda _xml: fake_holdings),
+        with_controls(lambda _xml: fake_holdings),
     )
 
     rewash_filings._REGISTRY.clear()
@@ -2095,7 +2088,7 @@ def test_13f_infotable_rewash_sums_duplicate_xml_rows(
 
     monkeypatch.setattr(
         "app.providers.implementations.sec_13f.parse_infotable_with_controls",
-        _with_controls(
+        with_controls(
             lambda _xml: [
                 _mk_13f_holding(cusip="DUP13FCSP", shares="100", value="1000"),
                 _mk_13f_holding(cusip="DUP13FCSP", shares="999", value="9990"),
@@ -2201,7 +2194,7 @@ def test_13f_infotable_rewash_clears_stale_observations_for_dropped_instrument(
 
     monkeypatch.setattr(
         "app.providers.implementations.sec_13f.parse_infotable_with_controls",
-        _with_controls(lambda _xml: [_mk_13f_holding(cusip="NEWOBSCSP", shares="200", value="2000")]),
+        with_controls(lambda _xml: [_mk_13f_holding(cusip="NEWOBSCSP", shares="200", value="2000")]),
     )
     rewash_filings._REGISTRY.clear()
     register_parser(
@@ -2316,7 +2309,7 @@ def test_13f_infotable_apply_returns_false_when_cusip_unresolved(
     ]
     monkeypatch.setattr(
         "app.providers.implementations.sec_13f.parse_infotable_with_controls",
-        _with_controls(lambda _xml: fake_holdings),
+        with_controls(lambda _xml: fake_holdings),
     )
 
     rewash_filings._REGISTRY.clear()
@@ -2445,7 +2438,7 @@ def test_13f_infotable_apply_rescues_tombstoned_accession(
     ]
     monkeypatch.setattr(
         "app.providers.implementations.sec_13f.parse_infotable_with_controls",
-        _with_controls(lambda _xml: fake_holdings),
+        with_controls(lambda _xml: fake_holdings),
     )
 
     rewash_filings._REGISTRY.clear()
@@ -2507,7 +2500,7 @@ def test_13f_infotable_apply_handles_legal_empty_filing(
 
     monkeypatch.setattr(
         "app.providers.implementations.sec_13f.parse_infotable_with_controls",
-        _with_controls(lambda _xml: []),
+        with_controls(lambda _xml: []),
     )
 
     rewash_filings._REGISTRY.clear()
@@ -2615,7 +2608,7 @@ def test_13f_infotable_apply_preserves_existing_when_all_cusips_unresolved(
     ]
     monkeypatch.setattr(
         "app.providers.implementations.sec_13f.parse_infotable_with_controls",
-        _with_controls(lambda _xml: fake_holdings),
+        with_controls(lambda _xml: fake_holdings),
     )
 
     rewash_filings._REGISTRY.clear()
@@ -2756,7 +2749,7 @@ def test_13f_infotable_apply_preserves_existing_when_some_cusips_unresolved(
     ]
     monkeypatch.setattr(
         "app.providers.implementations.sec_13f.parse_infotable_with_controls",
-        _with_controls(lambda _xml: fake_holdings),
+        with_controls(lambda _xml: fake_holdings),
     )
 
     rewash_filings._REGISTRY.clear()

@@ -24,6 +24,7 @@ from app.services.cusip_resolver import (
     sweep_resolvable_unresolved_cusips,
 )
 from tests.fixtures.ebull_test_db import ebull_test_conn  # noqa: F401 — fixture re-export
+from tests.fixtures.thirteen_f import with_controls
 
 pytestmark = pytest.mark.integration
 
@@ -31,14 +32,6 @@ pytestmark = pytest.mark.integration
 # ---------------------------------------------------------------------------
 # Seed helpers
 # ---------------------------------------------------------------------------
-
-
-def _with_controls(parse):  # #3227 (IM): the per-filing writers call parse_infotable_with_controls
-    from decimal import Decimal as _D
-
-    from app.providers.implementations.sec_13f import ThirteenFInfotableControls
-
-    return lambda xml: (parse(xml), ThirteenFInfotableControls(line_count=0, value_total=_D(0)))
 
 
 def _seed_instrument(conn: psycopg.Connection[tuple], *, iid: int, symbol: str, company_name: str) -> None:
@@ -857,7 +850,7 @@ class TestSweepResolvableUnresolvedCusips:
         ]
         monkeypatch.setattr(
             "app.providers.implementations.sec_13f.parse_infotable_with_controls",
-            _with_controls(lambda _xml: fake_holdings),
+            with_controls(lambda _xml: fake_holdings),
         )
 
         report = sweep_resolvable_unresolved_cusips(conn)
@@ -963,7 +956,7 @@ class TestSweepResolvableUnresolvedCusips:
         ]
         monkeypatch.setattr(
             "app.providers.implementations.sec_13f.parse_infotable_with_controls",
-            _with_controls(lambda _xml: fake_holdings),
+            with_controls(lambda _xml: fake_holdings),
         )
 
         report = sweep_resolvable_unresolved_cusips(conn)
@@ -1049,7 +1042,7 @@ class TestSweepResolvableUnresolvedCusips:
 
         monkeypatch.setattr(
             "app.providers.implementations.sec_13f.parse_infotable_with_controls",
-            _with_controls(_exploding_parse),
+            with_controls(_exploding_parse),
         )
 
         report = sweep_resolvable_unresolved_cusips(conn)
