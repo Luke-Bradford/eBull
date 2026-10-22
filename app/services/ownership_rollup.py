@@ -36,6 +36,7 @@ reconcile.
 
 from __future__ import annotations
 
+import functools
 import logging
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -3553,10 +3554,15 @@ def _normalise_holder_text(value: str) -> str:
     """Fold a filer name or a free-text ownership clause onto one comparable alphabet.
 
     Case, punctuation and ``&`` only. Entity suffixes are deliberately NOT stripped:
-    ``BIOS FUND III LP`` and ``BIOS FUND IV LP`` differ only there, and collapsing them
-    would attribute a block to the wrong fund — the failure this pass exists to avoid,
-    arriving from the other direction."""
+    ``ACME LP`` and ``ACME LLC`` stay two names, as ``BIOS FUND III LP`` and
+    ``BIOS FUND IV LP`` do. Folding either pair would attribute a block to the wrong
+    entity — the failure this pass exists to avoid, arriving from the other direction.
+    Frozen as the 13G-covers name rule (docs/specs/ownership/2026-10-22-3227-13f-13g-covers.md)."""
     return _RECORD_HOLDER_NON_ALNUM.sub(" ", value.upper().replace("&", " AND ")).strip()
+
+
+# The same few thousand filer names recur on every rollup; the 13F fold normalises one per candidate.
+_normalised_name: Final = functools.lru_cache(maxsize=1 << 16)(_normalise_holder_text)
 
 
 def _read_record_holder_evidence(
@@ -4687,17 +4693,38 @@ def _fold_rows_into(primary: Holder, rows: Iterable[Holder]) -> Holder:
 # ---------------------------------------------------------------------------
 # 13F duplicates — a manager's 13F figure counted once when its own joint 13D/G
 # reports the same block for a co-filer (#3227)
-# See docs/specs/ownership/2026-10-21-3227-13f-position-scope.md
+# See docs/specs/ownership/2026-10-21-3227-13f-position-scope.md (the 13D arm) and
+# docs/specs/ownership/2026-10-22-3227-13f-13g-covers.md (the 13G extension)
 # ---------------------------------------------------------------------------
 
 # This instrument's Schedule 13D/G cover rows filed before a bound. Served by
-# ``idx_blockholder_filings_instrument_filed_at``; ``filing_id`` makes the row order total.
+# ``idx_blockholder_filings_instrument_filed_at``; ``filing_id`` makes the row order total. One read
+# serves both arms: the 13D arm keys on ``reporter_cik``, the 13G extension on ``submission_type`` and
+# ``reporter_name`` (13G rows carry a NULL ``reporter_cik``; 13G-covers spec, Source rule).
 _COVERS_13F_SQL: Final = """
     SELECT reporter_cik, accession_number, filed_at,
-           sole_dispositive_power, shared_dispositive_power, aggregate_amount_owned
+           sole_dispositive_power, shared_dispositive_power, aggregate_amount_owned,
+           reporter_name, submission_type
       FROM blockholder_filings
      WHERE instrument_id = %(iid)s AND filed_at < %(bound)s
      ORDER BY filed_at, accession_number, filing_id
+"""
+
+_13G_SUBMISSION_TYPES: Final[frozenset[str]] = frozenset({"SCHEDULE 13G", "SCHEDULE 13G/A"})
+
+# The current 13G observations' ``reporter_cik`` for the given accessions: the filer of record when
+# the accession's blocks carry no CIK (``resolve_blockholder_reporter_identity``, #1638). Closed rows
+# are excluded, as they can carry a pre-#1638 issuer CIK. The table is range-partitioned on
+# ``period_end``, which both 13D/G observation writers set to ``filed_at.date()`` (``blockholders.py``,
+# ``ownership_observations_sync.py``; 0 of 38,608 13G observations differ from the UTC filed date on dev,
+# 2026-10-22), so the window over the accessions' filed dates (±1 day for the session time zone) prunes
+# partitions and drops no row. Served by ``idx_block_obs_instrument_period``.
+_FILERS_13G_SQL: Final = """
+    SELECT source_accession, reporter_cik
+      FROM ownership_blockholders_observations
+     WHERE instrument_id = %(iid)s AND period_end BETWEEN %(lo)s AND %(hi)s
+       AND source_accession = ANY(%(accs)s::text[])
+       AND source = '13g' AND known_to IS NULL
 """
 
 
@@ -4712,6 +4739,8 @@ class _CoverRow:
     sole_dispositive: Decimal | None
     shared_dispositive: Decimal | None
     aggregate: Decimal | None
+    reporter_name: str | None = None
+    submission_type: str | None = None
 
     def reports(self, t: Decimal) -> bool:
         """Both dispositive fields present, sole + shared = ``t``, and aggregate = ``t``."""
@@ -4766,13 +4795,50 @@ def _read_13f_covers(
         return [_CoverRow(*row) for row in cur.fetchall()]
 
 
+def _read_13g_filers(
+    conn: psycopg.Connection[Any], instrument_id: int, covers: Sequence[_CoverRow]
+) -> dict[str, tuple[str | None, ...]]:
+    """Accession → the ``reporter_cik`` of each current 13G observation on it, for the 13G accessions
+    in ``covers``. :func:`_fold_13f_duplicates` derives the filer of record from these. No 13G
+    accession, no query."""
+    g13 = [c for c in covers if c.submission_type in _13G_SUBMISSION_TYPES]
+    if not g13:
+        return {}
+    days = [c.filed_at.astimezone(UTC).date() for c in g13]
+    params = {
+        "iid": instrument_id,
+        "lo": min(days) - timedelta(days=1),
+        "hi": max(days) + timedelta(days=1),
+        "accs": sorted({c.accession_number for c in g13}),
+    }
+    out: dict[str, list[str | None]] = {}
+    with conn.cursor(row_factory=psycopg.rows.tuple_row) as cur:
+        cur.execute(_FILERS_13G_SQL, params)
+        for accession, cik in cur.fetchall():
+            out.setdefault(accession, []).append(cik)
+    return {a: tuple(ciks) for a, ciks in out.items()}
+
+
+def _13g_filer_of_record(blocks: Sequence[_CoverRow], observed: Sequence[str | None]) -> str | None:
+    """The 13G accession's filer of record (13G-covers spec § Rule), or ``None`` when undefined: every
+    block has a NULL ``reporter_cik``, and the current observations are at least one, each a digit
+    CIK, all one value. A NULL or non-digit value makes it undefined rather than being filtered out."""
+    if any(b.reporter_cik is not None for b in blocks):
+        return None
+    ciks = {_digit_cik(c) for c in observed}
+    if len(ciks) != 1 or None in ciks:
+        return None
+    return next(iter(ciks))
+
+
 def _fold_13f_duplicates(
     by_category: dict[SliceCategory, list[Holder]],
     covers: Sequence[_CoverRow],
+    filers_13g: Mapping[str, Sequence[str | None]],
 ) -> tuple[dict[SliceCategory, list[Holder]], list[CorrectionApplied]]:
     """Fold a manager's 13F figure onto its co-filer when the manager's own joint 13D/G reports the
     same block for both (#3227). Pure; runs on :func:`_reconcile_owner_once`'s output, before
-    :func:`_reconcile_cofiler_groups`.
+    :func:`_reconcile_cofiler_groups`. ``filers_13g`` is :func:`_read_13g_filers`'s output.
 
     A declared policy, not a proof: no rule identifies a 13F position (investment discretion,
     Exchange Act §3(a)(35)) with a beneficial-ownership position (Rule 13d-3). The spec lists the
@@ -4787,6 +4853,21 @@ def _fold_13f_duplicates(
       other than M's, a row on C's accession reporting T, and an owner total of T.
     * M is a duplicate when C matches, M has exactly one twin, and that twin is no other
       cover-matching candidate's twin.
+
+    The 13G extension (docs/specs/ownership/2026-10-22-3227-13f-13g-covers.md § Rule, frozen) runs
+    after that, and nothing in it feeds back into the 13D arm. A 13G block carries no CIK, so:
+
+    * It considers only candidates outside the 13D arm's matched set (cover reports T and has a
+      twin, before uniqueness); every twin in that set is reserved.
+    * M's statements, filed before ``P + 1 day``: its rows by CIK, the 13G accessions whose filer of
+      record (:func:`_13g_filer_of_record`) is M, and the 13G accessions with a block named as one of
+      M's 13F ``filer_name`` values (:func:`_normalise_holder_text` equality). C is the latest by
+      ``(filed_at, accession_number)``; if that is a row found by CIK, the extension does nothing.
+    * C matches when every stored block on it :meth:`_CoverRow.reports` T.
+    * Twin k: a node with a canonical CIK other than M's and an owner total of T. If M is C's filer
+      of record, k has a Form 3/4/5 ``filer_name`` equal to a block name on C; otherwise k's
+      canonical CIK is C's filer of record. A case never rests on two name identifications.
+    * Duplicate: exactly one twin, no other 13G-matching candidate's twin, and not reserved.
 
     For each duplicate, M's rows leave ``institutions`` and are appended to the dropped sources of
     k's largest row (shares, then the lowest ``winning_accession``, then input order), with one
@@ -4838,10 +4919,9 @@ def _fold_13f_duplicates(
     removed: set[str] = set()
     replacements: dict[int, Holder] = {}
     corrections: list[CorrectionApplied] = []
-    for m, (twins, cover) in matched.items():
-        if len(twins) != 1 or twin_count[twins[0]] != 1:
-            continue
-        k, t, manager = twins[0], totals[m], rows_by_identity[m][0]
+
+    def _fold(m: str, k: str, detail: Callable[[Holder, Holder], str]) -> None:
+        manager = rows_by_identity[m][0]
         _, primary = min(enumerate(rows_by_identity[k]), key=lambda ir: (-ir[1].shares, ir[1].winning_accession, ir[0]))
         replacements[id(primary)] = _fold_rows_into(primary, rows_by_identity[m])
         removed.add(m)
@@ -4849,19 +4929,123 @@ def _fold_13f_duplicates(
             CorrectionApplied(
                 kind="cofiler_group_collapse",
                 filer_name=primary.filer_name,
-                shares_removed=t,
+                shares_removed=totals[m],
                 filer_cik=primary.filer_cik,
                 source_channel="13f",
                 winning_source=primary.winning_source,
                 winning_accession=primary.winning_accession,
-                detail=(
-                    f"13F duplicate counted once (#3227): {manager.filer_name} ({manager.filer_cik}) 13F {t} "
-                    f"for {candidates[m].isoformat()}; on joint Schedule 13D/G {cover.accession_number} "
-                    f"(filed {cover.filed_at.astimezone(UTC).date().isoformat()}) {manager.filer_name} and "
-                    f"{primary.filer_name} each report dispositive power and aggregate amount {t}. Counted once "
-                    "by policy: overlap on that statement, across dates and in class scope is not verified."
-                ),
+                detail=detail(manager, primary),
             )
+        )
+
+    def _filed(cover: _CoverRow) -> str:
+        return cover.filed_at.astimezone(UTC).date().isoformat()
+
+    for m, (twins, cover) in matched.items():
+        if len(twins) != 1 or twin_count[twins[0]] != 1:
+            continue
+        t = totals[m]
+        _fold(
+            m,
+            twins[0],
+            lambda manager, primary, t=t, p=candidates[m], cover=cover: (
+                f"13F duplicate counted once (#3227): {manager.filer_name} ({manager.filer_cik}) 13F {t} "
+                f"for {p.isoformat()}; on joint Schedule 13D/G {cover.accession_number} "
+                f"(filed {_filed(cover)}) {manager.filer_name} and "
+                f"{primary.filer_name} each report dispositive power and aggregate amount {t}. Counted once "
+                "by policy: overlap on that statement, across dates and in class scope is not verified."
+            ),
+        )
+
+    # The 13G extension. Its uniqueness count is its own; the 13D arm's matched twins are reserved.
+    reserved = {k for twins, _ in matched.values() for k in twins}
+    g13_blocks: dict[str, list[_CoverRow]] = {}
+    for c in covers:
+        if c.submission_type in _13G_SUBMISSION_TYPES:
+            g13_blocks.setdefault(c.accession_number, []).append(c)
+    g13_filer = {a: _13g_filer_of_record(blocks, filers_13g.get(a, ())) for a, blocks in g13_blocks.items()}
+    g13_names = {
+        a: {n for b in blocks if (n := _normalised_name(b.reporter_name or ""))} for a, blocks in g13_blocks.items()
+    }
+    # Indexes, so each candidate touches only the accessions that can be its statements.
+    g13_by_filer: dict[str, list[str]] = {}
+    g13_by_name: dict[str, list[str]] = {}
+    for a, filer in g13_filer.items():
+        if filer is not None:
+            g13_by_filer.setdefault(filer, []).append(a)
+        for n in g13_names[a]:
+            g13_by_name.setdefault(n, []).append(a)
+
+    def _names(k: str, sources: frozenset[str]) -> set[str]:
+        # Name sources pair the name and the CIK in one reporting-owner record: a 13F filer, or a
+        # Form 3/4/5 owner (``form4`` covers Form 5). A 13D/G observation's name may be another person's.
+        return {n for h in rows_by_identity[k] if h.winning_source in sources if (n := _normalised_name(h.filer_name))}
+
+    # Node → its Form 3/4/5 names, built on first use (only a candidate that is C's filer needs it).
+    node_names: dict[str, set[str]] = {}
+
+    g13_matched: dict[str, tuple[list[str], _CoverRow, str | None, bool]] = {}
+    for m, period in candidates.items() if g13_blocks else ():
+        if m in matched:
+            continue
+        t, m_cik, bound = totals[m], _digit_cik(_identity_canon(m)), _cover_bound(period)
+        accs = {
+            *g13_by_filer.get(m_cik or "", ()),
+            *(a for n in _names(m, frozenset({"13f"})) for a in g13_by_name.get(n, ())),
+        }
+        by_cik = {(c.filed_at, c.accession_number) for c in by_reporter.get(m_cik or "", ()) if c.filed_at < bound}
+        statements = by_cik | {(b.filed_at, a) for a in accs for b in g13_blocks[a] if b.filed_at < bound}
+        if not statements:
+            continue
+        latest = max(statements)
+        if latest in by_cik:
+            continue
+        accession = latest[1]
+        blocks = g13_blocks[accession]
+        if not all(b.reports(t) for b in blocks):
+            continue
+        filer = g13_filer[accession]
+        m_is_filer = filer is not None and filer == m_cik
+        if m_is_filer:
+            # M is identified as the filer; k by name on C.
+            if not node_names:
+                node_names.update(
+                    (k, _names(k, frozenset({"form3", "form4"}))) for keys in nodes_by_cik.values() for k in keys
+                )
+            pool = [
+                k
+                for canon, keys in nodes_by_cik.items()
+                if canon != m_cik
+                for k in keys
+                if node_names[k] & g13_names[accession]
+            ]
+        else:
+            # M is on C by name; k is the filer of record (none when undefined).
+            pool = list(nodes_by_cik.get(filer, ())) if filer is not None else []
+        twins = sorted(k for k in pool if totals[k] == t)
+        if twins:
+            g13_matched[m] = (twins, blocks[0], filer, m_is_filer)
+    g13_count: dict[str, int] = {}
+    for twins, *_ in g13_matched.values():
+        for k in twins:
+            g13_count[k] = g13_count.get(k, 0) + 1
+    for m, (twins, cover, filer, m_is_filer) in g13_matched.items():
+        if len(twins) != 1 or g13_count[twins[0]] != 1 or twins[0] in reserved:
+            continue
+        t = totals[m]
+        _fold(
+            m,
+            twins[0],
+            lambda manager, primary, t=t, p=candidates[m], cover=cover, filer=filer, m_is_filer=m_is_filer: (
+                f"13F duplicate counted once (#3227): {manager.filer_name} ({manager.filer_cik}) 13F {t} "
+                f"for {p.isoformat()}; on joint Schedule 13G {cover.accession_number} (filed {_filed(cover)}, "
+                f"filer of record {filer}) every stored reporting-person block reports dispositive power and "
+                f"aggregate amount {t}; {(manager if m_is_filer else primary).filer_name} is taken to be on it "
+                f"as filer of record and {(primary if m_is_filer else manager).filer_name} is matched by name. "
+                "Counted once by policy: the filer's presence on the statement, identity by name, completeness "
+                "of the stored blocks, overlap on that statement, across dates and in class scope are not "
+                "verified."
+            ),
         )
     if not removed:
         return by_category, corrections
@@ -6794,8 +6978,11 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
         [h.winning_accession for c in _COFILER_CATEGORIES for h in by_category.get(c, []) if h.shares > 0],
     )
     # #3227 13F duplicates: a manager's 13F figure folded onto the co-filer its own joint 13D/G
-    # reports the same block for. Before the co-filer pass, which it leaves unchanged (M is no node).
-    by_category, f13_corrections = _fold_13f_duplicates(by_category, _read_13f_covers(conn, instrument_id, by_category))
+    # or 13G reports the same block for. Before the co-filer pass, which it leaves unchanged (M is no node).
+    covers_13f = _read_13f_covers(conn, instrument_id, by_category)
+    by_category, f13_corrections = _fold_13f_duplicates(
+        by_category, covers_13f, _read_13g_filers(conn, instrument_id, covers_13f)
+    )
     by_category, cofiler_corrections = _reconcile_cofiler_groups(by_category, cofilers)
     for _cat, _fam_holders in family_by_category.items():
         by_category.setdefault(_cat, []).extend(_fam_holders)
