@@ -82,6 +82,7 @@ from app.services.fundamentals import (
     upsert_facts_for_instrument,
 )
 from app.services.inline_xbrl_dps import CONCEPT, Occurrence
+from app.workers.scheduler import JOB_DAILY_FINANCIAL_FACTS, JOB_SEC_DPS_INLINE_SCALE_SCAN
 
 RETRIES = 3
 _KEY = ("period_end_date", "period_type", "fiscal_year", "fiscal_quarter")
@@ -98,12 +99,12 @@ class _Spill(Mapping[int, Sequence[XbrlFact]]):
 
     def __init__(self, directory: Path) -> None:
         self._dir = directory
-        self._ids: list[int] = []
+        self._ids: dict[int, None] = {}  # insertion-ordered set
 
     def put(self, instrument_id: int, facts: Sequence[XbrlFact]) -> None:
         with (self._dir / f"{instrument_id}.pickle").open("wb") as fh:
             pickle.dump(list(facts), fh)
-        self._ids.append(instrument_id)
+        self._ids[instrument_id] = None
 
     def __getitem__(self, instrument_id: int) -> Sequence[XbrlFact]:
         if instrument_id not in self._ids:
@@ -125,6 +126,13 @@ _CANDIDATES_SQL = (
     + " ORDER BY 1"
 )
 _LEDGER_SQL = "SELECT instrument_id FROM sec_inline_scale_renormalise ORDER BY 1"
+# A `running` row of either writer counts as live only if it started within the window: a killed jobs child leaves
+# its row `running` for good, and the longest of these runs is well under it.
+_LIVE_WRITERS_SQL = """
+SELECT run_id, job_name, started_at FROM job_runs
+WHERE status = 'running' AND job_name = ANY(%s)
+  AND started_at > now() - interval '6 hours'
+"""
 
 
 def _scope(conn: psycopg.Connection[Any], mode: Mode) -> list[int]:
@@ -136,6 +144,8 @@ def prefetch(
 ) -> dict[int, str]:
     """Every instrument's companyfacts, outside any transaction; returns the fetch failures by instrument."""
     failed: dict[int, str] = {}
+    if conn.info.transaction_status != psycopg.pq.TransactionStatus.IDLE:
+        raise RuntimeError("prefetch runs outside any transaction: no SEC request may hold a snapshot or a lock")
     for iid in ids:
         try:
             spill.put(iid, scan.fetch_companyfacts(conn, provider, iid))
@@ -459,6 +469,9 @@ def _check_instrument(
         if stored_down != after_down:
             found.downstream = {"stored": list(map(str, stored_down)), mode: list(map(str, after_down))}
         if failed or problems or changed or found.downstream:
+            # Any difference fails, as the spec requires: Rollback step 4 ("an instrument that differs because ingestion
+            # moved its inputs is re-normalised and checked again") and Stage 2 convergence ("any difference is listed
+            # and fails, except unreachable cells"). Both run after a refill_and_normalise rebuild, so drift is 0 then.
             found.failures.append("stored rows differ from a fresh refill and normalisation")
         return found
 
@@ -585,6 +598,12 @@ def run_snapshot(
     """Everything inside the snapshot; the caller opened it (``SELECT 1``) and rolls it back."""
     report: dict[str, Any] = {"mode": mode}
     failures: list[str] = []
+    # Quiescence (spec): no live scan or companyfacts refresh. The locks below stop any later normaliser write;
+    # one that committed after `SELECT 1` but before its lock is invisible here, and writing over it raises a
+    # serialization failure, which main() retries with a fresh snapshot.
+    live = conn.execute(_LIVE_WRITERS_SQL, ([JOB_SEC_DPS_INLINE_SCALE_SCAN, JOB_DAILY_FINANCIAL_FACTS],)).fetchall()
+    if live:
+        failures.append(f"not quiescent: running {[list(map(str, r)) for r in live]}; pause them and rerun")
     ids = sorted(set(_scope(conn, mode)) | set(payloads) | set(unrefilled))
     # Before any write: every in-scope instrument's normaliser lock, in sorted order (the drain's order).
     for iid in ids:

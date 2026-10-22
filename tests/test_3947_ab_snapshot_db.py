@@ -157,3 +157,13 @@ def test_a_relabelled_surviving_row_is_still_unreachable() -> None:
     stored = {(1, end, "Q4", 2025, 4): row}
     normalised = {(1, end, "Q4", 2024, 4): {**row, "fiscal_year": 2024}}
     assert [u["key"] for u in ab._unreachable(stored, normalised, [])] == [["1", "2025-03-31", "Q4", "2025", "4"]]
+
+
+def test_a_live_writer_fails_quiescence(ebull_test_conn: Conn) -> None:
+    conn = ebull_test_conn
+    _seed(conn)
+    conn.execute(
+        "INSERT INTO job_runs (job_name, started_at, status) VALUES ('sec_dps_inline_scale_scan', now(), 'running')"
+    )
+    _, failures = _snapshot(conn, {1: [Q3_FACT]})
+    assert any(f.startswith("not quiescent") for f in failures)
