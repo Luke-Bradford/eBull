@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import threading
 import time
+from datetime import date
 from decimal import Decimal
 from typing import Any
 
@@ -16,14 +17,25 @@ import psycopg
 import pytest
 
 from app.config import settings
+from app.providers.fundamentals import XbrlFact
 from app.services import dps_inline_scale_scan as scan
 from app.services import fundamentals
-from app.services.dps_inline_scale_scan import drain_renormalise_queue
+from app.services.dps_inline_scale_scan import drain_renormalise_queue, refill_and_normalise
+from app.services.financial_facts_retention import sweep_retention_for_instrument
 from app.services.fundamentals import NormalizationSummary, lock_instrument_for_normalize
 from tests.fixtures.ebull_test_db import test_database_url
-from tests.test_3947_dps_inline_scale_scan_db import ACC, _doc, _Provider, _queue, scan_run
+from tests.test_3947_dps_inline_scale_scan_db import ACC, _doc, _Facts, _Provider, _queue, scan_run
 
 Conn = psycopg.Connection[Any]
+
+
+# A waiter on instrument 1's normaliser lock. A bigint advisory key shows as classid = high 32 bits, objid = low 32
+# bits, objsubid 1.
+_WAITING_ON_INSTRUMENT_1 = (
+    "SELECT count(*) FROM pg_locks l, hashtextextended('normalize_financial_periods:1', 0) AS k(key)"
+    " WHERE l.locktype = 'advisory' AND NOT l.granted AND l.objsubid = 1"
+    " AND l.classid::bigint = ((k.key >> 32) & 4294967295) AND l.objid::bigint = (k.key & 4294967295)"
+)
 
 
 def _seed(conn: Conn, iid: int = 1) -> None:
@@ -146,7 +158,7 @@ def test_a_row_requeued_during_draining_survives(ebull_test_conn: Conn, monkeypa
         return summary
 
     monkeypatch.setattr(fundamentals, "normalize_financial_periods", normalise_then_requeue)
-    result = drain_renormalise_queue(conn, admit_until=None)
+    result = drain_renormalise_queue(conn, facts_provider=_Facts(), admit_until=None)
     assert (result.normalised, result.requeued) == (1, 1)
     ((iid, revision),) = _queue(conn)
     assert iid == 1 and revision > first_revision
@@ -166,7 +178,7 @@ def test_a_failed_normalisation_counts_and_keeps_the_row(
         lambda c, ids, **_: NormalizationSummary(len(ids), 0, 0, instruments_failed=1),
     )
     for expected in (1, 2):
-        result = drain_renormalise_queue(conn, admit_until=None)
+        result = drain_renormalise_queue(conn, facts_provider=_Facts(), admit_until=None)
         assert (result.normalised, result.failed) == (0, 1)
         row = conn.execute("SELECT instrument_id, failures FROM sec_inline_scale_renormalise").fetchall()
         conn.commit()
@@ -186,7 +198,7 @@ def test_no_instrument_is_started_after_the_admission_deadline(
     )
     conn.commit()
     ticks = iter([0.0, 5.0])
-    result = drain_renormalise_queue(conn, admit_until=1.0, clock=lambda: next(ticks))
+    result = drain_renormalise_queue(conn, facts_provider=_Facts(), admit_until=1.0, clock=lambda: next(ticks))
     assert (result.normalised, result.deferred) == (1, 1)
     # Revision order: instrument 1 was queued first and drained; 2 stays.
     assert [i for i, _ in _queue(conn)] == [2]
@@ -214,12 +226,7 @@ def test_two_normalisations_of_one_instrument_serialise(ebull_test_conn: Conn) -
         waiting = False
         for _ in range(100):
             waiting = bool(
-                conn.execute(
-                    # A bigint advisory key shows as classid = high 32 bits, objid = low 32 bits, objsubid 1.
-                    "SELECT count(*) FROM pg_locks l, hashtextextended('normalize_financial_periods:1', 0) AS k(key)"
-                    " WHERE l.locktype = 'advisory' AND NOT l.granted AND l.objsubid = 1"
-                    " AND l.classid::bigint = ((k.key >> 32) & 4294967295) AND l.objid::bigint = (k.key & 4294967295)"
-                ).fetchone()[0]  # type: ignore[index]
+                conn.execute(_WAITING_ON_INSTRUMENT_1).fetchone()[0]  # type: ignore[index]
             )
             conn.rollback()
             if waiting:
@@ -247,12 +254,148 @@ def test_the_drain_refuses_with_the_flag_off_or_inside_a_transaction(
     _seed(conn)
     scan_run(conn, _Provider(_doc(3)))
     with pytest.raises(RuntimeError, match="off"):
-        drain_renormalise_queue(conn, admit_until=None)
+        drain_renormalise_queue(conn, facts_provider=_Facts(), admit_until=None)
     with pytest.raises(RuntimeError, match="off"):
-        drain_renormalise_queue(conn, admit_until=None, enabled=False)
+        drain_renormalise_queue(conn, facts_provider=_Facts(), admit_until=None, enabled=False)
     monkeypatch.setattr(settings, "dps_inline_scale_enabled", True)
     conn.execute("SELECT 1")  # an open transaction
     with pytest.raises(RuntimeError, match="outside a transaction"):
-        drain_renormalise_queue(conn, admit_until=None)
+        drain_renormalise_queue(conn, facts_provider=_Facts(), admit_until=None)
     conn.rollback()
     assert [i for i, _ in _queue(conn)] == [1]
+
+
+OLD_ACC = "0001411342-25-000000"
+# The aged-out Q1 fact, as companyfacts serves it again.
+Q1_FACT = XbrlFact(
+    concept="CommonStockDividendsPerShareDeclared",
+    taxonomy="us-gaap",
+    unit="USD/shares",
+    period_start=date(2025, 1, 1),
+    period_end=date(2025, 3, 31),
+    val=Decimal("380"),
+    frame=None,
+    accession_number=OLD_ACC,
+    form_type="10-Q",
+    filed_date=date(2025, 5, 1),
+    fiscal_year=2025,
+    fiscal_period="Q1",
+    decimals=None,
+)
+
+
+def _seed_swept(conn: Conn) -> None:
+    """Instrument 1 with stored Q1 and Q3 rows, whose Q1 fact has since been swept from raw."""
+    _seed(conn)
+    conn.execute(
+        "INSERT INTO financial_facts_raw (instrument_id, concept, unit, period_start, period_end, val,"
+        " accession_number, form_type, filed_date, fiscal_year, fiscal_period)"
+        " VALUES (1, 'CommonStockDividendsPerShareDeclared', 'USD/shares', '2025-01-01', '2025-03-31', 380,"
+        " %s, '10-Q', '2025-05-01', 2025, 'Q1')",
+        (OLD_ACC,),
+    )
+    fundamentals.normalize_financial_periods(conn, [1], dps_inline_scale=False)
+    conn.execute("DELETE FROM financial_facts_raw WHERE accession_number = %s", (OLD_ACC,))
+    conn.commit()
+
+
+def test_the_drain_refills_raw_so_the_group_is_complete(ebull_test_conn: Conn, monkeypatch: pytest.MonkeyPatch) -> None:
+    conn = ebull_test_conn
+    _seed_swept(conn)
+    scan_run(conn, _Provider(_doc(3)))
+    monkeypatch.setattr(settings, "dps_inline_scale_enabled", True)
+    result = drain_renormalise_queue(conn, facts_provider=_Facts([Q1_FACT]), admit_until=None)
+    assert (result.normalised, result.failed) == (1, 0)
+    assert _queue(conn) == []
+    # The refill brought the aged-out fact back, so the label is complete: gated, not kept as stored. Its Q1 leaf is
+    # untested, so the group takes decisions-off (A3), and Q3 stays 390 rather than pairing 0.39 with Q1's 380.
+    restored = conn.execute("SELECT count(*) FROM financial_facts_raw WHERE accession_number = %s", (OLD_ACC,))
+    assert restored.fetchone() == (1,)
+    _, outcomes = fundamentals.derive_gated_dps_periods(conn, 1, _facts(conn))
+    conn.rollback()
+    assert {(o.branch, o.reason) for o in outcomes.values()} == {("off", "unverified_leaf")}
+    assert _dps(conn) == [(2025, "Q1", Decimal("380.0000")), (2025, "Q3", Decimal("390.0000"))]
+
+
+def test_a_fetch_failure_counts_and_keeps_the_row(ebull_test_conn: Conn, monkeypatch: pytest.MonkeyPatch) -> None:
+    conn = ebull_test_conn
+    _seed(conn)
+    scan_run(conn, _Provider(_doc(3)))
+    monkeypatch.setattr(settings, "dps_inline_scale_enabled", True)
+    result = drain_renormalise_queue(conn, facts_provider=_Facts(RuntimeError("503")), admit_until=None)
+    assert (result.normalised, result.failed, result.fetch_failed) == (0, 1, 1)
+    assert [i for i, _ in _queue(conn)] == [1]
+    assert conn.execute("SELECT failures FROM sec_inline_scale_renormalise").fetchall() == [(1,)]
+    conn.rollback()
+
+
+def test_refill_and_normalise_refuses_outside_a_transaction(ebull_test_conn: Conn) -> None:
+    ebull_test_conn.commit()
+    with pytest.raises(RuntimeError, match="inside the caller's transaction"):
+        refill_and_normalise(ebull_test_conn, 1, [], ingestion_run_id=0, dps_inline_scale=False)
+
+
+def test_the_sweep_waits_for_a_refill_in_progress(ebull_test_conn: Conn) -> None:
+    conn = ebull_test_conn
+    _seed_swept(conn)
+    run_id = fundamentals.start_ingestion_run(conn, source="sec_edgar", endpoint="test", instrument_count=1)
+    conn.commit()
+    # A refill holds the instrument's lock until its transaction ends.
+    conn.execute("SELECT 1")
+    refill_and_normalise(conn, 1, [Q1_FACT], ingestion_run_id=run_id, dps_inline_scale=False)
+    done = threading.Event()
+
+    def sweep() -> None:
+        with psycopg.connect(test_database_url(), autocommit=True) as worker, worker.transaction():
+            sweep_retention_for_instrument(worker, instrument_id=1, keep_10q=1)
+        done.set()
+
+    thread = threading.Thread(target=sweep)
+    thread.start()
+    try:
+        waiting = False
+        with psycopg.connect(test_database_url(), autocommit=True) as observer:
+            for _ in range(100):
+                waiting = bool(
+                    observer.execute(_WAITING_ON_INSTRUMENT_1).fetchone()[0]  # type: ignore[index]
+                )
+                if waiting:
+                    break
+                time.sleep(0.05)
+        assert waiting, "the sweep did not wait on the instrument lock"
+        assert not done.is_set()
+        # The refill normalised over the refilled raw while the sweep waited: Q1 is derivable from raw.
+        assert conn.execute(
+            "SELECT count(*) FROM financial_periods_raw WHERE instrument_id = 1 AND period_type = 'Q1'"
+        ).fetchone() == (1,)
+    finally:
+        conn.commit()
+        thread.join(timeout=30)
+    assert done.is_set()
+    # The sweep ran after the commit: with one 10-Q kept, the older accession is gone again.
+    assert conn.execute(
+        "SELECT count(*) FROM financial_facts_raw WHERE accession_number = %s", (OLD_ACC,)
+    ).fetchone() == (0,)
+
+
+def test_an_unexpected_error_still_finishes_the_drains_ingestion_run(
+    ebull_test_conn: Conn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = ebull_test_conn
+    _seed(conn)
+    scan_run(conn, _Provider(_doc(3)))
+    monkeypatch.setattr(settings, "dps_inline_scale_enabled", True)
+
+    def explode(*_: Any, **__: Any) -> NormalizationSummary:
+        raise ValueError("unexpected")
+
+    monkeypatch.setattr(fundamentals, "normalize_financial_periods", explode)
+    with pytest.raises(ValueError, match="unexpected"):
+        drain_renormalise_queue(conn, facts_provider=_Facts(), admit_until=None)
+    status = conn.execute(
+        "SELECT status, error FROM data_ingestion_runs WHERE endpoint = '/api/xbrl/companyfacts'"
+        " ORDER BY ingestion_run_id DESC LIMIT 1"
+    ).fetchone()
+    conn.rollback()
+    assert status is not None and status[0] == "failed" and "unexpected" in status[1]
+    assert [i for i, _ in _queue(conn)] == [1]  # the refill rolled back; the row stays queued

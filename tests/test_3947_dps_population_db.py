@@ -176,7 +176,7 @@ def test_the_drain_keeps_the_row_as_a_ledger_and_a_reenqueue_queues_it_again(
     monkeypatch.setattr(
         fundamentals, "normalize_financial_periods", lambda c, ids, **_: NormalizationSummary(len(ids), 0, 0)
     )
-    result = scan.drain_renormalise_queue(conn, admit_until=None)
+    result = scan.drain_renormalise_queue(conn, facts_provider=_Facts(), admit_until=None)
     assert result.normalised == 1 and _queue(conn) == []
     ledger = conn.execute("SELECT instrument_id, revision = drained_revision FROM sec_inline_scale_renormalise")
     assert ledger.fetchall() == [(1, True)]

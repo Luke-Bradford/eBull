@@ -528,6 +528,18 @@ Further points:
 - **Rejected, option (b): repairing a cell from an occurrence.** That would be a second writer into
   `financial_periods`, re-implementing value selection and both derivations outside the normaliser.
 
+*Build note (PR d2a).* (d2) is split again: (d2a) is this section; (d2b) is the A/B rework.
+- `fetch_companyfacts` (step 1) and `refill_and_normalise` (step 2) live in `app/services/dps_inline_scale_scan.py`.
+  `refill_and_normalise` runs inside the caller's transaction and refuses outside one. It raises `RefillFailed` on a
+  failed normalisation so the caller rolls the upsert back. It upserts with `complete_payload=True`, because the
+  payload is the whole companyfacts fetch.
+- `drain_renormalise_queue` now takes `facts_provider`. The uncapped enablement run is
+  `drain_renormalise_queue(conn, facts_provider=SecFundamentalsProvider(...), admit_until=None)`. A fetch failure, a
+  write error or a failed normalisation each increment `failures` and keep the row; `DrainResult.fetch_failed` counts
+  the first. Each drain with queued rows opens one `data_ingestion_runs` row, as discovery does.
+- `sweep_retention_for_instrument` takes `lock_instrument_for_normalize` before its DELETE, so every caller of the
+  sweep holds the lock, not only the scheduled orchestrator.
+
 ### A3. Decisions reach a derivation group only when every leaf is verified (overrides "Where decisions act" and decision row 8's action)
 
 - **Two derivations, same selection.** With the flag on, the normaliser derives each instrument's periods twice over
