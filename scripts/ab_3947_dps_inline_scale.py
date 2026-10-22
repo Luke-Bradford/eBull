@@ -126,13 +126,10 @@ _CANDIDATES_SQL = (
     + " ORDER BY 1"
 )
 _LEDGER_SQL = "SELECT instrument_id FROM sec_inline_scale_renormalise ORDER BY 1"
-# A `running` row of either writer counts as live only if it started within the window: a killed jobs child leaves
-# its row `running` for good, and the longest of these runs is well under it.
-_LIVE_WRITERS_SQL = """
-SELECT run_id, job_name, started_at FROM job_runs
-WHERE status = 'running' AND job_name = ANY(%s)
-  AND started_at > now() - interval '6 hours'
-"""
+# Any `running` row of either writer refuses the run, however old: `daily_financial_facts` runs can last many hours
+# (`SELECT max(finished_at - started_at) FROM job_runs WHERE job_name = 'daily_financial_facts'`), so no age window
+# is safe. A killed jobs child's stale row is listed by run id and fails closed.
+_LIVE_WRITERS_SQL = "SELECT run_id, job_name, started_at FROM job_runs WHERE status = 'running' AND job_name = ANY(%s)"
 
 
 def _scope(conn: psycopg.Connection[Any], mode: Mode) -> list[int]:

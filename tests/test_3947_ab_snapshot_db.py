@@ -167,3 +167,14 @@ def test_a_live_writer_fails_quiescence(ebull_test_conn: Conn) -> None:
     )
     _, failures = _snapshot(conn, {1: [Q3_FACT]})
     assert any(f.startswith("not quiescent") for f in failures)
+
+
+def test_an_old_running_writer_still_fails_quiescence(ebull_test_conn: Conn) -> None:
+    conn = ebull_test_conn
+    _seed(conn)
+    conn.execute(
+        "INSERT INTO job_runs (job_name, started_at, status)"
+        " VALUES ('daily_financial_facts', now() - interval '10 hours', 'running')"
+    )
+    _, failures = _snapshot(conn, {1: [Q3_FACT]})
+    assert any(f.startswith("not quiescent") for f in failures)
