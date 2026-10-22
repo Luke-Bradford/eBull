@@ -10380,8 +10380,9 @@ def sec_dps_inline_scale_scan() -> None:
     """Scan due accessions' inline DPS scale into ``sec_inline_dps_occurrence`` (#3947).
 
     One run is :func:`app.services.dps_inline_scale_scan.run_dps_inline_scale_scan`: the re-normalise drain when
-    ``EBULL_DPS_INLINE_SCALE_ENABLED`` is on, then the scan. Every request goes through the shared SEC client, one
-    transaction per accession. The counters land in ``job_runs.error_msg`` as the note.
+    ``EBULL_DPS_INLINE_SCALE_ENABLED`` is on, the population seed, companyfacts discovery, then the scan. Every
+    request goes through the shared SEC client, one transaction per accession or discovered instrument. The counters
+    land in ``job_runs.error_msg`` as the note.
     """
     from app.providers.implementations.sec_edgar import SecFilingsProvider
     from app.services.dps_inline_scale_scan import run_dps_inline_scale_scan
@@ -10390,9 +10391,12 @@ def sec_dps_inline_scale_scan() -> None:
         with (
             connect_job(autocommit=True) as conn,
             SecFilingsProvider(user_agent=settings.sec_user_agent) as provider,
+            SecFundamentalsProvider(user_agent=settings.sec_user_agent) as facts_provider,
         ):
             # The re-normalise drain is the correction's half: it waits on the flag (spec §The scan, "Draining").
-            result = run_dps_inline_scale_scan(conn, provider, drain=settings.dps_inline_scale_enabled)
+            result = run_dps_inline_scale_scan(
+                conn, provider, facts_provider=facts_provider, drain=settings.dps_inline_scale_enabled
+            )
         tracker.row_count = result.succeeded
         tracker.note = result.digest()
         logger.info("sec_dps_inline_scale_scan complete: %s", result.digest())

@@ -109,6 +109,11 @@ def _inputs(
 
 
 def _coverage(conn: psycopg.Connection[Any]) -> dict[str, Any]:
+    # Recompute the population inside the snapshot (A5), so an unseeded table cannot read as full coverage. The seed
+    # writes (population, discovery, queue rows), but only inside main()'s one REPEATABLE READ transaction, opened by
+    # `SELECT 1` so seed_population's `conn.transaction()` is a savepoint, and undone by its `finally: conn.rollback()`.
+    # The A/B persists nothing; tests/test_3947_dps_population_db.py pins that the seed is a savepoint here.
+    scan.seed_population(conn)
     generation = conn.execute(
         scan._POPULATION_SQL + "SELECT COALESCE(s.outcome, 'none'), count(*) FROM pop p"
         " LEFT JOIN sec_inline_scale_scan s USING (accession_number) GROUP BY 1 ORDER BY 1",
@@ -126,11 +131,14 @@ def _coverage(conn: psycopg.Connection[Any]) -> dict[str, Any]:
             "max_attempts": scan.MAX_ATTEMPTS,
         },
     ).fetchall()
-    state, queue = scan.work_state(conn)
+    state = scan.work_state(conn)
     return {
         "active_generation": dict(generation),
-        "work_state": state,
-        "queue_length": queue,
+        "work_state": state.classes,
+        "undated": state.undated,
+        "discovery": state.discovery,
+        "incomplete": state.incomplete(),
+        "queue_length": state.queue,
         "exhausted_by_last_error": [[e, n] for e, n in exhausted],
     }
 
@@ -308,7 +316,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             else:
                 coverage = _coverage(conn)
                 report["coverage"] = coverage
-                if coverage["work_state"]["pending"] or coverage["work_state"]["retrying"]:
+                # Both classes (Amendment 1 A5's Stage 2 condition); the stage-scoped gates arrive with PR (d).
+                if coverage["incomplete"]:
                     msg = f"scan incomplete: {coverage['work_state']}"
                     if args.allow_incomplete:
                         print(f"WARNING: {msg}", file=sys.stderr)

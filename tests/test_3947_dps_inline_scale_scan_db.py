@@ -54,6 +54,27 @@ class _Provider:
         return self.body
 
 
+class _Facts:
+    """The companyfacts fetch for discovery: ``facts`` for every CIK (default none), or an exception raised."""
+
+    def __init__(self, facts: list[Any] | Exception | None = None) -> None:
+        self.facts = facts
+        self.calls: list[str] = []
+
+    def extract_facts_and_catalog(self, symbol: str, cik: str) -> tuple[list[Any], list[object]]:
+        self.calls.append(cik)
+        if isinstance(self.facts, Exception):
+            raise self.facts
+        return list(self.facts or []), []
+
+
+def scan_run(conn: Conn, provider: _Provider, **kwargs: Any) -> scan.ScanResult:
+    kwargs.setdefault("facts_provider", _Facts())
+    kwargs.setdefault("today", TODAY)
+    conn.commit()  # the run refuses an open transaction
+    return run_dps_inline_scale_scan(conn, provider, **kwargs)
+
+
 def _seed(conn: Conn, *, accession: str = ACC, filed: date = date(2025, 11, 1), iid: int = 1) -> None:
     conn.execute(
         "INSERT INTO instruments (instrument_id, symbol, company_name, is_tradable) VALUES (%s, %s, %s, TRUE)"
@@ -73,6 +94,8 @@ def _seed(conn: Conn, *, accession: str = ACC, filed: date = date(2025, 11, 1), 
         (iid, accession, filed),
     )
     conn.commit()
+    scan.seed_population(conn)  # what each run does first; lets a test call select_targets directly
+    conn.commit()
 
 
 def _scan_row(conn: Conn, accession: str = ACC) -> tuple[Any, ...] | None:
@@ -88,12 +111,16 @@ def _occurrence_scales(conn: Conn) -> list[Any]:
 
 
 def _queue(conn: Conn) -> list[tuple[int, int]]:
-    return conn.execute("SELECT instrument_id, revision FROM sec_inline_scale_renormalise").fetchall()
+    """Queued rows: the ledger keeps drained rows (``drained_revision = revision``)."""
+    return conn.execute(
+        "SELECT instrument_id, revision FROM sec_inline_scale_renormalise"
+        " WHERE drained_revision IS DISTINCT FROM revision ORDER BY instrument_id"
+    ).fetchall()
 
 
 def _run(conn: Conn, provider: _Provider) -> scan.ScanResult:
     conn.commit()
-    return run_dps_inline_scale_scan(conn, provider, today=TODAY)
+    return scan_run(conn, provider)
 
 
 def _expire_backoff(conn: Conn) -> None:
@@ -107,7 +134,7 @@ def test_positive_scale_publishes_and_queues_then_an_unscaled_rescan_queues_the_
     conn = ebull_test_conn
     _seed(conn)
     result = _run(conn, _Provider(_doc(3)))
-    assert (result.succeeded, result.instruments_enqueued, result.work_state["done"]) == (1, 1, 1)
+    assert (result.succeeded, result.instruments_enqueued, result.work_state.classes["raw"]["done"]) == (1, 1, 1)
     assert _scan_row(conn) == ("inline", 1, scan.PARSER_VERSION, scan.PARSER_VERSION, 0, False, False)
     assert _occurrence_scales(conn) == [3]
     first = _queue(conn)
@@ -191,12 +218,12 @@ def test_exhaustion_and_readmission(ebull_test_conn: Conn) -> None:
         _expire_backoff(conn)
     result = _run(conn, _Provider(_doc(3)))
     assert result.attempted == 0
-    assert result.work_state == {"done": 0, "pending": 0, "retrying": 0, "exhausted": 1}
+    assert result.work_state.classes["raw"] == {"done": 0, "pending": 0, "retrying": 0, "exhausted": 1}
 
     # Re-admission per spec: attempts = 0, next_attempt_at = now().
     conn.execute("UPDATE sec_inline_scale_scan SET attempts = 0, next_attempt_at = now()")
     result = _run(conn, _Provider(_doc(3)))
-    assert (result.succeeded, result.work_state["done"]) == (1, 1)
+    assert (result.succeeded, result.work_state.classes["raw"]["done"]) == (1, 1)
 
 
 def test_not_inline_and_superseded(ebull_test_conn: Conn) -> None:
@@ -238,11 +265,12 @@ def test_order_is_recent_first_then_oldest_and_the_cap_defers(ebull_test_conn: C
     order = [t.accession_number for t in select_targets(conn, today=TODAY)]
     assert order == ["0001411342-26-000009", "0001411342-19-000001", "0001411342-20-000001"]
 
-    ticks = iter([0.0, 0.0, 1.0, 10_000.0])
+    # Clock reads: the run's start, discovery's one instrument, then one per accession.
+    ticks = iter([0.0, 0.0, 0.0, 1.0, 10_000.0])
     conn.commit()
-    result = run_dps_inline_scale_scan(conn, _Provider(_doc(None)), today=TODAY, clock=lambda: next(ticks))
+    result = scan_run(conn, _Provider(_doc(None)), clock=lambda: next(ticks))
     assert (result.attempted, result.deferred) == (2, 1)
-    assert result.work_state == {"done": 2, "pending": 1, "retrying": 0, "exhausted": 0}
+    assert result.work_state.classes["raw"] == {"done": 2, "pending": 1, "retrying": 0, "exhausted": 0}
 
 
 def test_occurrence_check_rejects_a_resolved_row_missing_its_key(ebull_test_conn: Conn) -> None:
@@ -267,4 +295,5 @@ def test_each_attempt_ticks_the_progress_heartbeat(ebull_test_conn: Conn, monkey
     ticks: list[tuple[int, int | None, bool]] = []
     monkeypatch.setattr(scan, "report_progress", lambda done, total, *, force=False: ticks.append((done, total, force)))
     _run(conn, _Provider(RuntimeError("boom")))
-    assert ticks == [(0, 2, False), (1, 2, False), (2, 2, True)]
+    # Discovery's one instrument, then the two accessions.
+    assert ticks == [(0, 1, False), (0, 2, False), (1, 2, False), (2, 2, True)]

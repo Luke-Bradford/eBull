@@ -66,6 +66,17 @@ pytestmark = pytest.mark.db
 #     One transaction per accession, the scan row locked FOR UPDATE and published only if its work state is the
 #     one the run selected; no watermark, *_current table, data_freshness_index or manifest write. Reads
 #     financial_facts_raw / sec_filing_manifest / external_identifiers only. Safe.
+#
+# Write-safety audit, 2026-10-22 (#3947 Amendment 1) — sec_dps_inline_scale_scan gains writes shared with
+# daily_financial_facts (and the other upsert_facts_for_instrument callers):
+#   financial_facts_raw (discovery) → through upsert_facts_for_instrument, the same last-write-wins idempotent UPSERT
+#     on source-derived data as daily_financial_facts above. Safe.
+#   sec_inline_scale_population → insert-only ON CONFLICT DO NOTHING, plus a NULL-only date fill; inserts are sorted
+#     by key in every writer, so concurrent writers lock in one order. Convergent. Safe.
+#   sec_inline_scale_discovery → discovered_at set to now() by any complete companyfacts write; attempts written by
+#     the scan only. Convergent. Safe.
+#   sec_inline_scale_renormalise → every enqueue takes a fresh sequence revision (sorted ids); the drain marks
+#     drained_revision only at the revision it read, so a concurrent enqueue always leaves the row queued. Safe.
 EXPECTED_SEC_RATE_MEMBERS = frozenset(
     {
         "cusip_universe_backfill",

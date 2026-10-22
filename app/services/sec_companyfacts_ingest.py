@@ -283,6 +283,7 @@ def ingest_companyfacts_archive(
                                 instrument_id=instrument_id,
                                 facts=facts,
                                 ingestion_run_id=run_id,
+                                complete_payload=True,
                             )
                             result.facts_upserted += upserted
                             result.facts_skipped += skipped
