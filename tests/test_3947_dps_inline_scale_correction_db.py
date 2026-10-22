@@ -54,6 +54,15 @@ def _dps(conn: Conn, iid: int = 1) -> list[tuple[Any, ...]]:
     ).fetchall()
 
 
+def _facts(conn: Conn, iid: int = 1) -> list[fundamentals.FactRow]:
+    rows = conn.execute(
+        "SELECT concept, unit, period_start, period_end, val, frame, form_type, fiscal_year, fiscal_period,"
+        " accession_number, filed_date FROM financial_facts_raw WHERE instrument_id = %s",
+        (iid,),
+    ).fetchall()
+    return [fundamentals.FactRow(*r) for r in rows]
+
+
 def _scan_then_drain(conn: Conn, monkeypatch: pytest.MonkeyPatch) -> scan.ScanResult:
     conn.commit()
     scan_run(conn, _Provider(_doc(3)))  # flag off: fills the queue only
@@ -103,19 +112,10 @@ def test_over_swept_raw_an_incomplete_group_keeps_its_stored_dps(
     result = _scan_then_drain(conn, monkeypatch)
     assert result.drain is not None and result.drain.normalised == 1
     assert _dps(conn) == [(2025, "Q1", Decimal("380.0000")), (2025, "Q3", Decimal("390.0000"))]
-    periods, outcomes = fundamentals.derive_gated_dps_periods(conn, 1, fundamentals_facts(conn))
+    periods, outcomes = fundamentals.derive_gated_dps_periods(conn, 1, _facts(conn))
     conn.rollback()
     assert [o.branch for o in outcomes.values()] == ["kept_stored"]
     assert [(p.period_type, p.dps_declared) for p in periods] == [("Q3", Decimal("390.0000"))]
-
-
-def fundamentals_facts(conn: Conn, iid: int = 1) -> list[fundamentals.FactRow]:
-    rows = conn.execute(
-        "SELECT concept, unit, period_start, period_end, val, frame, form_type, fiscal_year, fiscal_period,"
-        " accession_number, filed_date FROM financial_facts_raw WHERE instrument_id = %s",
-        (iid,),
-    ).fetchall()
-    return [fundamentals.FactRow(*r) for r in rows]
 
 
 def test_flag_off_skips_the_drain(ebull_test_conn: Conn) -> None:

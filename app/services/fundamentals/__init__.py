@@ -1387,7 +1387,12 @@ def _gate_dps_groups(
     if [key(r) for r in off] != [key(r) for r in on]:
         logger.error("dps A3: decisions-off and decisions-on derivations differ in rows; every group keeps off")
         return {fy: DpsGroupOutcome(fy, "off", "structure_mismatch") for fy in labels}
+    # Read before any row is mutated below: ``on`` may be ``off`` itself (nothing restored), and
+    # tests/test_3947_dps_group_gate.py's same-row case passes one list as both.
     on_value = {key(r): r.dps_declared for r in on}
+    stored_types: dict[int, set[str]] = defaultdict(set)
+    for stored_fy, kind, _ in stored:
+        stored_types[stored_fy].add(kind)
     rows_by_label: dict[int, list[PeriodRow]] = defaultdict(list)
     for row in off:
         rows_by_label[row.fiscal_year].append(row)
@@ -1396,7 +1401,7 @@ def _gate_dps_groups(
     for fy in labels:
         rows = rows_by_label[fy]
         produced = {r.period_type for r in rows}
-        if any(stored_fy == fy and kind not in produced for stored_fy, kind, _ in stored):
+        if not stored_types[fy] <= produced:
             for row in rows:
                 if key(row) in stored:
                     row.dps_declared = stored[key(row)]
@@ -1406,6 +1411,8 @@ def _gate_dps_groups(
         for row in rows:
             if row.dps_declared is None:
                 continue
+            # Every derivation writer of the cell sets its leaves (_build_period_row, the YTD fill, the Q4
+            # derivation); a value without leaves would be a new writer, so it counts as unverified.
             if not row.dps_leaves:
                 reasons.add("unverified_leaf")
             for leaf in row.dps_leaves:
