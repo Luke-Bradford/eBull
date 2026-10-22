@@ -30,9 +30,10 @@ Tables: sql/514, sql/515.
   each. No accession is started after :data:`START_CAP`; the drain and discovery admit none after half of it.
 
 * **Drain first** (only when the caller passes ``drain``, i.e. ``EBULL_DPS_INLINE_SCALE_ENABLED`` is on): queued
-  instruments in ``revision`` order. Each is normalised, then marked ``drained_revision = revision`` only at the
-  revision read (A4: the row stays as the ledger), so work queued meanwhile stays queued; a failure counts in
-  ``failures`` and the row stays queued for the next run.
+  instruments in ``revision`` order. Each is refilled from companyfacts and normalised in one locked transaction
+  (:func:`refill_and_normalise`, A2), then marked ``drained_revision = revision`` only at the revision read (A4: the
+  row stays as the ledger), so work queued meanwhile stays queued; a failure counts in ``failures`` and the row stays
+  queued for the next run.
 """
 
 from __future__ import annotations
@@ -142,14 +143,15 @@ class ScanResult:
 @dataclass
 class DrainResult:
     normalised: int = 0
-    failed: int = 0
+    failed: int = 0  # every failure, fetch failures included
+    fetch_failed: int = 0
     requeued: int = 0
     deferred: int = 0
 
     def digest(self) -> str:
         return (
-            f"drained {self.normalised} (failed {self.failed}, re-queued meanwhile {self.requeued}),"
-            f" drain deferred {self.deferred}"
+            f"drained {self.normalised} (failed {self.failed}, of which fetch {self.fetch_failed};"
+            f" re-queued meanwhile {self.requeued}), drain deferred {self.deferred}"
         )
 
 
@@ -673,7 +675,9 @@ def run_dps_inline_scale_scan(
     deadline = start + start_cap.total_seconds()
     half = start + start_cap.total_seconds() / 2
     if drain:
-        result.drain = drain_renormalise_queue(conn, admit_until=half, clock=clock, enabled=True)
+        result.drain = drain_renormalise_queue(
+            conn, facts_provider=facts_provider, admit_until=half, clock=clock, enabled=True
+        )
     result.seeded = seed_population(conn)
     result.discovery = run_discovery(conn, facts_provider, admit_until=half, clock=clock)
     targets = select_targets(conn, today=today or datetime.now(UTC).date())
@@ -707,14 +711,79 @@ def run_dps_inline_scale_scan(
     return result
 
 
+class RefillFailed(Exception):
+    """``refill_and_normalise`` could not refill or normalise; the caller's transaction must roll back."""
+
+
+def fetch_companyfacts(
+    conn: psycopg.Connection[tuple], facts_provider: FactsProvider, instrument_id: int
+) -> Sequence[XbrlFact]:
+    """Amendment 1 A2 step 1: the instrument's whole companyfacts payload, from its primary SEC CIK as the daily path
+    fetches it. Run it outside any transaction: no SEC request may hold a lock. Raises on a fetch or parse failure; an
+    empty payload (no companyfacts at SEC) is returned as empty."""
+    with conn.transaction():
+        row = conn.execute(
+            """
+            SELECT i.symbol,
+                   (SELECT ei.identifier_value FROM external_identifiers ei
+                    WHERE ei.instrument_id = i.instrument_id AND ei.provider = 'sec' AND ei.identifier_type = 'cik'
+                      AND ei.is_primary LIMIT 1)
+            FROM instruments i WHERE i.instrument_id = %s
+            """,
+            (instrument_id,),
+        ).fetchone()
+    if row is None or row[1] is None:
+        raise LookupError("no_primary_sec_cik")
+    facts, _catalog = facts_provider.extract_facts_and_catalog(row[0], row[1])
+    return facts
+
+
+def refill_and_normalise(
+    conn: psycopg.Connection[tuple],
+    instrument_id: int,
+    facts: Sequence[XbrlFact],
+    *,
+    ingestion_run_id: int,
+    dps_inline_scale: bool,
+) -> int:
+    """Amendment 1 A2 step 2, inside the caller's open transaction: take the instrument's normaliser lock, upsert the
+    prefetched companyfacts payload (which records the population, A1 (1)), then normalise over the refilled raw.
+
+    The lock is held to the end of the caller's transaction, and the retention sweep takes the same lock, so no sweep
+    removes facts between the upsert and the normalisation. Raises :class:`RefillFailed` when the normalisation
+    fails, so the caller rolls the upsert back with it: only a successful refill and normalisation may dequeue.
+    Returns the facts upserted."""
+    from app.services.fundamentals import (  # cycle: fundamentals imports this module
+        lock_instrument_for_normalize,
+        normalize_financial_periods,
+        upsert_facts_for_instrument,
+    )
+
+    if conn.info.transaction_status == psycopg.pq.TransactionStatus.IDLE:
+        raise RuntimeError("refill_and_normalise runs inside the caller's transaction")
+    lock_instrument_for_normalize(conn, instrument_id)
+    upserted, _ = upsert_facts_for_instrument(
+        conn, instrument_id=instrument_id, facts=facts, ingestion_run_id=ingestion_run_id, complete_payload=True
+    )
+    summary = normalize_financial_periods(conn, [instrument_id], dps_inline_scale=dps_inline_scale)
+    if summary.instruments_failed:
+        raise RefillFailed(f"normalisation of instrument {instrument_id} failed")
+    return upserted
+
+
 def drain_renormalise_queue(
     conn: psycopg.Connection[tuple],
     *,
+    facts_provider: FactsProvider,
     admit_until: float | None,
     clock: Callable[[], float] = time.monotonic,
     enabled: bool | None = None,
 ) -> DrainResult:
-    """Normalise the queued instruments in ``revision`` order; none is started at or after ``admit_until``.
+    """Refill and normalise the queued instruments in ``revision`` order; none is started at or after ``admit_until``.
+
+    Each instrument (Amendment 1 A2): fetch its companyfacts outside any transaction, then one transaction runs
+    :func:`refill_and_normalise` and marks the row drained. A fetch failure, a write error or a failed normalisation
+    rolls that transaction back, increments ``failures`` and leaves the row queued.
 
     ``admit_until=None`` drains every queued row read at the start (the spec's uncapped enablement run). A drained
     row is kept as the ledger (A4): ``drained_revision`` is set to the revision read, conditioned on it, so a scan
@@ -727,7 +796,10 @@ def drain_renormalise_queue(
     autocommit, both qualify.
     """
     from app.config import settings
-    from app.services.fundamentals import normalize_financial_periods  # cycle: fundamentals imports this module
+    from app.services.fundamentals import (  # cycle: fundamentals imports this module
+        finish_ingestion_run,
+        start_ingestion_run,
+    )
 
     if not (settings.dps_inline_scale_enabled if enabled is None else enabled):
         raise RuntimeError("EBULL_DPS_INLINE_SCALE_ENABLED is off: draining would discard the queue uncorrected")
@@ -739,25 +811,56 @@ def drain_renormalise_queue(
             " WHERE drained_revision IS DISTINCT FROM revision ORDER BY revision"
         ).fetchall()
     result = DrainResult()
+    upserted = 0
+    if not queued:
+        return result
+    with conn.transaction():
+        run_id = start_ingestion_run(
+            conn, source="sec_edgar", endpoint="/api/xbrl/companyfacts", instrument_count=len(queued)
+        )
     for index, (instrument_id, revision) in enumerate(queued):
         if admit_until is not None and clock() >= admit_until:
             result.deferred = len(queued) - index
             break
         report_progress(index, len(queued))
-        summary = normalize_financial_periods(conn, [instrument_id], dps_inline_scale=True)
-        with conn.transaction():
-            if summary.instruments_failed:
-                conn.execute(
-                    "UPDATE sec_inline_scale_renormalise SET failures = failures + 1 WHERE instrument_id = %s",
-                    (instrument_id,),
+        try:
+            facts = fetch_companyfacts(conn, facts_provider, instrument_id)
+        except Exception as exc:  # noqa: BLE001 — a fetch/parse failure keeps the row; the next drain retries it
+            logger.info("dps inline scale drain: instrument %s fetch failed: %r", instrument_id, exc)
+            _count_drain_failure(conn, instrument_id)
+            result.failed += 1
+            result.fetch_failed += 1
+            continue
+        try:
+            with conn.transaction():
+                upserted += refill_and_normalise(
+                    conn, instrument_id, facts, ingestion_run_id=run_id, dps_inline_scale=True
                 )
-                result.failed += 1
-                continue
-            marked = conn.execute(
-                "UPDATE sec_inline_scale_renormalise SET drained_revision = revision"
-                " WHERE instrument_id = %s AND revision = %s",
-                (instrument_id, revision),
-            ).rowcount
+                marked = conn.execute(
+                    "UPDATE sec_inline_scale_renormalise SET drained_revision = revision"
+                    " WHERE instrument_id = %s AND revision = %s",
+                    (instrument_id, revision),
+                ).rowcount
+        except (RefillFailed, psycopg.Error) as exc:
+            logger.warning("dps inline scale drain: instrument %s refill failed: %r", instrument_id, exc)
+            _count_drain_failure(conn, instrument_id)
+            result.failed += 1
+            continue
         result.normalised += 1
         result.requeued += int(marked == 0)
+    with conn.transaction():
+        finish_ingestion_run(
+            conn,
+            run_id=run_id,
+            status="success" if result.failed == 0 else ("partial" if result.normalised else "failed"),
+            rows_upserted=upserted,
+        )
     return result
+
+
+def _count_drain_failure(conn: psycopg.Connection[tuple], instrument_id: int) -> None:
+    with conn.transaction():
+        conn.execute(
+            "UPDATE sec_inline_scale_renormalise SET failures = failures + 1 WHERE instrument_id = %s",
+            (instrument_id,),
+        )

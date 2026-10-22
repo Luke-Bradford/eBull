@@ -37,6 +37,7 @@ from dataclasses import dataclass
 import psycopg
 
 from app.jobs.job_connection import connect_job
+from app.services.fundamentals import lock_instrument_for_normalize
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +114,13 @@ def sweep_retention_for_instrument(
     ``with conn.transaction()`` inside this function — it would become
     a SAVEPOINT in the caller's tx, masking failures and breaking the
     "commit per instrument" promise the orchestrator depends on.
+
+    Takes the instrument's normaliser lock first (#3947 Amendment 1 A2), held to the
+    end of the caller's transaction, so the sweep cannot delete facts between a
+    ``refill_and_normalise`` upsert and its normalisation. One instrument per
+    transaction, so it cannot form a lock-order cycle with the normaliser.
     """
+    lock_instrument_for_normalize(conn, instrument_id)
     with conn.cursor() as cur:
         cur.execute(
             _DELETE_SQL,
