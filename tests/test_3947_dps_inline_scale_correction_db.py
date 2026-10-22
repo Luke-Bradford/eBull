@@ -18,10 +18,10 @@ import pytest
 from app.config import settings
 from app.services import dps_inline_scale_scan as scan
 from app.services import fundamentals
-from app.services.dps_inline_scale_scan import drain_renormalise_queue, run_dps_inline_scale_scan
+from app.services.dps_inline_scale_scan import drain_renormalise_queue
 from app.services.fundamentals import NormalizationSummary, lock_instrument_for_normalize
 from tests.fixtures.ebull_test_db import test_database_url
-from tests.test_3947_dps_inline_scale_scan_db import ACC, TODAY, _doc, _Provider, _queue
+from tests.test_3947_dps_inline_scale_scan_db import ACC, _doc, _Provider, _queue, scan_run
 
 Conn = psycopg.Connection[Any]
 
@@ -56,9 +56,9 @@ def _dps(conn: Conn, iid: int = 1) -> list[tuple[Any, ...]]:
 
 def _scan_then_drain(conn: Conn, monkeypatch: pytest.MonkeyPatch) -> scan.ScanResult:
     conn.commit()
-    run_dps_inline_scale_scan(conn, _Provider(_doc(3)), today=TODAY)  # flag off: fills the queue only
+    scan_run(conn, _Provider(_doc(3)))  # flag off: fills the queue only
     monkeypatch.setattr(settings, "dps_inline_scale_enabled", True)
-    return run_dps_inline_scale_scan(conn, _Provider(_doc(3)), today=TODAY, drain=True)
+    return scan_run(conn, _Provider(_doc(3)), drain=True)
 
 
 def test_drain_restores_the_displayed_value_and_empties_the_queue(
@@ -86,7 +86,7 @@ def test_drain_restores_the_displayed_value_and_empties_the_queue(
 def test_flag_off_skips_the_drain(ebull_test_conn: Conn) -> None:
     conn = ebull_test_conn
     _seed(conn)
-    result = run_dps_inline_scale_scan(conn, _Provider(_doc(3)), today=TODAY)
+    result = scan_run(conn, _Provider(_doc(3)))
     assert result.drain is None and "drain off" in result.digest()
     assert [i for i, _ in _queue(conn)] == [1]
 
@@ -95,7 +95,7 @@ def test_a_row_requeued_during_draining_survives(ebull_test_conn: Conn, monkeypa
     conn = ebull_test_conn
     _seed(conn)
     conn.commit()
-    run_dps_inline_scale_scan(conn, _Provider(_doc(3)), today=TODAY)
+    scan_run(conn, _Provider(_doc(3)))
     ((_, first_revision),) = _queue(conn)
     conn.commit()
     monkeypatch.setattr(settings, "dps_inline_scale_enabled", True)
@@ -123,7 +123,7 @@ def test_a_failed_normalisation_counts_and_keeps_the_row(
     conn = ebull_test_conn
     _seed(conn)
     conn.commit()
-    run_dps_inline_scale_scan(conn, _Provider(_doc(3)), today=TODAY)
+    scan_run(conn, _Provider(_doc(3)))
     monkeypatch.setattr(settings, "dps_inline_scale_enabled", True)
     monkeypatch.setattr(
         fundamentals,
@@ -210,7 +210,7 @@ def test_the_drain_refuses_with_the_flag_off_or_inside_a_transaction(
 ) -> None:
     conn = ebull_test_conn
     _seed(conn)
-    run_dps_inline_scale_scan(conn, _Provider(_doc(3)), today=TODAY)
+    scan_run(conn, _Provider(_doc(3)))
     with pytest.raises(RuntimeError, match="off"):
         drain_renormalise_queue(conn, admit_until=None)
     with pytest.raises(RuntimeError, match="off"):

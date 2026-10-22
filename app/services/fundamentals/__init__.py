@@ -44,6 +44,7 @@ from app.services.bootstrap_state import (
     set_stage_target,
 )
 from app.services.dps_inline_scale_scan import SCOPE_START as _DPS_INLINE_SCOPE_START
+from app.services.dps_inline_scale_scan import record_population as _record_dps_inline_population
 from app.services.filings import (
     FILING_EVENTS_RETENTION_YEARS,
     filing_within_retention,
@@ -410,8 +411,15 @@ def upsert_facts_for_instrument(
     instrument_id: int,
     facts: Sequence[XbrlFact],
     ingestion_run_id: int,
+    complete_payload: bool = False,
 ) -> tuple[int, int]:
     """Upsert XBRL facts into ``financial_facts_raw``.
+
+    #3947 A1 (1): in the same transaction, records the instrument's accessions holding
+    ``CommonStockDividendsPerShareDeclared`` in ``sec_inline_scale_population`` (raw is a
+    retention window; the population is durable), and, when ``complete_payload`` is True,
+    marks the instrument discovered. Pass True only after fetching and parsing the CIK's
+    whole companyfacts payload successfully; a partial write records population rows only.
 
     Returns ``(upserted_count, skipped_count)``. "Upserted" means the
     row was either INSERTed fresh or UPDATEd in place because the WHERE
@@ -429,6 +437,14 @@ def upsert_facts_for_instrument(
     ``sum(cur.rowcount)`` per chunk and ``skipped`` is
     ``len(facts) − upserted``.
     """
+    dps_accessions: dict[str, date] = {}
+    for fact in facts:
+        if fact.concept == _DPS_INLINE_CONCEPT:
+            known = dps_accessions.get(fact.accession_number, fact.filed_date)
+            dps_accessions[fact.accession_number] = max(known, fact.filed_date)
+    _record_dps_inline_population(
+        conn, instrument_id=instrument_id, accessions=dps_accessions, complete_payload=complete_payload
+    )
     if not facts:
         return 0, 0
 
@@ -632,6 +648,7 @@ def refresh_financial_facts(
                     instrument_id=instrument_id,
                     facts=facts,
                     ingestion_run_id=run_id,
+                    complete_payload=True,
                 )
                 if catalog_entries:
                     upsert_concept_catalog(conn, entries=catalog_entries)
@@ -3422,6 +3439,7 @@ def _run_cik_upsert(
                     instrument_id=instrument_id,
                     facts=facts,
                     ingestion_run_id=run_id,
+                    complete_payload=True,
                 )
                 upserted_in_tx = upserted
             if catalog_entries:

@@ -482,6 +482,22 @@ CREATE TABLE sec_inline_scale_discovery (
 
   Discovery adds what the seed misses.
 
+*Build note (PR c).*
+- The A1 (2) seed runs at the start of every scan run, after the drain. Migration 515 creates the tables only;
+  the first run after deploy seeds them before it selects anything. On the dev DB (2026-10-22, rolled back) the
+  first seed took 42 s and a repeat took 6 s. It reproduced [A3]: `raw` 11,878, `history` 17,232, undated 19,004 and
+  1,731 instruments.
+- The date fill covers every undated member, not only the pairs in the current seed. A member whose `source_ref`
+  was later reselected away still takes a date once raw, the manifest or a filing event knows one.
+- Any `complete_payload=True` write sets `discovered_at`, inserting the row if needed, whether or not the instrument
+  is in the population yet. That write already captured every concept accession companyfacts serves for it.
+  Discovery fetches only population instruments. An empty payload (a 404 or no sections) counts as discovered.
+- The run note adds `history_candidate`, the `history` accessions of candidate instruments, as a subset beside the
+  two classes, because Stage 1 readiness (A5) reads it.
+- The drain still normalises over swept raw. `refill_and_normalise`, the sweep lock, the A3 groups and the
+  stage-scoped A/B gates arrive with PR (d). Until then the A/B's coverage gate requires both classes complete,
+  which is the Stage 2 condition.
+
 ### A2. Refill, then normalise, as one locked unit (overrides "Draining", where it says "normalises the instrument")
 
 The drain, enablement and rollback all use one per-instrument primitive, `refill_and_normalise`:
