@@ -19,8 +19,10 @@ Spec: ``docs/specs/fundamentals/2026-10-21-3947-dps-inline-scale.md`` §The scan
 * **Order:** filings from the last :data:`RECENT_DAYS` days first, then the backlog oldest first. No accession is
   started after :data:`START_CAP`.
 
-Draining the queue (normalising the instruments) is the correction's half, behind
-``EBULL_DPS_INLINE_SCALE_ENABLED``, and lands with it; this module only fills the queue.
+* **Drain first** (only when the caller passes ``drain``, i.e. ``EBULL_DPS_INLINE_SCALE_ENABLED`` is on): queued
+  instruments in ``revision`` order, none started after half of :data:`START_CAP`. Each is normalised, then its row
+  deleted only at the revision read, so work queued meanwhile stays queued; a failure counts in ``failures`` and the
+  row stays for the next run.
 """
 
 from __future__ import annotations
@@ -84,13 +86,30 @@ class ScanResult:
     instruments_enqueued: int = 0
     work_state: dict[str, int] = field(default_factory=dict)
     queue_length: int = 0
+    drain: DrainResult | None = None
 
     def digest(self) -> str:
         state = ", ".join(f"{k} {v}" for k, v in self.work_state.items())
+        drained = "drain off" if self.drain is None else self.drain.digest()
         return (
+            f"{drained}; "
             f"attempted {self.attempted} (ok {self.succeeded}, failed {self.failed}, superseded {self.superseded}),"
             f" deferred {self.deferred}, documents {self.documents_fetched},"
             f" enqueued {self.instruments_enqueued}; population: {state}; queue {self.queue_length}"
+        )
+
+
+@dataclass
+class DrainResult:
+    normalised: int = 0
+    failed: int = 0
+    requeued: int = 0
+    deferred: int = 0
+
+    def digest(self) -> str:
+        return (
+            f"drained {self.normalised} (failed {self.failed}, re-queued meanwhile {self.requeued}),"
+            f" drain deferred {self.deferred}"
         )
 
 
@@ -309,11 +328,20 @@ def run_dps_inline_scale_scan(
     today: date | None = None,
     clock: Callable[[], float] = time.monotonic,
     start_cap: timedelta = START_CAP,
+    drain: bool = False,
 ) -> ScanResult:
-    """One run: every eligible accession in order until :data:`START_CAP` of starts, then the work-state report."""
+    """One run: the drain (when ``drain``), then every eligible accession in order until :data:`START_CAP` of starts,
+    then the work-state report.
+
+    ``drain`` is the caller's one read of ``EBULL_DPS_INLINE_SCALE_ENABLED`` (the job passes it), handed to the drain
+    as ``enabled`` so a run never reads the flag twice."""
     result = ScanResult()
-    targets = select_targets(conn, today=today or datetime.now(UTC).date())
     deadline = clock() + start_cap.total_seconds()
+    if drain:
+        result.drain = drain_renormalise_queue(
+            conn, admit_until=clock() + start_cap.total_seconds() / 2, clock=clock, enabled=True
+        )
+    targets = select_targets(conn, today=today or datetime.now(UTC).date())
     for index, target in enumerate(targets):
         if clock() >= deadline:
             result.deferred = len(targets) - index
@@ -341,4 +369,58 @@ def run_dps_inline_scale_scan(
             result.instruments_enqueued += enqueued
     report_progress(result.attempted, len(targets), force=True)
     result.work_state, result.queue_length = work_state(conn)
+    return result
+
+
+def drain_renormalise_queue(
+    conn: psycopg.Connection[tuple],
+    *,
+    admit_until: float | None,
+    clock: Callable[[], float] = time.monotonic,
+    enabled: bool | None = None,
+) -> DrainResult:
+    """Normalise the queued instruments in ``revision`` order; none is started at or after ``admit_until``.
+
+    ``admit_until=None`` drains every row read at the start (the spec's uncapped enablement run). The delete is
+    conditional on the revision read: a scan that re-queued the instrument meanwhile took a new revision, and that
+    row stays for the next drain.
+
+    Refuses when ``enabled`` is false (``None`` reads ``EBULL_DPS_INLINE_SCALE_ENABLED`` once): with the flag off,
+    every other normaliser caller reads stored values, so a drain would correct instruments the next normalisation
+    reverts. Refuses on a connection with an open transaction: each instrument's normalisation and queue delete must
+    commit on their own, so its advisory lock is released at once. An autocommit connection, or an idle one without
+    autocommit, both qualify.
+    """
+    from app.config import settings
+    from app.services.fundamentals import normalize_financial_periods  # cycle: fundamentals imports this module
+
+    if not (settings.dps_inline_scale_enabled if enabled is None else enabled):
+        raise RuntimeError("EBULL_DPS_INLINE_SCALE_ENABLED is off: draining would discard the queue uncorrected")
+    if conn.info.transaction_status != psycopg.pq.TransactionStatus.IDLE:
+        raise RuntimeError("drain_renormalise_queue needs a connection outside a transaction")
+    with conn.transaction():
+        queued = conn.execute(
+            "SELECT instrument_id, revision FROM sec_inline_scale_renormalise ORDER BY revision"
+        ).fetchall()
+    result = DrainResult()
+    for index, (instrument_id, revision) in enumerate(queued):
+        if admit_until is not None and clock() >= admit_until:
+            result.deferred = len(queued) - index
+            break
+        report_progress(index, len(queued))
+        summary = normalize_financial_periods(conn, [instrument_id], dps_inline_scale=True)
+        with conn.transaction():
+            if summary.instruments_failed:
+                conn.execute(
+                    "UPDATE sec_inline_scale_renormalise SET failures = failures + 1 WHERE instrument_id = %s",
+                    (instrument_id,),
+                )
+                result.failed += 1
+                continue
+            deleted = conn.execute(
+                "DELETE FROM sec_inline_scale_renormalise WHERE instrument_id = %s AND revision = %s",
+                (instrument_id, revision),
+            ).rowcount
+        result.normalised += 1
+        result.requeued += int(deleted == 0)
     return result

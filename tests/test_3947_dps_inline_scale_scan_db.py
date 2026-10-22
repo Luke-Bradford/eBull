@@ -1,6 +1,7 @@
 """#3947 ``sec_dps_inline_scale_scan`` against real SQL (spec §The scan; acceptance 3, DB tests for the job).
 
-Draining and the normaliser lock land with the correction (PR b); these cover the scan's state machine and queue.
+These cover the scan's state machine and queue; draining and the normaliser lock are in
+``test_3947_dps_inline_scale_correction_db.py``.
 """
 
 from __future__ import annotations
