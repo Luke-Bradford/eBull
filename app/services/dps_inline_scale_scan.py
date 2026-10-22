@@ -378,9 +378,17 @@ def drain_renormalise_queue(
     ``admit_until=None`` drains every row read at the start (the spec's uncapped enablement run). The delete is
     conditional on the revision read: a scan that re-queued the instrument meanwhile took a new revision, and that
     row stays for the next drain.
+
+    Refuses with the flag off (draining would re-normalise without the decisions and then discard the queue), and on
+    a connection inside a transaction (each instrument must commit on its own, so its lock is released at once).
     """
+    from app.config import settings
     from app.services.fundamentals import normalize_financial_periods  # cycle: fundamentals imports this module
 
+    if not settings.dps_inline_scale_enabled:
+        raise RuntimeError("EBULL_DPS_INLINE_SCALE_ENABLED is off: draining would discard the queue uncorrected")
+    if conn.info.transaction_status != psycopg.pq.TransactionStatus.IDLE:
+        raise RuntimeError("drain_renormalise_queue needs a connection outside a transaction")
     with conn.transaction():
         queued = conn.execute(
             "SELECT instrument_id, revision FROM sec_inline_scale_renormalise ORDER BY revision"
@@ -391,7 +399,7 @@ def drain_renormalise_queue(
             result.deferred = len(queued) - index
             break
         report_progress(index, len(queued))
-        summary = normalize_financial_periods(conn, [instrument_id])
+        summary = normalize_financial_periods(conn, [instrument_id], dps_inline_scale=True)
         with conn.transaction():
             if summary.instruments_failed:
                 conn.execute(
@@ -405,5 +413,5 @@ def drain_renormalise_queue(
                 (instrument_id, revision),
             ).rowcount
         result.normalised += 1
-        result.requeued += deleted == 0
+        result.requeued += int(deleted == 0)
     return result

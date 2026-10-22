@@ -97,11 +97,12 @@ def test_a_row_requeued_during_draining_survives(ebull_test_conn: Conn, monkeypa
     conn.commit()
     run_dps_inline_scale_scan(conn, _Provider(_doc(3)), today=TODAY)
     ((_, first_revision),) = _queue(conn)
+    conn.commit()
     monkeypatch.setattr(settings, "dps_inline_scale_enabled", True)
     real = fundamentals.normalize_financial_periods
 
-    def normalise_then_requeue(c: Conn, ids: list[int]) -> NormalizationSummary:
-        summary = real(c, ids)
+    def normalise_then_requeue(c: Conn, ids: list[int], **kwargs: Any) -> NormalizationSummary:
+        summary = real(c, ids, **kwargs)
         # A scan publishing meanwhile takes a new revision for the same instrument.
         with psycopg.connect(test_database_url(), autocommit=True) as other:
             other.execute(
@@ -123,20 +124,25 @@ def test_a_failed_normalisation_counts_and_keeps_the_row(
     _seed(conn)
     conn.commit()
     run_dps_inline_scale_scan(conn, _Provider(_doc(3)), today=TODAY)
+    monkeypatch.setattr(settings, "dps_inline_scale_enabled", True)
     monkeypatch.setattr(
         fundamentals,
         "normalize_financial_periods",
-        lambda c, ids: NormalizationSummary(len(ids), 0, 0, instruments_failed=1),
+        lambda c, ids, **_: NormalizationSummary(len(ids), 0, 0, instruments_failed=1),
     )
     for expected in (1, 2):
         result = drain_renormalise_queue(conn, admit_until=None)
         assert (result.normalised, result.failed) == (0, 1)
         row = conn.execute("SELECT instrument_id, failures FROM sec_inline_scale_renormalise").fetchall()
+        conn.commit()
         assert row == [(1, expected)]
 
 
-def test_no_instrument_is_started_after_the_admission_deadline(ebull_test_conn: Conn) -> None:
+def test_no_instrument_is_started_after_the_admission_deadline(
+    ebull_test_conn: Conn, monkeypatch: pytest.MonkeyPatch
+) -> None:
     conn = ebull_test_conn
+    monkeypatch.setattr(settings, "dps_inline_scale_enabled", True)
     _seed(conn, 1)
     _seed(conn, 2)
     conn.execute(
@@ -197,3 +203,19 @@ def test_two_normalisations_of_one_instrument_serialise(ebull_test_conn: Conn) -
 def test_the_lock_key_takes_a_bigint_id(ebull_test_conn: Conn) -> None:
     lock_instrument_for_normalize(ebull_test_conn, 3_000_000_000)  # past int4: must not raise
     ebull_test_conn.rollback()
+
+
+def test_the_drain_refuses_with_the_flag_off_or_inside_a_transaction(
+    ebull_test_conn: Conn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = ebull_test_conn
+    _seed(conn)
+    run_dps_inline_scale_scan(conn, _Provider(_doc(3)), today=TODAY)
+    with pytest.raises(RuntimeError, match="off"):
+        drain_renormalise_queue(conn, admit_until=None)
+    monkeypatch.setattr(settings, "dps_inline_scale_enabled", True)
+    conn.execute("SELECT 1")  # an open transaction
+    with pytest.raises(RuntimeError, match="outside a transaction"):
+        drain_renormalise_queue(conn, admit_until=None)
+    conn.rollback()
+    assert [i for i, _ in _queue(conn)] == [1]
