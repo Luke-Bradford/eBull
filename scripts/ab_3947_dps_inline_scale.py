@@ -38,14 +38,19 @@ import argparse
 import json
 import sys
 from collections import Counter, defaultdict
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from decimal import ROUND_HALF_UP, Decimal
+from itertools import product
 from typing import Any
 
 import psycopg
 
 from app.config import settings
+from app.providers.implementations.sec_fundamentals import TRACKED_CONCEPTS
 from app.services import dps_inline_scale_scan as scan
 from app.services.fundamentals import (
+    _FLOW_DURATION_DAYS,
+    _YTD_POOL_DAYS,
     DpsScaleDecision,
     FactRow,
     _dps_fact_inline_scale_decisions,
@@ -177,16 +182,85 @@ def _diff(
     return problems, changed
 
 
-def _explained(
+def _dps_facts(conn: psycopg.Connection[Any], ids: Sequence[int]) -> dict[int, list[FactRow]]:
+    """Every fact of every ``dps_declared`` tag for ``ids``, as the normaliser reads them (fiscal labels set)."""
+    out: dict[int, list[FactRow]] = defaultdict(list)
+    for r in conn.execute(
+        """
+        SELECT instrument_id, concept, unit, period_start, period_end, val, frame, form_type, fiscal_year,
+               fiscal_period, accession_number, filed_date
+        FROM financial_facts_raw
+        WHERE instrument_id = ANY(%s) AND concept = ANY(%s) AND fiscal_year IS NOT NULL AND fiscal_period IS NOT NULL
+        """,
+        (list(ids), list(TRACKED_CONCEPTS["dps_declared"])),
+    ).fetchall():
+        out[r[0]].append(FactRow(*r[1:]))
+    return out
+
+
+def _q(value: Decimal | None) -> Decimal | None:
+    """A value as ``NUMERIC(12,4)`` stores it."""
+    return None if value is None else value.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+
+
+def _span(fact: FactRow) -> int | None:
+    return None if fact.period_start is None else (fact.period_end - fact.period_start).days
+
+
+def _lineage(
     key: tuple[Any, ...],
-    row: dict[str, Any],
+    on: Mapping[tuple[Any, ...], dict[str, Any]],
     changed: set[tuple[Any, ...]],
-    decided_ends: dict[int, set[Any]],
-) -> bool:
-    iid = key[0]
-    if row["is_derived"] and row["period_type"] == "Q4":
-        return any(k[0] == iid and k[3] == row["fiscal_year"] and k[2] in ("FY", "Q1", "Q2", "Q3") for k in changed)
-    return row["period_end_date"] in decided_ends.get(iid, set())
+    facts: Sequence[FactRow],
+    decided: Mapping[FactRow, DpsScaleDecision],
+) -> str | None:
+    """Why the decisions-on value of a changed ``dps_declared`` cell is what it is; ``None`` when nothing explains it.
+
+    * ``derived_q4``: a derived Q4 whose FY or Q1–Q3 cell changed, and whose value is FY − Q1 − Q2 − Q3 of the
+      decisions-on rows.
+    * ``direct``: a decided fact spans exactly this period (the row's own duration window), and the value is one
+      that selection can produce: a restored value, NULL after a refusal, or another surviving fact's value for the
+      same span (any ``dps_declared`` tag).
+    * ``ytd``: a quarter with no fact of its own span at all, whose YTD de-cumulation reads a decided cumulative
+      ending at this quarter or the one before.
+    """
+    row = on[key]
+    iid, end, kind = key[0], row["period_end_date"], row["period_type"]
+    value = row["dps_declared"]
+    if row["is_derived"] and kind == "Q4":
+        parts = {t: [r for k, r in on.items() if k[0] == iid and k[3] == row["fiscal_year"] and k[2] == t]
+                 for t in ("FY", "Q1", "Q2", "Q3")}  # fmt: skip
+        inputs_changed = any(k[0] == iid and k[3] == row["fiscal_year"] and k[2] in parts for k in changed)
+        for fy, q1, q2, q3 in product(parts["FY"], parts["Q1"], parts["Q2"], parts["Q3"]):
+            cells = [r["dps_declared"] for r in (fy, q1, q2, q3)]
+            expected = None if None in cells else cells[0] - cells[1] - cells[2] - cells[3]
+            # Q4 is derived from unrounded values and each cell is then stored at 4 dp: allow that rounding.
+            close = expected == value or (
+                expected is not None and value is not None and abs(expected - value) <= Decimal("0.0003")
+            )
+            if inputs_changed and close:
+                return "derived_q4"
+        return None
+    lo, hi = _FLOW_DURATION_DAYS[kind]
+    own = [f for f in facts if f.period_end == end and (d := _span(f)) is not None and lo <= d <= hi]
+    if any(f in decided for f in own):
+        possible = {_q(decided[f].value) if f in decided else _q(f.val) for f in own}
+        possible.discard(None)
+        if any(f in decided and decided[f].action == "refuse" for f in own):
+            possible.add(None)
+        return "direct" if value in possible else None
+    if own:
+        return None  # selection read an undecided fact of this span; the YTD fill never runs for a filled cell
+    ylo, yhi = _YTD_POOL_DAYS
+    if kind != "FY" and any(
+        f in decided
+        and (d := _span(f)) is not None
+        and ylo <= d <= yhi
+        and (f.period_end == end or 60 <= (end - f.period_end).days <= 120)
+        for f in facts
+    ):
+        return "ytd"
+    return None
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -327,19 +401,30 @@ def main(argv: Sequence[str] | None = None) -> int:
                     (affected,),
                 ).fetchall()
                 problems, changed = _diff(off, on)
-                decided_ends: dict[int, set[Any]] = defaultdict(set)
-                for iid in affected:
-                    for f, d in decisions[iid].items():
-                        if d.action != "keep":
-                            decided_ends[iid].add(f.period_end)
+                dps_facts = _dps_facts(conn, affected)
                 changed_set = set(changed)
-                unexplained = [k for k in changed if not _explained(k, on[k], changed_set, decided_ends)]
+                lineage = {
+                    k: _lineage(
+                        k,
+                        on,
+                        changed_set,
+                        dps_facts[k[0]],
+                        {f: d for f, d in decisions[k[0]].items() if d.action != "keep"},
+                    )
+                    for k in changed
+                }
+                unexplained = [k for k, why in lineage.items() if why is None]
                 report["ab"] = {
                     "instruments": len(affected),
                     "normalise_failures": {"off": failed_off, "on": failed_on},
                     "structural": problems,
                     "dps_cells_changed": [
-                        {"key": list(map(str, k)), "off": str(off[k]["dps_declared"]), "on": str(on[k]["dps_declared"])}
+                        {
+                            "key": list(map(str, k)),
+                            "off": str(off[k]["dps_declared"]),
+                            "on": str(on[k]["dps_declared"]),
+                            "lineage": lineage[k],
+                        }
                         for k in sorted(changed, key=str)
                     ],
                     "unexplained": [list(map(str, k)) for k in unexplained],

@@ -19,7 +19,7 @@ from app.config import settings
 from app.services import dps_inline_scale_scan as scan
 from app.services import fundamentals
 from app.services.dps_inline_scale_scan import drain_renormalise_queue, run_dps_inline_scale_scan
-from app.services.fundamentals import NORMALIZE_INSTRUMENT_LOCK_NAMESPACE, NormalizationSummary
+from app.services.fundamentals import NormalizationSummary, lock_instrument_for_normalize
 from tests.fixtures.ebull_test_db import test_database_url
 from tests.test_3947_dps_inline_scale_scan_db import ACC, TODAY, _doc, _Provider, _queue
 
@@ -159,7 +159,7 @@ def test_two_normalisations_of_one_instrument_serialise(ebull_test_conn: Conn) -
     before = _dps(conn)
 
     holder = psycopg.connect(test_database_url())
-    holder.execute("SELECT pg_advisory_xact_lock(%s, %s)", (NORMALIZE_INSTRUMENT_LOCK_NAMESPACE, 1))
+    lock_instrument_for_normalize(holder, 1)
     done = threading.Event()
 
     def normalise() -> None:
@@ -174,9 +174,10 @@ def test_two_normalisations_of_one_instrument_serialise(ebull_test_conn: Conn) -
         for _ in range(100):
             waiting = bool(
                 conn.execute(
-                    "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted"
-                    " AND classid = %s AND objid = 1",
-                    (NORMALIZE_INSTRUMENT_LOCK_NAMESPACE,),
+                    # A bigint advisory key shows as classid = high 32 bits, objid = low 32 bits, objsubid 1.
+                    "SELECT count(*) FROM pg_locks l, hashtextextended('normalize_financial_periods:1', 0) AS k(key)"
+                    " WHERE l.locktype = 'advisory' AND NOT l.granted AND l.objsubid = 1"
+                    " AND l.classid::bigint = ((k.key >> 32) & 4294967295) AND l.objid::bigint = (k.key & 4294967295)"
                 ).fetchone()[0]  # type: ignore[index]
             )
             conn.rollback()
@@ -191,3 +192,8 @@ def test_two_normalisations_of_one_instrument_serialise(ebull_test_conn: Conn) -
         thread.join(timeout=30)
     assert done.is_set()
     assert _dps(conn) == before
+
+
+def test_the_lock_key_takes_a_bigint_id(ebull_test_conn: Conn) -> None:
+    lock_instrument_for_normalize(ebull_test_conn, 3_000_000_000)  # past int4: must not raise
+    ebull_test_conn.rollback()

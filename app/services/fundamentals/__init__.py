@@ -2470,9 +2470,17 @@ def _record_treasury_observations_for_instrument(
         refresh_treasury_current(conn, instrument_id=instrument_id)
 
 
-#: ``pg_advisory_xact_lock(NAMESPACE, instrument_id)`` serialises every writer of one instrument's periods (#3947):
-#: the re-normalise drain, ``daily_financial_facts``, force-refresh and bootstrap all call the function below.
-NORMALIZE_INSTRUMENT_LOCK_NAMESPACE: Final = 3947
+def lock_instrument_for_normalize(conn: psycopg.Connection[Any], instrument_id: int) -> None:
+    """Serialise every writer of one instrument's periods (#3947), to the end of the current transaction.
+
+    The re-normalise drain, ``daily_financial_facts``, force-refresh and bootstrap all reach it through
+    :func:`normalize_financial_periods`. The key is a 64-bit hash of a namespaced text, so a BIGINT id is never
+    narrowed; a hash collision only makes two instruments wait for each other.
+    """
+    conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended('normalize_financial_periods:' || %s::text, 0))",
+        (instrument_id,),
+    )
 
 
 def normalize_financial_periods(
@@ -2499,6 +2507,9 @@ def normalize_financial_periods(
     if instrument_ids is None:
         cur = conn.execute("SELECT DISTINCT instrument_id FROM financial_facts_raw")
         instrument_ids = [row[0] for row in cur.fetchall()]
+    # One order for every caller: inside a caller's open transaction each instrument lock is held until that
+    # transaction ends, so two overlapping calls taking them in different orders could deadlock (#3947).
+    instrument_ids = sorted(set(instrument_ids))
 
     total_raw = 0
     total_canonical = 0
@@ -2524,10 +2535,7 @@ def normalize_financial_periods(
             with conn.transaction():
                 # Held to the end of the instrument's transaction (the outer one when nested): two
                 # normalisations of one instrument never interleave their rewash (#3947).
-                conn.execute(
-                    "SELECT pg_advisory_xact_lock(%s, %s::int)",
-                    (NORMALIZE_INSTRUMENT_LOCK_NAMESPACE, iid),
-                )
+                lock_instrument_for_normalize(conn, iid)
                 # Step 1: Read facts for this instrument
                 cur = conn.execute(
                     """
