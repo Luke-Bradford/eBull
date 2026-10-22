@@ -574,7 +574,6 @@ def run_discovery(
     A fetch or parse failure backs off ``2^attempts`` hours; :data:`MAX_ATTEMPTS` failures exhaust it. A write failure
     is counted and leaves the discovery row unchanged, so it burns no attempt and the run continues."""
     from app.services.fundamentals import (  # cycle: fundamentals imports this module
-        finish_ingestion_run,
         start_ingestion_run,
         upsert_facts_for_instrument,
     )
@@ -645,18 +644,13 @@ def run_discovery(
         raise
     finally:
         failed = result.failed + result.write_failed
-        with conn.transaction():
-            finish_ingestion_run(
-                conn,
-                run_id=run_id,
-                status="failed"
-                if error
-                else "success"
-                if failed == 0
-                else ("partial" if result.discovered else "failed"),
-                rows_upserted=upserted,
-                error=error,
-            )
+        _finish_run(
+            conn,
+            run_id,
+            status="failed" if error else "success" if failed == 0 else ("partial" if result.discovered else "failed"),
+            upserted=upserted,
+            error=error,
+        )
     return result
 
 
@@ -808,7 +802,6 @@ def drain_renormalise_queue(
     """
     from app.config import settings
     from app.services.fundamentals import (  # cycle: fundamentals imports this module
-        finish_ingestion_run,
         start_ingestion_run,
     )
 
@@ -866,19 +859,32 @@ def drain_renormalise_queue(
         error = repr(exc)[:2000]
         raise
     finally:
-        with conn.transaction():
-            finish_ingestion_run(
-                conn,
-                run_id=run_id,
-                status="failed"
-                if error
-                else "success"
-                if result.failed == 0
-                else ("partial" if result.normalised else "failed"),
-                rows_upserted=upserted,
-                error=error,
-            )
+        _finish_run(
+            conn,
+            run_id,
+            status="failed"
+            if error
+            else "success"
+            if result.failed == 0
+            else ("partial" if result.normalised else "failed"),
+            upserted=upserted,
+            error=error,
+        )
     return result
+
+
+def _finish_run(conn: psycopg.Connection[tuple], run_id: int, *, status: str, upserted: int, error: str | None) -> None:
+    """Finish an ingestion run from a ``finally``. When an error is already propagating, a failure to record it (a dead
+    connection) is logged and swallowed, so the original exception is the one that surfaces."""
+    from app.services.fundamentals import finish_ingestion_run  # cycle: fundamentals imports this module
+
+    try:
+        with conn.transaction():
+            finish_ingestion_run(conn, run_id=run_id, status=status, rows_upserted=upserted, error=error)
+    except psycopg.Error:
+        if error is None:
+            raise
+        logger.exception("ingestion run %s could not be finished after %s", run_id, error)
 
 
 def _count_drain_failure(conn: psycopg.Connection[tuple], instrument_id: int) -> None:

@@ -72,3 +72,19 @@ def test_summary_is_only_an_exclusion_list() -> None:
 def test_a_missing_listing_or_document_fails_the_attempt(provider: _Provider, target: Target, reason: str) -> None:
     with pytest.raises(DocumentSetError, match=reason):
         fetch_document_set(provider, target)
+
+
+def test_finishing_a_run_on_a_dead_connection_keeps_the_original_error() -> None:
+    import psycopg
+
+    from app.services.dps_inline_scale_scan import _finish_run
+
+    class _Dead:
+        def transaction(self) -> object:
+            raise psycopg.OperationalError("connection is dead")
+
+    # An error is already propagating: the failed finish is logged, not raised over it.
+    _finish_run(_Dead(), 1, status="failed", upserted=0, error="ValueError('unexpected')")  # type: ignore[arg-type]
+    # Nothing propagating: the failure to finish is the error.
+    with pytest.raises(psycopg.OperationalError):
+        _finish_run(_Dead(), 1, status="success", upserted=0, error=None)  # type: ignore[arg-type]

@@ -37,7 +37,6 @@ from dataclasses import dataclass
 import psycopg
 
 from app.jobs.job_connection import connect_job
-from app.services.fundamentals import lock_instrument_for_normalize
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +119,10 @@ def sweep_retention_for_instrument(
     ``refill_and_normalise`` upsert and its normalisation. One instrument per
     transaction, so it cannot form a lock-order cycle with the normaliser.
     """
+    from app.services.fundamentals import (
+        lock_instrument_for_normalize,
+    )  # lazy: keeps this module off fundamentals' import graph
+
     lock_instrument_for_normalize(conn, instrument_id)
     with conn.cursor() as cur:
         cur.execute(
