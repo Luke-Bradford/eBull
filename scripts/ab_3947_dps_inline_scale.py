@@ -11,7 +11,7 @@ its ``dps_inline_scale`` argument, not the flag, and every figure is read from t
    with its decision, counted by reason for all facts and for derivation-eligible ones (``dropped_before_decision``
    when a structural filter drops the raw value); every ``unresolved``, ``entity_mismatch`` and ``no_match``
    accession. Gate: 0 pending and 0 retrying (``--allow-incomplete`` reports anyway, for a dry run).
-2. **Fact-level A/B**, for every instrument with a restore or a refusal: ``financial_periods`` with decisions off
+2. **Fact-level A/B**, for every instrument with a restore: ``financial_periods`` with decisions off
    against on. Gates: the same rows, every column but ``dps_declared`` equal, and every changed ``dps_declared`` cell
    explained by its lineage (a decided fact ending at that period, or a derived Q4 whose FY or Q1–Q3 cell changed).
    Every restored fact is listed with its display text, scale, restored value and the other accessions' ``unscaled``
@@ -227,8 +227,8 @@ def _lineage(
     * ``derived_q4``: a derived Q4 whose FY or Q1–Q3 cell changed, and whose value is FY − Q1 − Q2 − Q3 of the
       decisions-on rows.
     * ``direct``: a decided fact spans exactly this period (the row's own duration window), and the value is one
-      that selection can produce: a restored value, NULL after a refusal, or another surviving fact's value for the
-      same span (any ``dps_declared`` tag).
+      that selection can produce: a restored value, or another fact's value for the same span (any
+      ``dps_declared`` tag).
     * ``ytd``: a quarter with no fact of its own span at all, whose YTD de-cumulation reads a decided cumulative
       ending at this quarter or the one before.
     """
@@ -253,9 +253,6 @@ def _lineage(
     own = [f for f in facts if f.period_end == end and (d := _span(f)) is not None and lo <= d <= hi]
     if any(f in decided for f in own):
         possible = {_q(decided[f].value) if f in decided else _q(f.val) for f in own}
-        possible.discard(None)
-        if any(f in decided and decided[f].action == "refuse" for f in own):
-            possible.add(None)
         return "direct" if value in possible else None
     if own:
         return None  # selection read an undecided fact of this span; the YTD fill never runs for a filled cell
@@ -381,7 +378,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                                 "verdict": verdict,
                             }
                         )
-                refused = [
+                mixed_scale = [
                     {
                         "instrument_id": iid,
                         "accession": f.accession_number,
@@ -389,7 +386,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     }
                     for iid in affected
                     for f, d in decisions[iid].items()
-                    if d.action == "refuse"
+                    if d.reason == "mixed_scale"
                 ]
 
                 failed_off = _normalise(conn, affected, on=False)
@@ -440,7 +437,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "unreachable": [list(map(str, r)) for r in unreachable],
                     "restored": restored,
                     "restored_by_verdict": dict(Counter(r["verdict"] for r in restored)),
-                    "refused": refused,
+                    "mixed_scale": mixed_scale,
                     "downstream": [
                         {
                             "instrument_id": i,
@@ -474,7 +471,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "structural": ab["structural"][:20],
             "restored": len(ab["restored"]),
             "restored_by_verdict": ab["restored_by_verdict"],
-            "refused": len(ab["refused"]),
+            "mixed_scale": len(ab["mixed_scale"]),
             "unreachable": len(ab["unreachable"]),
             "downstream_changed": len(ab["downstream"]),
         }

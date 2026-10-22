@@ -924,6 +924,9 @@ class PeriodRow:
     # period_end (Reg S-X 3-01(a)): the row's instant columns are then unobserved,
     # not absent, and the canonical merge must not overwrite durable history with them.
     balance_sheet_presented: bool = True
+    # #3947 A3 — the facts a ``dps_declared`` value was computed from (selected fact, YTD resolver inputs, or a
+    # derived Q4's FY and Q1–Q3 leaves). Not persisted.
+    dps_leaves: tuple[FactRow, ...] = field(default=(), compare=False, repr=False)
 
 
 def _months_between(start: date | None, end: date) -> int | None:
@@ -984,7 +987,18 @@ def _resolve_flow_value(
     period_type: str,
     period_end: date,
 ) -> Decimal | None:
-    """Resolve a flow value for one period from a cumulative pool.
+    """Resolve a flow value for one period from a cumulative pool (see :func:`_resolve_flow_leaves`)."""
+    resolved = _resolve_flow_leaves(candidates, period_type=period_type, period_end=period_end)
+    return None if resolved is None else resolved[0]
+
+
+def _resolve_flow_leaves(
+    candidates: list[FactRow] | None,
+    *,
+    period_type: str,
+    period_end: date,
+) -> tuple[Decimal, tuple[FactRow, ...]] | None:
+    """Resolve a flow value for one period from a cumulative pool, with the facts it combined (#3947 A3).
 
     Two branches, both anchored on facts whose ``period_end`` equals the
     row's canonical end:
@@ -1017,7 +1031,7 @@ def _resolve_flow_value(
     for cur in ending_here:
         days = (cur.period_end - cur.period_start).days  # type: ignore[operator]
         if lo <= days <= hi:
-            return cur.val
+            return cur.val, (cur,)
     if period_type == "FY":
         return None
     for cur in ending_here:
@@ -1034,7 +1048,7 @@ def _resolve_flow_value(
             reverse=True,
         )
         if prevs:
-            return cur.val - prevs[0].val
+            return cur.val - prevs[0].val, (cur, prevs[0])
     return None
 
 
@@ -1310,19 +1324,106 @@ def _eps_facts_contradicting_identity(facts: Sequence[FactRow]) -> set[int]:
 class DpsScaleDecision:
     """How derivation reads one ``CommonStockDividendsPerShareDeclared`` fact (#3947).
 
-    ``value`` is what DPS value selection uses: the stored value on ``keep``, value ÷ 10^scale on ``restore``,
-    and ``None`` on ``refuse`` (the fact is skipped). ``occurrences`` are the ``(document, element_ordinal)`` keys
-    of the inline elements the fact matched.
+    ``value`` is what the decisions-on derivation uses: the stored value on ``keep``, value ÷ 10^scale on
+    ``restore``. ``occurrences`` are the ``(document, element_ordinal)`` keys of the inline elements the fact
+    matched. Amendment 1 A3 made row 8 (``mixed_scale``) a keep: the fact stays in both derivations, unverified.
     """
 
-    action: Literal["keep", "refuse", "restore"]
+    action: Literal["keep", "restore"]
     reason: str
     scale: int | None
-    value: Decimal | None
+    value: Decimal
     occurrences: tuple[tuple[str, int], ...] = ()
 
 
 _DPS_USD_PER_SHARE: Final = "USD/shares"
+# Amendment 1 A3: decisions under which a leaf's value is known to be what the filer displayed. Every other reason
+# (``untested``, ``unresolved``, ``no_match``, ``entity_mismatch``, ``mixed_scale``, ``unsupported_unit``,
+# ``out_of_scope``) is unverified, and so is a leaf of another ``dps_declared`` concept (``other_concept``).
+_DPS_VERIFIED_REASONS: Final = frozenset({"scaled", "unscaled", "not_inline"})
+
+
+@dataclass(frozen=True)
+class DpsGroupOutcome:
+    """Which derivation one fiscal-year label's ``dps_declared`` cells took (#3947 Amendment 1 A3).
+
+    ``branch`` is ``on`` (decisions-on values), ``off`` (decisions-off values) or ``kept_stored`` (the stored
+    ``financial_periods`` values, for an incomplete group). ``reason`` is ``verified`` for ``on``;
+    ``unverified_leaf``, ``other_concept`` or ``negative_derived`` for ``off``; ``incomplete_group`` for
+    ``kept_stored``; ``structure_mismatch`` when the two derivations did not produce the same rows.
+    """
+
+    fiscal_year: int
+    branch: Literal["on", "off", "kept_stored"]
+    reason: str
+
+
+def _gate_dps_groups(
+    off: Sequence[PeriodRow],
+    on: Sequence[PeriodRow],
+    decisions: Mapping[FactRow, DpsScaleDecision],
+    stored: Mapping[tuple[int, str, date], Decimal | None],
+) -> dict[int, DpsGroupOutcome]:
+    """Set each ``off`` row's ``dps_declared`` to its group's gated value; return each group's outcome.
+
+    Spec Amendment 1 A3. ``off`` and ``on`` are the decisions-off and decisions-on derivations of the same facts
+    (same rows; only ``dps_declared`` differs); ``off`` carries the leaves. ``stored`` maps ``(fiscal_year,
+    period_type, period_end_date)`` to the instrument's stored ``dps_declared``. A group is a fiscal-year label's FY
+    and Q1–Q4 rows:
+
+    * **incomplete** (a stored ``(fiscal_year, period_type)`` member this derivation does not produce): a produced
+      row takes the stored value of the same row (same label, type and end date); any other produced row, such as a
+      #1914/#541 collision row or a new member, keeps its decisions-off value, as today;
+    * **complete**: decisions-on values only when every leaf of every cell is verified and no cell is negative
+      where its decisions-off cell is not (DQC.US.0015 element 5748 as a regression gate); otherwise decisions-off.
+
+    Gating the whole group keeps a derived Q4 equal to FY − Q1 − Q2 − Q3 over the cells shown beside it.
+    """
+
+    def key(row: PeriodRow) -> tuple[int, str, date]:
+        return row.fiscal_year, row.period_type, row.period_end_date
+
+    labels = sorted({r.fiscal_year for r in off})
+    if [key(r) for r in off] != [key(r) for r in on]:
+        logger.error("dps A3: decisions-off and decisions-on derivations differ in rows; every group keeps off")
+        return {fy: DpsGroupOutcome(fy, "off", "structure_mismatch") for fy in labels}
+    on_value = {key(r): r.dps_declared for r in on}
+    rows_by_label: dict[int, list[PeriodRow]] = defaultdict(list)
+    for row in off:
+        rows_by_label[row.fiscal_year].append(row)
+
+    outcomes: dict[int, DpsGroupOutcome] = {}
+    for fy in labels:
+        rows = rows_by_label[fy]
+        produced = {r.period_type for r in rows}
+        if any(stored_fy == fy and kind not in produced for stored_fy, kind, _ in stored):
+            for row in rows:
+                if key(row) in stored:
+                    row.dps_declared = stored[key(row)]
+            outcomes[fy] = DpsGroupOutcome(fy, "kept_stored", "incomplete_group")
+            continue
+        reasons: set[str] = set()
+        for row in rows:
+            if row.dps_declared is None:
+                continue
+            if not row.dps_leaves:
+                reasons.add("unverified_leaf")
+            for leaf in row.dps_leaves:
+                if leaf.concept != _DPS_INLINE_CONCEPT:
+                    reasons.add("other_concept")
+                elif (d := decisions.get(leaf)) is None or d.reason not in _DPS_VERIFIED_REASONS:
+                    reasons.add("unverified_leaf")
+            value_on = on_value[key(row)]
+            if value_on is not None and value_on < 0 <= row.dps_declared:
+                reasons.add("negative_derived")
+        reason = next((r for r in ("other_concept", "unverified_leaf", "negative_derived") if r in reasons), None)
+        if reason is not None:
+            outcomes[fy] = DpsGroupOutcome(fy, "off", reason)
+            continue
+        for row in rows:
+            row.dps_declared = on_value[key(row)]
+        outcomes[fy] = DpsGroupOutcome(fy, "on", "verified")
+    return outcomes
 
 
 def _dps_fact_inline_scale_decisions(
@@ -1377,7 +1478,7 @@ def _dps_fact_inline_scale_decisions(
         else:
             keys = tuple((o.document, o.element_ordinal) for o in matched)
             if len(scales) > 1 and max(scales) > 0:
-                decisions[fact] = DpsScaleDecision("refuse", "mixed_scale", None, None, keys)
+                decisions[fact] = DpsScaleDecision("keep", "mixed_scale", None, fact.val, keys)
             elif len(scales) == 1 and (scale := next(iter(scales))) > 0:
                 decisions[fact] = DpsScaleDecision("restore", "scaled", scale, fact.val.scaleb(-scale), keys)
             else:
@@ -1433,7 +1534,7 @@ def _build_period_row(
     period_end: date,
     canonical_facts: list[FactRow],
     reported_currency: str,
-    dps_values: Mapping[FactRow, Decimal | None],
+    dps_values: Mapping[FactRow, Decimal],
 ) -> PeriodRow:
     """Build one ``PeriodRow`` from the facts at a single (period_type, period_end).
 
@@ -1443,8 +1544,7 @@ def _build_period_row(
     form_type) reflects the contributing accessions.
 
     ``dps_values`` (#3947) overrides a fact's value for ``dps_declared`` only: a
-    restored value replaces it, ``None`` skips the fact so the next candidate fills
-    the column. Provenance and dates still read every fact.
+    restored value replaces it. The fact that fills the column is its leaf (A3).
     """
     starts = [f.period_start for f in canonical_facts if f.period_start is not None]
     period_start = min(starts) if starts else None
@@ -1474,10 +1574,11 @@ def _build_period_row(
         current_priority = col_priority.get(col_name)
         if current_priority is not None and priority >= current_priority:
             continue  # existing value has higher or equal priority
-        value = dps_values.get(fact, fact.val) if col_name == "dps_declared" else fact.val
-        if value is None:
-            continue  # refused (#3947)
-        setattr(row, col_name, value)
+        if col_name == "dps_declared":
+            row.dps_declared = dps_values.get(fact, fact.val)
+            row.dps_leaves = (fact,)
+        else:
+            setattr(row, col_name, fact.val)
         col_priority[col_name] = priority
     return row
 
@@ -1485,7 +1586,7 @@ def _build_period_row(
 def _derive_periods_from_facts(
     facts: Sequence[FactRow],
     reported_currency: str = "USD",
-    dps_values: Mapping[FactRow, Decimal | None] | None = None,
+    dps_values: Mapping[FactRow, Decimal] | None = None,
 ) -> list[PeriodRow]:
     """Derive wide period rows from individual XBRL facts.
 
@@ -1500,10 +1601,11 @@ def _derive_periods_from_facts(
     Q4 derivation: if FY exists but Q4 does not, derives Q4 = FY - Q1 - Q2 - Q3
     for all flow columns.
 
-    ``dps_values`` (#3947, from ``_dps_fact_inline_scale_decisions``) maps a fact to
-    the value ``dps_declared`` selection reads, ``None`` for a refused fact. It acts
-    after the structural filters, grouping and anchoring, which read raw values, so
-    no other column, period row or period date can change.
+    ``dps_values`` (#3947, from ``_dps_fact_inline_scale_decisions``) maps a restored
+    fact to the value ``dps_declared`` selection reads. It acts after the structural
+    filters, grouping and anchoring, which read raw values, so no other column, period
+    row or period date can change. Each ``dps_declared`` cell records its leaves
+    (``PeriodRow.dps_leaves``) for :func:`_gate_dps_groups`.
     """
     dps_values = dps_values or {}
     # Filtered once here: the YTD pool below reads ``facts`` too, not only ``grouped``.
@@ -1754,20 +1856,22 @@ def _derive_periods_from_facts(
     # depreciation).
     ytd_pools = _build_ytd_pools(facts)
     if dps_values and (dps_pool := ytd_pools.get("dps_declared")):
-        ytd_pools["dps_declared"] = [replace(f, val=v) for f in dps_pool if (v := dps_values.get(f, f.val)) is not None]
+        ytd_pools["dps_declared"] = [replace(f, val=dps_values.get(f, f.val)) for f in dps_pool]
     if ytd_pools:
         for row in periods:
             if row.period_type in ("Q1", "Q2", "Q3", "Q4"):
                 for col in _FLOW_COLUMNS:
                     if getattr(row, col) is not None:
                         continue
-                    filled = _resolve_flow_value(
+                    filled = _resolve_flow_leaves(
                         ytd_pools.get(col),
                         period_type=row.period_type,
                         period_end=row.period_end_date,
                     )
                     if filled is not None:
-                        setattr(row, col, filled)
+                        setattr(row, col, filled[0])
+                        if col == "dps_declared":
+                            row.dps_leaves = filled[1]
             # Deliberately ALL period types incl. FY: the Q4 = FY − ΣQ
             # derivation below needs the FY row's depreciation_amort, so a
             # component-sum name whose FY D&A stayed None would never get a
@@ -1854,6 +1958,8 @@ def _derive_periods_from_facts(
                 continue  # cannot derive — would overstate Q4
             derived = fy_val - q1_val - q2_val - q3_val
             setattr(q4, col, derived)
+            if col == "dps_declared":
+                q4.dps_leaves = fy_row.dps_leaves + q1.dps_leaves + q2.dps_leaves + q3.dps_leaves
 
         # Balance sheet columns: use FY values (they're the same date as Q4 end)
         for col in _BALANCE_SHEET_COLUMNS:
@@ -2487,6 +2593,38 @@ def _record_treasury_observations_for_instrument(
         refresh_treasury_current(conn, instrument_id=instrument_id)
 
 
+def derive_gated_dps_periods(
+    conn: psycopg.Connection[Any],
+    instrument_id: int,
+    fact_rows: Sequence[FactRow],
+    reported_currency: str = "USD",
+) -> tuple[list[PeriodRow], dict[int, DpsGroupOutcome]]:
+    """The flag-on derivation (#3947 Amendment 1 A3): both derivations, gated per fiscal-year group.
+
+    Reads the decision inputs and the instrument's stored ``dps_declared`` cells (current ``sec_edgar`` rows).
+    Returns the periods to write and each group's outcome, which the A/B reads.
+    """
+    decisions: dict[FactRow, DpsScaleDecision] = {}
+    accessions = sorted({f.accession_number for f in fact_rows if f.concept == _DPS_INLINE_CONCEPT})
+    if accessions:
+        scans, ciks, occurrences = _load_dps_inline_scale_inputs(conn, instrument_id, accessions)
+        decisions = _dps_fact_inline_scale_decisions(fact_rows, scans, ciks, occurrences)
+    dps_values = {f: d.value for f, d in decisions.items() if d.action == "restore"}
+    off = _derive_periods_from_facts(fact_rows, reported_currency)
+    on = _derive_periods_from_facts(fact_rows, reported_currency, dps_values) if dps_values else off
+    stored = {
+        (r[0], r[1], r[2]): r[3]
+        for r in conn.execute(
+            "SELECT fiscal_year, period_type, period_end_date, dps_declared FROM financial_periods"
+            " WHERE instrument_id = %s AND source = 'sec_edgar' AND superseded_at IS NULL",
+            (instrument_id,),
+        ).fetchall()
+    }
+    # ``on is off`` when nothing is restored: the gate then compares each row with itself, which is still right.
+    outcomes = _gate_dps_groups(off, on, decisions, stored)
+    return off, outcomes
+
+
 def lock_instrument_for_normalize(conn: psycopg.Connection[Any], instrument_id: int) -> None:
     """Serialise every writer of one instrument's periods (#3947), to the end of the current transaction.
 
@@ -2591,14 +2729,10 @@ def normalize_financial_periods(
                 reported_currency = "USD"
 
                 # Step 2: Derive periods from facts
-                dps_values: dict[FactRow, Decimal | None] = {}
                 if dps_inline_scale:
-                    accessions = sorted({f.accession_number for f in fact_rows if f.concept == _DPS_INLINE_CONCEPT})
-                    if accessions:
-                        scans, ciks, occurrences = _load_dps_inline_scale_inputs(conn, iid, accessions)
-                        decisions = _dps_fact_inline_scale_decisions(fact_rows, scans, ciks, occurrences)
-                        dps_values = {f: d.value for f, d in decisions.items() if d.action != "keep"}
-                periods = _derive_periods_from_facts(fact_rows, reported_currency, dps_values)
+                    periods, _ = derive_gated_dps_periods(conn, iid, fact_rows, reported_currency)
+                else:
+                    periods = _derive_periods_from_facts(fact_rows, reported_currency)
 
                 # Step 3: Rewash financial_periods_raw for this instrument.
                 # #1835 — DELETE-then-INSERT (the established rewash pattern,

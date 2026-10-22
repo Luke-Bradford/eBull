@@ -13722,3 +13722,16 @@ neighbouring container and match it.**
   and asserts the written tables are unchanged.
 - Enforced in: `scripts/ab_3947_dps_inline_scale.py::_coverage`;
   `tests/test_3947_dps_population_db.py::test_the_ab_coverage_seed_is_undone_by_the_snapshot_rollback`.
+
+### A stored value carried onto a re-derived row must match the row's identity, not its fiscal label (#3947, 2026-10-22)
+
+- First seen in: #3947 build PR (d1). A3's "an incomplete group keeps its stored DPS" was first built keyed on
+  `(fiscal_year, period_type)`. The derivation can emit several rows under one label (#1914/#541 fiscal-year
+  collisions; the canonical merge keeps one), so the label's one stored value was copied onto rows with other period
+  ends. On the dev DB that moved 381 cells away from the decisions-off value; keyed on `(fiscal_year, period_type,
+  period_end_date)` it moved 25, each the stored value of the same row.
+- Prevention: when a derivation carries a stored value forward, key the copy on the stored row's identity (its key
+  columns), and decide group membership separately. Run a full-population census of the cells the carry changes
+  before trusting the rule.
+- Enforced in: `app/services/fundamentals/__init__.py::_gate_dps_groups`;
+  `tests/test_3947_dps_group_gate.py::test_an_incomplete_group_copies_a_stored_value_only_onto_the_same_row`.

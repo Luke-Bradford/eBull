@@ -1,7 +1,7 @@
 """#3947 DPS inline-scale decisions and where they act (spec §The correction; acceptance 3, decision fixtures).
 
-Expected values are written by hand: one case per decision-table row, scale 3 and scale 6, and a refused FY member
-with its derived Q4.
+Expected values are written by hand: one case per decision-table row, scale 3 and scale 6. The Amendment 1 A3 group
+gate has its own module, ``tests/test_3947_dps_group_gate.py``.
 """
 
 from __future__ import annotations
@@ -127,10 +127,11 @@ def test_keep_rows(fact: FactRow, occurrences: list[Occurrence], outcome: str | 
     assert (decision.action, decision.reason, decision.value) == ("keep", reason, fact.val)
 
 
-def test_row_8_mixed_scales_refuse() -> None:
+def test_row_8_mixed_scales_keep_unverified() -> None:
     # `0.39` at scale 3 and `390` at scale 0 encode the same instance value but imply different repairs.
     decision = _decide(_fact(), [_occ(scale=3), _occ(scale=0, ordinal=1)])
-    assert decision == DpsScaleDecision("refuse", "mixed_scale", None, None, (("a.htm", 0), ("a.htm", 1)))
+    # Amendment 1 A3: the fact stays in both derivations at its raw value; its group falls back (unverified).
+    assert decision == DpsScaleDecision("keep", "mixed_scale", None, Decimal("390"), (("a.htm", 0), ("a.htm", 1)))
 
 
 @pytest.mark.parametrize(("val", "scale", "restored"), [("390", 3, "0.39"), ("1750000", 6, "1.75")])
@@ -183,26 +184,6 @@ def test_a_restore_changes_dps_only_and_feeds_the_derived_q4() -> None:
     # Nothing else moves: same rows, same dates, same other columns.
     for kind in off:
         assert replace(on[kind], dps_declared=None) == replace(off[kind], dps_declared=None)
-
-
-def test_a_refused_fy_member_with_no_alternative_removes_the_derived_q4_dps() -> None:
-    quarters = [_quarter(1, "0.10", "acc-q1"), _quarter(2, "0.10", "acc-q2"), _quarter(3, "0.10", "acc-q3")]
-    revenue = replace(_year("1000"), concept="Revenues", unit="USD")
-    fy = _year("520")
-    on = _by_type(_derive_periods_from_facts([*quarters, fy, revenue], dps_values={fy: None}))
-    assert on["FY"].dps_declared is None
-    assert on["Q4"].dps_declared is None  # no FY value to derive from; the Q4 row itself stays
-    assert on["FY"].revenue == Decimal("1000")
-    assert on["FY"].source_ref == "acc-fy"  # provenance still reads the refused fact
-
-
-def test_a_refused_fact_lets_an_older_filing_fill_the_column() -> None:
-    newer = _year("520", accession="acc-fy-new", filed=date(2026, 2, 20))
-    older = _year("0.52", accession="acc-fy-old", filed=date(2026, 2, 10))
-    off = _by_type(_derive_periods_from_facts([newer, older]))
-    on = _by_type(_derive_periods_from_facts([newer, older], dps_values={newer: None}))
-    assert off["FY"].dps_declared == Decimal("520")
-    assert on["FY"].dps_declared == Decimal("0.52")
 
 
 def test_a_restore_reaches_the_ytd_pool() -> None:
