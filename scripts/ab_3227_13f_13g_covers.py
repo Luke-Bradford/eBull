@@ -157,6 +157,7 @@ def oracle(
         return {_name(h.filer_name) for h in rows[k] if h.winning_source in sources} - {""}
 
     found: dict[str, tuple[list[str], dict[str, Any]]] = {}
+    selected: dict[str, str] = {}  # candidate → its C when C is a 13G (uniform or not), for tier (O)
     for m, p in cand.items():
         if m in matched_13d:
             continue
@@ -176,6 +177,7 @@ def oracle(
         if any(s[:2] == latest[:2] and s[2] == "cik" for s in stm):
             continue
         acc = latest[1]
+        selected[m] = acc
         if not all(_full(r, t) for r in blocks[acc]):
             continue
         if filer[acc] is not None and filer[acc] == mc:
@@ -197,6 +199,11 @@ def oracle(
         "tot": tot,
         "cand": cand,
         "dups": dups,
+        "nodes": nodes,
+        "matched_13d": matched_13d,
+        "found": found,
+        "selected": selected,
+        "filer": filer,
         "blocks": blocks,
         "names_on": names_on,
         "names": names,
