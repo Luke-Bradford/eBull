@@ -600,7 +600,11 @@ def run_snapshot(
     # serialization failure, which main() retries with a fresh snapshot.
     live = conn.execute(_LIVE_WRITERS_SQL, ([JOB_SEC_DPS_INLINE_SCALE_SCAN, JOB_DAILY_FINANCIAL_FACTS],)).fetchall()
     if live:
-        failures.append(f"not quiescent: running {[list(map(str, r)) for r in live]}; pause them and rerun")
+        failures.append(
+            f"not quiescent: running {[list(map(str, r)) for r in live]}; pause the scan, wait for the run to finish,"
+            " and rerun. A row left by a killed jobs child is marked failed when the jobs process restarts"
+            " (app/jobs/__main__.py, reap_orphaned_job_runs)"
+        )
     ids = sorted(set(_scope(conn, mode)) | set(payloads) | set(unrefilled))
     # Before any write: every in-scope instrument's normaliser lock, in sorted order (the drain's order).
     for iid in ids:
