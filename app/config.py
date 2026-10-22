@@ -136,6 +136,12 @@ class Settings(BaseSettings):
     # first write. Setting it false again is rollback step 1 (spec "Rollback").
     cusip_13dg_bridge_enabled: bool = False
 
+    # #3947 — the normaliser reads a DPS fact tagged with an inline ``scale`` > 0 as value ÷ 10^scale (XBRL US
+    # DQC.US.0179.10141; spec 2026-10-21-3947-dps-inline-scale.md). Off until the spec's acceptance 1–4 pass; the
+    # scan job fills its tables either way, and draining its re-normalise queue waits on this. Setting it false
+    # again is rollback step 1.
+    dps_inline_scale_enabled: bool = False
+
     # Yahoo Finance per-ticker RSS news feed (#1750) rejects the default
     # httpx User-Agent; a browser-like UA is required (verified). No API key.
     news_rss_user_agent: str = "Mozilla/5.0 (compatible; eBull/1.0; +research)"

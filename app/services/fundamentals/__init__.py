@@ -18,15 +18,16 @@ import json
 import logging
 import time
 from collections import defaultdict
-from collections.abc import Sequence
-from dataclasses import dataclass, field
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final, Literal
 
 import psycopg
 from psycopg import sql as pgsql
 
+from app.config import settings
 from app.providers.fundamentals import (
     XbrlConceptCatalogEntry,
     XbrlFact,
@@ -42,11 +43,14 @@ from app.services.bootstrap_state import (
     set_stage_processed,
     set_stage_target,
 )
+from app.services.dps_inline_scale_scan import SCOPE_START as _DPS_INLINE_SCOPE_START
 from app.services.filings import (
     FILING_EVENTS_RETENTION_YEARS,
     filing_within_retention,
 )
 from app.services.filings_risk import score_filing_red_flag
+from app.services.inline_xbrl_dps import CONCEPT as _DPS_INLINE_CONCEPT
+from app.services.inline_xbrl_dps import Occurrence
 from app.services.ownership_observations import (
     record_treasury_observation,
     refresh_treasury_current,
@@ -1285,6 +1289,125 @@ def _eps_facts_contradicting_identity(facts: Sequence[FactRow]) -> set[int]:
     return refuted
 
 
+@dataclass(frozen=True)
+class DpsScaleDecision:
+    """How derivation reads one ``CommonStockDividendsPerShareDeclared`` fact (#3947).
+
+    ``value`` is what DPS value selection uses: the stored value on ``keep``, value ÷ 10^scale on ``restore``,
+    and ``None`` on ``refuse`` (the fact is skipped). ``occurrences`` are the ``(document, element_ordinal)`` keys
+    of the inline elements the fact matched.
+    """
+
+    action: Literal["keep", "refuse", "restore"]
+    reason: str
+    scale: int | None
+    value: Decimal | None
+    occurrences: tuple[tuple[str, int], ...] = ()
+
+
+_DPS_USD_PER_SHARE: Final = "USD/shares"
+
+
+def _dps_fact_inline_scale_decisions(
+    facts: Sequence[FactRow],
+    scans: Mapping[str, str],
+    ciks: frozenset[str],
+    occurrences: Mapping[str, Sequence[Occurrence]],
+) -> dict[FactRow, DpsScaleDecision]:
+    """One decision per ``CommonStockDividendsPerShareDeclared`` fact; the first matching row wins.
+
+    Spec ``docs/specs/fundamentals/2026-10-21-3947-dps-inline-scale.md`` §The correction, decision table rows
+    1–10. Source rule: XBRL US DQC.US.0179.10141 flags an inline ``scale`` > 0 on this concept ("generally the
+    amount per share are not scaled"); Inline XBRL 1.1 §10.2.3 forms the instance value as display × 10^scale, so
+    value ÷ 10^scale is the amount the statement displays. A declared policy, not a proof: every doubt keeps
+    today's value.
+
+    ``scans`` maps an accession to its active generation's outcome (``inline`` / ``not_inline``); an accession
+    with none is absent. ``ciks`` are the instrument's SEC CIKs, 10-digit zero-padded. ``occurrences`` are the
+    active generation's elements per accession. Rows 5 and 6 are accession-wide on purpose: an unresolved
+    occurrence has no reliable key, so it may be any fact.
+    """
+    decisions: dict[FactRow, DpsScaleDecision] = {}
+    for fact in facts:
+        if fact.concept != _DPS_INLINE_CONCEPT or fact in decisions:
+            continue
+        outcome = scans.get(fact.accession_number)
+        elements = occurrences.get(fact.accession_number, ())
+        matched = [
+            o
+            for o in elements
+            if o.unit == _DPS_USD_PER_SHARE
+            and o.dimensional is False
+            and o.period_start == fact.period_start
+            and o.period_end == fact.period_end
+            and o.instance_value == fact.val
+        ]
+        scales = {o.scale for o in matched if o.scale is not None}
+        if fact.filed_date < _DPS_INLINE_SCOPE_START:
+            reason = "out_of_scope"
+        elif fact.unit != _DPS_USD_PER_SHARE:
+            reason = "unsupported_unit"
+        elif outcome is None:
+            reason = "untested"
+        elif outcome != "inline":
+            reason = "not_inline"
+        elif any(o.entity_cik is not None and o.entity_cik not in ciks for o in elements):
+            reason = "entity_mismatch"
+        elif any(o.unresolved is not None for o in elements):
+            reason = "unresolved"
+        elif not matched:
+            reason = "no_match"
+        else:
+            keys = tuple((o.document, o.element_ordinal) for o in matched)
+            if len(scales) > 1 and max(scales) > 0:
+                decisions[fact] = DpsScaleDecision("refuse", "mixed_scale", None, None, keys)
+            elif len(scales) == 1 and (scale := next(iter(scales))) > 0:
+                decisions[fact] = DpsScaleDecision("restore", "scaled", scale, fact.val.scaleb(-scale), keys)
+            else:
+                decisions[fact] = DpsScaleDecision("keep", "unscaled", None, fact.val, keys)
+            continue
+        decisions[fact] = DpsScaleDecision("keep", reason, None, fact.val)
+    return decisions
+
+
+def _load_dps_inline_scale_inputs(
+    conn: psycopg.Connection[Any],
+    instrument_id: int,
+    accessions: Sequence[str],
+) -> tuple[dict[str, str], frozenset[str], dict[str, list[Occurrence]]]:
+    """The decision inputs for one instrument: active scans, SEC CIKs and occurrences of ``accessions``."""
+    ciks = frozenset(
+        str(r[0]).zfill(10)
+        for r in conn.execute(
+            "SELECT identifier_value FROM external_identifiers"
+            " WHERE instrument_id = %s AND provider = 'sec' AND identifier_type = 'cik'",
+            (instrument_id,),
+        ).fetchall()
+    )
+    scans = {
+        r[0]: r[1]
+        for r in conn.execute(
+            "SELECT accession_number, outcome FROM sec_inline_scale_scan"
+            " WHERE accession_number = ANY(%s) AND outcome IS NOT NULL",
+            (list(accessions),),
+        ).fetchall()
+    }
+    occurrences: dict[str, list[Occurrence]] = defaultdict(list)
+    for r in conn.execute(
+        """
+        SELECT accession_number, document, element_ordinal, fact_id, context_ref_raw, unit_ref_raw, scale_raw,
+               sign_raw, format_raw, decimals_raw, display_text, entity_cik, period_start, period_end, dimensional,
+               unit, scale, instance_value, unresolved
+        FROM sec_inline_dps_occurrence
+        WHERE accession_number = ANY(%s)
+        ORDER BY accession_number, document, element_ordinal
+        """,
+        (list(scans),),
+    ).fetchall():
+        occurrences[r[0]].append(Occurrence(*r[1:]))
+    return scans, ciks, dict(occurrences)
+
+
 def _build_period_row(
     *,
     period_type: str,
@@ -1293,6 +1416,7 @@ def _build_period_row(
     period_end: date,
     canonical_facts: list[FactRow],
     reported_currency: str,
+    dps_values: Mapping[FactRow, Decimal | None],
 ) -> PeriodRow:
     """Build one ``PeriodRow`` from the facts at a single (period_type, period_end).
 
@@ -1300,6 +1424,10 @@ def _build_period_row(
     "first write wins" pulls each concept's value from the latest filing that
     reports it (#682 restatement priority). Provenance (source_ref / filed_date /
     form_type) reflects the contributing accessions.
+
+    ``dps_values`` (#3947) overrides a fact's value for ``dps_declared`` only: a
+    restored value replaces it, ``None`` skips the fact so the next candidate fills
+    the column. Provenance and dates still read every fact.
     """
     starts = [f.period_start for f in canonical_facts if f.period_start is not None]
     period_start = min(starts) if starts else None
@@ -1329,7 +1457,10 @@ def _build_period_row(
         current_priority = col_priority.get(col_name)
         if current_priority is not None and priority >= current_priority:
             continue  # existing value has higher or equal priority
-        setattr(row, col_name, fact.val)
+        value = dps_values.get(fact, fact.val) if col_name == "dps_declared" else fact.val
+        if value is None:
+            continue  # refused (#3947)
+        setattr(row, col_name, value)
         col_priority[col_name] = priority
     return row
 
@@ -1337,6 +1468,7 @@ def _build_period_row(
 def _derive_periods_from_facts(
     facts: Sequence[FactRow],
     reported_currency: str = "USD",
+    dps_values: Mapping[FactRow, Decimal | None] | None = None,
 ) -> list[PeriodRow]:
     """Derive wide period rows from individual XBRL facts.
 
@@ -1350,7 +1482,13 @@ def _derive_periods_from_facts(
 
     Q4 derivation: if FY exists but Q4 does not, derives Q4 = FY - Q1 - Q2 - Q3
     for all flow columns.
+
+    ``dps_values`` (#3947, from ``_dps_fact_inline_scale_decisions``) maps a fact to
+    the value ``dps_declared`` selection reads, ``None`` for a refused fact. It acts
+    after the structural filters, grouping and anchoring, which read raw values, so
+    no other column, period row or period date can change.
     """
+    dps_values = dps_values or {}
     # Filtered once here: the YTD pool below reads ``facts`` too, not only ``grouped``.
     facts = [f for f in facts if _per_share_value_is_representable(f) and _fact_period_ended_by_filing(f)]
     refuted = _eps_facts_contradicting_identity(facts)
@@ -1508,6 +1646,7 @@ def _derive_periods_from_facts(
                 period_end=period_end,
                 canonical_facts=canonical_facts,
                 reported_currency=reported_currency,
+                dps_values=dps_values,
             )
         )
 
@@ -1528,6 +1667,7 @@ def _derive_periods_from_facts(
             period_end=period_end,
             canonical_facts=canonical_facts,
             reported_currency=reported_currency,
+            dps_values=dps_values,
         )
         fy_row.balance_sheet_presented = _fy_balance_sheet_is_presented(mapped_facts, fy_primary_end)
         periods.append(fy_row)
@@ -1596,6 +1736,8 @@ def _derive_periods_from_facts(
     # degrades fit; Depreciation required — AmI-only would omit all
     # depreciation).
     ytd_pools = _build_ytd_pools(facts)
+    if dps_values and (dps_pool := ytd_pools.get("dps_declared")):
+        ytd_pools["dps_declared"] = [replace(f, val=v) for f in dps_pool if (v := dps_values.get(f, f.val)) is not None]
     if ytd_pools:
         for row in periods:
             if row.period_type in ("Q1", "Q2", "Q3", "Q4"):
@@ -2255,6 +2397,8 @@ class NormalizationSummary:
     instruments_processed: int
     periods_raw_upserted: int
     periods_canonical_upserted: int
+    # Instruments whose transaction raised and rolled back (logged, not re-raised).
+    instruments_failed: int = 0
 
 
 def _record_treasury_observations_for_instrument(
@@ -2326,15 +2470,27 @@ def _record_treasury_observations_for_instrument(
         refresh_treasury_current(conn, instrument_id=instrument_id)
 
 
+#: ``pg_advisory_xact_lock(NAMESPACE, instrument_id)`` serialises every writer of one instrument's periods (#3947):
+#: the re-normalise drain, ``daily_financial_facts``, force-refresh and bootstrap all call the function below.
+NORMALIZE_INSTRUMENT_LOCK_NAMESPACE: Final = 3947
+
+
 def normalize_financial_periods(
     conn: psycopg.Connection[tuple],
     instrument_ids: Sequence[int] | None = None,
+    *,
+    dps_inline_scale: bool | None = None,
 ) -> NormalizationSummary:
     """Full normalization pipeline: facts_raw -> periods_raw -> canonical.
 
     If ``instrument_ids`` is None, processes all instruments that have
     facts in financial_facts_raw.
+
+    ``dps_inline_scale`` applies the #3947 DPS inline-scale decisions; ``None``
+    reads ``EBULL_DPS_INLINE_SCALE_ENABLED``. The A/B passes it explicitly.
     """
+    if dps_inline_scale is None:
+        dps_inline_scale = settings.dps_inline_scale_enabled
     # Determine which instruments to process. Capture the caller's
     # original intent (None = full universe; supplied list = explicit
     # sub-cohort) BEFORE the None-defaulting overwrites the param so
@@ -2346,6 +2502,7 @@ def normalize_financial_periods(
 
     total_raw = 0
     total_canonical = 0
+    total_failed = 0
 
     # #1273 PR2 — long-pole stage instrumentation (S25). Pin target +
     # fingerprint when called from the bootstrap dispatcher.
@@ -2365,6 +2522,12 @@ def normalize_financial_periods(
     for iid in instrument_ids:
         try:
             with conn.transaction():
+                # Held to the end of the instrument's transaction (the outer one when nested): two
+                # normalisations of one instrument never interleave their rewash (#3947).
+                conn.execute(
+                    "SELECT pg_advisory_xact_lock(%s, %s::int)",
+                    (NORMALIZE_INSTRUMENT_LOCK_NAMESPACE, iid),
+                )
                 # Step 1: Read facts for this instrument
                 cur = conn.execute(
                     """
@@ -2403,7 +2566,14 @@ def normalize_financial_periods(
                 reported_currency = "USD"
 
                 # Step 2: Derive periods from facts
-                periods = _derive_periods_from_facts(fact_rows, reported_currency)
+                dps_values: dict[FactRow, Decimal | None] = {}
+                if dps_inline_scale:
+                    accessions = sorted({f.accession_number for f in fact_rows if f.concept == _DPS_INLINE_CONCEPT})
+                    if accessions:
+                        scans, ciks, occurrences = _load_dps_inline_scale_inputs(conn, iid, accessions)
+                        decisions = _dps_fact_inline_scale_decisions(fact_rows, scans, ciks, occurrences)
+                        dps_values = {f: d.value for f, d in decisions.items() if d.action != "keep"}
+                periods = _derive_periods_from_facts(fact_rows, reported_currency, dps_values)
 
                 # Step 3: Rewash financial_periods_raw for this instrument.
                 # #1835 — DELETE-then-INSERT (the established rewash pattern,
@@ -2451,6 +2621,7 @@ def normalize_financial_periods(
                 )
         except Exception:
             logger.exception("Failed to normalize instrument %d", iid)
+            total_failed += 1
         # #1273 PR2 — cadenced operator-progress emit. _processed_count
         # advances regardless of per-instrument success so the bar
         # tracks attempt progress (mirrors S22's filers_attempted).
@@ -2477,6 +2648,7 @@ def normalize_financial_periods(
         instruments_processed=len(instrument_ids),
         periods_raw_upserted=total_raw,
         periods_canonical_upserted=total_canonical,
+        instruments_failed=total_failed,
     )
 
 

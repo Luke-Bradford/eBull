@@ -13683,3 +13683,16 @@ neighbouring container and match it.**
   exhibits need not be well-formed XML.
 - Enforced in: `app/services/inline_xbrl_dps.py::rendered_report_files`;
   `tests/test_3947_dps_inline_scale_scan.py::test_reads_every_html_file_except_rendered_pages_in_listing_order`.
+
+### A "stored rows equal a fresh normalisation" check needs the rebuild first (#3947, 2026-10-22)
+
+- First seen in: #3947 build PR (b). The rollback verifier normalises every DPS instrument with decisions off and
+  compares the result with the stored `financial_periods` rows. Run on the dev DB before any rebuild, it failed with
+  thousands of differences that this change did not cause: stored rows were written by older code from older inputs.
+  Normalising twice in one snapshot gave 0 differences
+  (`PYTHONPATH=. uv run python -m scripts.ab_3947_dps_inline_scale --verify-stored off` reproduces the drift).
+- Prevention: a check that compares stored derived rows with a fresh derivation verifies the derivation only after
+  the rows have been rebuilt by the code under test. Order the procedure as rebuild, then verify, and say so where
+  the check is documented. A difference found before the rebuild is drift, not a regression.
+- Enforced in: `scripts/ab_3947_dps_inline_scale.py` (module docstring);
+  `docs/specs/fundamentals/2026-10-21-3947-dps-inline-scale.md` (PR b build note).
