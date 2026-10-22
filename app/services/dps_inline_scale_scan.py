@@ -565,7 +565,8 @@ def run_discovery(
     """A1 (3): fetch companyfacts for each due population instrument with no ``discovered_at`` (instrument order) and
     write it through ``upsert_facts_for_instrument(complete_payload=True)``, one transaction each; none is started at
     or after ``admit_until``. An empty payload (no companyfacts at SEC) still discovers: there is nothing to capture.
-    A fetch, parse or write failure backs off ``2^attempts`` hours; :data:`MAX_ATTEMPTS` failures exhaust it."""
+    A fetch or parse failure backs off ``2^attempts`` hours; :data:`MAX_ATTEMPTS` failures exhaust it. A write failure
+    propagates."""
     from app.services.fundamentals import (  # cycle: fundamentals imports this module
         finish_ingestion_run,
         start_ingestion_run,
@@ -604,11 +605,7 @@ def run_discovery(
             if cik is None:
                 raise LookupError("no_primary_sec_cik")
             facts, _catalog = facts_provider.extract_facts_and_catalog(symbol, cik)
-            with conn.transaction():
-                upserted += upsert_facts_for_instrument(
-                    conn, instrument_id=instrument_id, facts=facts, ingestion_run_id=run_id, complete_payload=True
-                )[0]
-        except Exception as exc:  # noqa: BLE001 — any failure is one counted attempt, bounded by MAX_ATTEMPTS
+        except Exception as exc:  # noqa: BLE001 — a fetch/parse failure is one counted attempt, bounded by MAX_ATTEMPTS
             logger.info("dps inline scale discovery: instrument %s failed: %r", instrument_id, exc)
             with conn.transaction():
                 conn.execute(
@@ -623,6 +620,11 @@ def run_discovery(
                 )
             result.failed += 1
             continue
+        # A DB error propagates and fails the run: it is not the instrument's attempt to burn.
+        with conn.transaction():
+            upserted += upsert_facts_for_instrument(
+                conn, instrument_id=instrument_id, facts=facts, ingestion_run_id=run_id, complete_payload=True
+            )[0]
         result.discovered += 1
     with conn.transaction():
         finish_ingestion_run(
@@ -649,7 +651,12 @@ def run_dps_inline_scale_scan(
     of the cap.
 
     ``drain`` is the caller's one read of ``EBULL_DPS_INLINE_SCALE_ENABLED`` (the job passes it), handed to the drain
-    as ``enabled`` so a run never reads the flag twice."""
+    as ``enabled`` so a run never reads the flag twice.
+
+    Refuses a connection with an open transaction: every network fetch (companyfacts, filing documents) runs between
+    the run's own short transactions, never inside one."""
+    if conn.info.transaction_status != psycopg.pq.TransactionStatus.IDLE:
+        raise RuntimeError("run_dps_inline_scale_scan needs a connection outside a transaction")
     result = ScanResult()
     start = clock()
     deadline = start + start_cap.total_seconds()

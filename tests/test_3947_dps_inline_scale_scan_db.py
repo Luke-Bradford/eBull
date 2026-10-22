@@ -71,6 +71,7 @@ class _Facts:
 def scan_run(conn: Conn, provider: _Provider, **kwargs: Any) -> scan.ScanResult:
     kwargs.setdefault("facts_provider", _Facts())
     kwargs.setdefault("today", TODAY)
+    conn.commit()  # the run refuses an open transaction
     return run_dps_inline_scale_scan(conn, provider, **kwargs)
 
 
