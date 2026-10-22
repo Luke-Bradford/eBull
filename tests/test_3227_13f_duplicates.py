@@ -121,14 +121,14 @@ def _cvi_covers() -> list[_CoverRow]:
 
 
 def _folded(cats: dict[SliceCategory, list[Holder]], covers: list[_CoverRow]) -> bool:
-    out, corrections = _fold_13f_duplicates(cats, covers)
+    out, corrections = _fold_13f_duplicates(cats, covers, {})
     assert (_pie(cats) - _pie(out)) == sum((c.shares_removed for c in corrections), Decimal(0))
     return bool(corrections)
 
 
 def test_the_cvi_shape_folds_the_13f_onto_the_twin() -> None:
     cats = _cvi()
-    out, corrections = _fold_13f_duplicates(cats, _cvi_covers())
+    out, corrections = _fold_13f_duplicates(cats, _cvi_covers(), {})
     assert out["institutions"] == []
     (k,) = out["insiders"]
     assert k.shares == Decimal(_T)
@@ -160,7 +160,7 @@ def test_a_blockholders_twin_and_sole_dispositive_power_fold() -> None:
 def _with_cofiler_pass(
     cats: dict[SliceCategory, list[Holder]], covers: list[_CoverRow], cofilers: dict[str, frozenset[str]]
 ) -> tuple[dict[SliceCategory, list[Holder]], list[Any], dict[SliceCategory, list[Holder]]]:
-    folded, f13 = _fold_13f_duplicates(cats, covers)
+    folded, f13 = _fold_13f_duplicates(cats, covers, {})
     out, cof = _reconcile_cofiler_groups(folded, cofilers)
     base, _ = _reconcile_cofiler_groups(cats, cofilers)
     return out, [*f13, *cof], base
@@ -229,7 +229,7 @@ def test_twin_losing_its_cofiler_clique_carries_the_13f_to_the_keeper_once() -> 
 )
 def test_each_refusal_alone(covers: list[_CoverRow]) -> None:
     cats = _cvi()
-    out, corrections = _fold_13f_duplicates(cats, covers)
+    out, corrections = _fold_13f_duplicates(cats, covers, {})
     assert corrections == [] and out == cats
 
 
@@ -292,7 +292,7 @@ def test_one_twin_for_two_cover_matching_candidates_refuses_both() -> None:
 def test_an_invalid_candidate_sharing_the_twin_does_not_block(rival: list[Holder]) -> None:
     cats = _cvi()
     cats["institutions"].extend(rival)
-    out, corrections = _fold_13f_duplicates(cats, [*_cvi_covers(), _cover("0000000555")])
+    out, corrections = _fold_13f_duplicates(cats, [*_cvi_covers(), _cover("0000000555")], {})
     assert [c.shares_removed for c in corrections] == [Decimal(_T)]
     assert [h.filer_cik for h in out["institutions"]] == ["0000000555", "0000000555"]
 
@@ -302,7 +302,7 @@ def test_a_candidate_whose_own_cover_fails_does_not_compete() -> None:
     cats["institutions"].append(_h("0000000555", "Other", _T, source="13f", accession="O1"))
     newer = datetime(2026, 5, 1, tzinfo=UTC)
     covers = [*_cvi_covers(), _cover("0000000555"), _cover("0000000555", "C2", filed=newer, aggregate=1)]
-    out, corrections = _fold_13f_duplicates(cats, covers)
+    out, corrections = _fold_13f_duplicates(cats, covers, {})
     assert [c.shares_removed for c in corrections] == [Decimal(_T)]
     assert [h.filer_cik for h in out["institutions"]] == ["0000000555"]
 
@@ -326,7 +326,7 @@ def test_two_candidates_with_different_period_ends() -> None:
         # After the 2026-03-31 candidate's P: it is not that candidate's cover, though the batched read returns it.
         _cover("0000000555", "C3", filed=datetime(2026, 5, 1, tzinfo=UTC), shared=1, aggregate=1),
     ]
-    out, corrections = _fold_13f_duplicates(cats, covers)
+    out, corrections = _fold_13f_duplicates(cats, covers, {})
     assert sorted(c.shares_removed for c in corrections) == [Decimal(4_000), Decimal(_T)]
     assert out["institutions"] == []
 
@@ -368,7 +368,7 @@ def test_largest_row_tie_break_and_nested_dropped_order() -> None:
     ]
     nested = DroppedSource("13g", "G1", Decimal(7), None, None, "0000000444", "Nested Two")
     m = _m(_EVEN, dropped=(shared_entry, nested))
-    out, _ = _fold_13f_duplicates(_cats(insiders=k_rows, institutions=[m]), _even_covers())
+    out, _ = _fold_13f_duplicates(_cats(insiders=k_rows, institutions=[m]), _even_covers(), {})
     by_acc = {h.winning_accession: h for h in out["insiders"]}
     assert by_acc["B"].dropped_sources == ()
     # k's own entry first, then M's row, then M's nested entries with the duplicate D1 dropped.
@@ -380,7 +380,7 @@ def test_equal_rows_on_one_accession_fold_onto_the_first() -> None:
         _h(_K, "Icahn Enterprises G.P. Inc.", _EVEN // 2, accession="A"),
         _h(_K, "Icahn Enterprises G.P. Inc.", _EVEN // 2, accession="A"),
     ]
-    out, _ = _fold_13f_duplicates(_cats(insiders=k_rows, institutions=[_m(_EVEN)]), _even_covers())
+    out, _ = _fold_13f_duplicates(_cats(insiders=k_rows, institutions=[_m(_EVEN)]), _even_covers(), {})
     assert [len(h.dropped_sources) for h in out["insiders"]] == [1, 0]
 
 
@@ -388,7 +388,7 @@ def test_the_category_collision_check_still_raises() -> None:
     cats = _cvi()
     cats["blockholders"].append(_m(source="13d"))
     with pytest.raises(ValueError, match="two categories"):
-        _fold_13f_duplicates(cats, _cvi_covers())
+        _fold_13f_duplicates(cats, _cvi_covers(), {})
 
 
 class _FakeCursor:
@@ -424,7 +424,7 @@ def test_no_candidate_means_no_cover_query() -> None:
 
 
 def test_the_read_maps_rows_in_column_order() -> None:
-    row = (" 0000921669", "C", _FILED, Decimal(0), Decimal(_T), Decimal(_T))
+    row = (" 0000921669", "C", _FILED, Decimal(0), Decimal(_T), Decimal(_T), "Carl C. Icahn", "SCHEDULE 13D/A")
     conn = _FakeConn([row])
     assert _read_13f_covers(conn, 7, _cvi()) == [_CoverRow(*row)]  # type: ignore[arg-type]
     assert conn.params == [{"iid": 7, "bound": datetime(2026, 7, 1, tzinfo=UTC)}]

@@ -13768,3 +13768,16 @@ neighbouring container and match it.**
   (`<filerCredentials><cik>`) is a CIK, and every other person is a name. Cite the schema
   (`eis_Schedule13G_Filer.xsd`), the Filer Manual (Vol. II §8.1.12) and the measured corpus as three separate facts.
 - Enforced in: `docs/specs/ownership/2026-10-22-3227-13f-13g-covers.md` § Source rule (the build adds tests).
+
+### A hot-path read on a partitioned table needs the partition key in its predicate (#3227, 2026-10-22)
+
+- First seen in: the #3227 13G-cover build, Codex checkpoint 2. `_read_13g_filers` filtered
+  `ownership_blockholders_observations` by instrument and accession only. The table is range-partitioned on
+  `period_end` (quarterly since 2010), so no partition could be pruned, and every rollup with a 13G planned and probed
+  every child.
+- Prevention: before adding a per-request read on a partitioned table, look up its partition key
+  (`pg_get_expr(relpartbound, oid)` over `pg_inherits`) and bound it. When the key is derived from another column
+  (here both 13D/G observation writers set `period_end = filed_at.date()`), measure that the derivation holds on the
+  full population before relying on it, and widen the window by the time-zone slack.
+- Enforced in: `app/services/ownership_rollup.py` `_FILERS_13G_SQL` (window over the accessions' filed dates ±1 day);
+  `tests/test_3227_13f_13g_covers.py::test_the_filer_read_queries_13g_accessions_once` pins the bounds.
