@@ -116,13 +116,16 @@ def main() -> None:
         )
         if not args.skip_fetch:
             for sym in _ISSUERS:
-                ((iid, cik),) = q(
+                rows = q(
                     """
                     SELECT i.instrument_id, ei.identifier_value FROM instruments i JOIN external_identifiers ei
                       USING (instrument_id)
                     WHERE i.symbol = %s AND ei.provider = 'sec' AND ei.identifier_type = 'cik' AND ei.is_primary""",
                     (sym,),
                 )
+                if len(rows) != 1:
+                    raise SystemExit(f"[A4] {sym}: expected one primary SEC CIK, found {len(rows)}")
+                ((iid, cik),) = rows
                 seed = {
                     r[0]
                     for r in q(

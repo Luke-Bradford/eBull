@@ -644,8 +644,11 @@ Further points:
       It is reported, and it is not an acceptance failure.
   - **Scope.** Stage 1 covers the candidate instruments; Stage 2 and rollback verification cover the ledger's
     instruments (A4). Each refill writes one instrument's full history inside the snapshot.
-  - **Refill.** It then refills each candidate: it fetches companyfacts and calls `upsert_facts_for_instrument` in
-    the snapshot's transaction. It does not call `refresh_financial_facts`, which commits
+  - **Prefetch.** It fetches and parses the companyfacts payload of every in-scope instrument before it opens the
+    snapshot. No SEC request runs while it holds the locks or the snapshot, as in A2. A fetch failure is reported,
+    and that instrument is listed as unrefilled.
+  - **Refill.** Inside the snapshot, after the locks, it upserts each prefetched payload with
+    `upsert_facts_for_instrument` in the snapshot's transaction. It does not call `refresh_financial_facts`, which commits
     (`app/services/fundamentals/__init__.py:580`).
   - **Both derivations** then run over the refilled raw. The script computes each group's expected branch (`on`,
     `off` or `kept_stored`) independently from A3's rule and records the branch each final cell took.
