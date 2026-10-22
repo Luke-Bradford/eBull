@@ -158,9 +158,13 @@ class DiscoveryResult:
     discovered: int = 0
     failed: int = 0
     deferred: int = 0
+    write_failed: int = 0
 
     def digest(self) -> str:
-        return f"discovered {self.discovered} (failed {self.failed}), discovery deferred {self.deferred}"
+        return (
+            f"discovered {self.discovered} (failed {self.failed}, write failed {self.write_failed}),"
+            f" discovery deferred {self.deferred}"
+        )
 
 
 # A4 candidate: a population instrument with an accession whose active generation holds a positive-scale or an
@@ -566,7 +570,7 @@ def run_discovery(
     write it through ``upsert_facts_for_instrument(complete_payload=True)``, one transaction each; none is started at
     or after ``admit_until``. An empty payload (no companyfacts at SEC) still discovers: there is nothing to capture.
     A fetch or parse failure backs off ``2^attempts`` hours; :data:`MAX_ATTEMPTS` failures exhaust it. A write failure
-    propagates."""
+    is counted and leaves the discovery row unchanged, so it burns no attempt and the run continues."""
     from app.services.fundamentals import (  # cycle: fundamentals imports this module
         finish_ingestion_run,
         start_ingestion_run,
@@ -620,17 +624,24 @@ def run_discovery(
                 )
             result.failed += 1
             continue
-        # A DB error propagates and fails the run: it is not the instrument's attempt to burn.
-        with conn.transaction():
-            upserted += upsert_facts_for_instrument(
-                conn, instrument_id=instrument_id, facts=facts, ingestion_run_id=run_id, complete_payload=True
-            )[0]
+        # A write error is not the instrument's attempt to burn: it is counted, the discovery row is left as it was
+        # (the instrument is due again next run), and the run carries on to the scan.
+        try:
+            with conn.transaction():
+                upserted += upsert_facts_for_instrument(
+                    conn, instrument_id=instrument_id, facts=facts, ingestion_run_id=run_id, complete_payload=True
+                )[0]
+        except psycopg.Error as exc:
+            logger.warning("dps inline scale discovery: instrument %s write failed: %r", instrument_id, exc)
+            result.write_failed += 1
+            continue
         result.discovered += 1
+    failed = result.failed + result.write_failed
     with conn.transaction():
         finish_ingestion_run(
             conn,
             run_id=run_id,
-            status="success" if result.failed == 0 else ("partial" if result.discovered else "failed"),
+            status="success" if failed == 0 else ("partial" if result.discovered else "failed"),
             rows_upserted=upserted,
         )
     return result

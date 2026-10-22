@@ -311,7 +311,7 @@ def test_the_ab_coverage_seed_is_undone_by_the_snapshot_rollback(ebull_test_conn
     assert counts() == (0, 0, 0)
 
 
-def test_the_run_refuses_an_open_transaction_and_a_discovery_write_error_burns_no_attempt(
+def test_the_run_refuses_an_open_transaction_and_a_discovery_write_error_neither_burns_nor_stops(
     ebull_test_conn: Conn, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     conn = ebull_test_conn
@@ -325,7 +325,10 @@ def test_the_run_refuses_an_open_transaction_and_a_discovery_write_error_burns_n
         raise psycopg.errors.QueryCanceled("statement timeout")
 
     monkeypatch.setattr(fundamentals, "upsert_facts_for_instrument", broken_write)
-    with pytest.raises(psycopg.errors.QueryCanceled):
-        scan_run(conn, _Provider(_doc(0)))
-    conn.rollback()
+    result = scan_run(conn, _Provider(_doc(0)))
+    # Counted, no attempt burned, the ingestion run closed, and the run still scanned.
+    assert result.discovery is not None and (result.discovery.write_failed, result.discovery.failed) == (1, 0)
     assert _discovery(conn, 1) == (False, 0, False, False)
+    assert result.succeeded == 1
+    status = conn.execute("SELECT status FROM data_ingestion_runs ORDER BY ingestion_run_id DESC LIMIT 1").fetchone()
+    assert status == ("failed",)
