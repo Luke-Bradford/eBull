@@ -200,6 +200,8 @@ def repair(conn: psycopg.Connection[Any], *, fetch: Fetch | None, commit_every: 
         if subject_type != "issuer" or iid not in siblings:
             # The entity instrument the #828 writer itself picks for a discovery
             # outside the sibling set (unique history instrument, else the lowest).
+            # A filer row has no discovery instrument; 0 is no instrument id, so it
+            # takes that same branch (tests/test_3973_form345_filer_subject_repair.py).
             target = resolve_insider_writer_routing(
                 conn, discovery_instrument_id=iid if iid is not None else 0, issuer_cik=issuer_cik
             ).entity_instrument_id

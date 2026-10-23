@@ -265,3 +265,52 @@ def test_joint_form3_kept_when_only_a_co_owner_has_later_evidence(
     # The holding is attributed to the first owner, who has no later evidence.
     assert stats["skipped_form3_superseded"] == 0
     assert stats["reset_to_pending"] == 1
+
+
+def test_filer_row_lands_on_the_writers_entity_instrument(ebull_test_conn: psycopg.Connection[tuple]) -> None:  # noqa: F811
+    # Two share classes under one issuer CIK; the unique cik-history instrument is the
+    # higher id, which the #828 policy prefers over the lowest sibling for a discovery
+    # outside the set. A filer row has no discovery instrument, so it takes that branch.
+    conn = ebull_test_conn
+    sibling = _ISSUER_IID + 2
+    _instrument(conn, _ISSUER_IID, "TOMB", _ISSUER_CIK)
+    _instrument(conn, sibling, "TOMBB", _ISSUER_CIK)
+    conn.execute(
+        "INSERT INTO instrument_cik_history (instrument_id, cik, effective_from, source_event)"
+        " VALUES (%s, %s, '2020-01-01', 'imported')",
+        (sibling, _ISSUER_CIK),
+    )
+    _manifest(conn, _STORED)
+    _store(conn, _STORED, _ISSUER_CIK)
+    _listed(conn, _STORED, _ISSUER_IID)
+
+    repair(conn, fetch=None)
+
+    row = get_manifest_row(conn, _STORED)
+    assert row is not None
+    assert (row.subject_type, row.instrument_id) == ("issuer", sibling)
+
+
+def test_commit_every_makes_progress_durable_and_a_rerun_resumes(
+    ebull_test_conn: psycopg.Connection[tuple],  # noqa: F811
+) -> None:
+    conn = ebull_test_conn
+    _instrument(conn, _ISSUER_IID, "TOMB", _ISSUER_CIK)
+    for acc in (_STORED, _PARSED):
+        _manifest(conn, acc)
+        _store(conn, acc, _ISSUER_CIK)
+        _listed(conn, acc, _ISSUER_IID)
+    conn.commit()
+    conn.execute("SELECT 1")
+
+    first = repair(conn, fetch=None, commit_every=2)  # commits before the 2nd row
+    conn.rollback()  # a crash after the first commit
+
+    committed, rolled_back = get_manifest_row(conn, _STORED), get_manifest_row(conn, _PARSED)
+    assert first["reset_to_pending"] == 2
+    assert committed is not None and committed.ingest_status == "pending"
+    assert rolled_back is not None and rolled_back.ingest_status == "tombstoned"
+
+    conn.execute("SELECT 1")
+    second = repair(conn, fetch=None)
+    assert (second["candidates"], second["reset_to_pending"]) == (1, 1)
