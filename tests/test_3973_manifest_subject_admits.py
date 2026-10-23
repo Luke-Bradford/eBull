@@ -44,3 +44,4 @@ def test_record_manifest_entry_refusal_writes_nothing() -> None:
     assert written is False
     conn.cursor.assert_not_called()
     conn.execute.assert_not_called()
+    conn.transaction.assert_not_called()

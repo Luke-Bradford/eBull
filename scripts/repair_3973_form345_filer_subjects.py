@@ -44,9 +44,11 @@ DERA Form 4s through 2018-12).
 Finally the ``data_freshness_index`` rows for (filer subject, Form 3/4/5)
 are deleted: ``record_manifest_entry`` refuses every write they could make.
 
-Idempotent; re-run to pick up rows skipped on a fetch error. Dry run by
-default (stored bodies only, rolled back); ``--apply`` fetches and commits
-every 200 rows.
+Idempotent and resumable: candidates are read from the manifest alone, and a
+repaired row is no longer one, so a re-run (after a crash between the
+200-row commits, or for rows skipped on a fetch error) continues where the
+last left off. Dry run by default (stored bodies only, rolled back);
+``--apply`` fetches and commits every 200 rows.
 
     PYTHONPATH=. uv run python -m scripts.repair_3973_form345_filer_subjects [--apply]
 """
@@ -75,7 +77,7 @@ from app.services.insider_transactions import (
     parse_form_5_xml,
 )
 from app.services.raw_filings import DocumentKind, store_raw, stored_body
-from app.services.sec_identity import siblings_for_issuer_cik
+from app.services.sec_identity import resolve_insider_writer_routing, siblings_for_issuer_cik
 from app.services.sec_manifest import (
     ISSUER_SUBJECT_ONLY_SOURCES,
     record_manifest_entry,
@@ -180,10 +182,12 @@ def repair(conn: psycopg.Connection[Any], *, fetch: Fetch | None, commit_every: 
             stats["fetched"] += 1
         try:
             parsed = _PARSE[source](body)
-        except Exception:  # noqa: BLE001 — the worker's own parse records the failure
+        except Exception:  # noqa: BLE001 — counted below; no issuer can be read from this body
             parsed = None
         issuer_cik = (getattr(parsed, "issuer_cik", None) or "").strip()
         if not issuer_cik.isdigit():
+            # No issuer to re-subject to: the row stays tombstoned, as the
+            # worker's own parse of the same body would leave it.
             stats["skipped_no_issuer_cik"] += 1
             continue
         siblings = siblings_for_issuer_cik(conn, issuer_cik)
@@ -194,7 +198,11 @@ def repair(conn: psycopg.Connection[Any], *, fetch: Fetch | None, commit_every: 
             stats["skipped_form3_superseded"] += 1
             continue
         if subject_type != "issuer" or iid not in siblings:
-            target = min(siblings)
+            # The entity instrument the #828 writer itself picks for a discovery
+            # outside the sibling set (unique history instrument, else the lowest).
+            target = resolve_insider_writer_routing(
+                conn, discovery_instrument_id=iid if iid is not None else 0, issuer_cik=issuer_cik
+            ).entity_instrument_id
             record_manifest_entry(
                 conn,
                 acc,
