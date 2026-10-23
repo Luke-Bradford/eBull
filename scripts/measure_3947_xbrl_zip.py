@@ -151,6 +151,15 @@ def _bom_codec(body: bytes) -> str | None:
     return next((codec for bom, codec in _BOMS if body.startswith(bom)), None)
 
 
+def _canonical(encoding: str) -> str:
+    """Python's canonical codec name, so every spelling (``UTF_16``, ``utf16``, ``UTF-16``) compares as one; an
+    unknown name raises, and the accession is reported failed."""
+    try:
+        return codecs.lookup(encoding).name
+    except LookupError as exc:
+        raise ValueError(f"unknown declared encoding {encoding!r}") from exc
+
+
 def _text(body: bytes, encoding: str | None) -> str:
     """Decoded for the v1 parser's ``str`` input, without a second parse: by the BOM if there is one (lxml's
     ``docinfo.encoding`` reports UTF-8 for a UTF-16 file with a BOM and no declaration), else by the encoding the XML
@@ -158,7 +167,7 @@ def _text(body: bytes, encoding: str | None) -> str:
     byte order from the first bytes, ``<`` and ``?`` (XML 1.0 Appendix F); an order it cannot read raises, so the
     accession is reported failed, never silently mis-decoded."""
     codec = _bom_codec(body)
-    if codec is None and encoding and encoding.upper().replace("-", "") in ("UTF16", "UTF32", "UCS2", "UCS4"):
+    if codec is None and encoding and _canonical(encoding) in ("utf-16", "utf-32"):
         codec = next((c for prefix, c in _NO_BOM_ORDER if body.startswith(prefix)), None)
         if codec is None:
             raise ValueError(f"cannot read the byte order of a {encoding} document without a BOM")
