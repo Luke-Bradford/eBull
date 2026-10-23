@@ -510,7 +510,7 @@ def _archive_candidates(provider: ArchiveScanProvider, url: str) -> list[tuple[s
         raise _ArchiveFallback("archive_not_found")
     try:
         archive = zipfile.ZipFile(io.BytesIO(body))
-    except zipfile.BadZipFile:
+    except _UNREADABLE:
         raise _ArchiveFallback("archive_not_zip") from None
     with archive:
         return _html_members(archive)
@@ -520,6 +520,12 @@ def _archive_candidates(provider: ArchiveScanProvider, url: str) -> list[tuple[s
 # member's compressed bytes without a limit, so B2.3's HTML total could not hold and such a member takes the listing
 # path (CPython 3.14 ``zipfile.ZipExtFile._read1``).
 _BOUNDED_METHODS: Final = frozenset({zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED})
+# What ``zipfile`` raises on a damaged archive besides ``BadZipFile``, from a mutation census of STORED and DEFLATE
+# archives (byte flips and truncations; the census script is on #3947 PR #3971): a damaged deflate stream
+# (``zlib.error``), a corrupted version, method or flag (``NotImplementedError``, itself a ``RuntimeError``), and a
+# corrupted offset (``ValueError``, "negative seek value"); plus a truncated member (``EOFError``) and an encrypted one
+# (``RuntimeError``). Anything else fails the attempt.
+_UNREADABLE: Final = (zipfile.BadZipFile, zlib.error, EOFError, RuntimeError, NotImplementedError, ValueError)
 
 
 def _html_members(archive: zipfile.ZipFile) -> list[tuple[str, bytes]]:
@@ -548,8 +554,7 @@ def _html_members(archive: zipfile.ZipFile) -> list[tuple[str, bytes]]:
         except zipfile.BadZipFile as exc:
             reason = "archive_bad_crc" if str(exc).startswith("Bad CRC-32") else "archive_not_zip"
             raise _ArchiveFallback(reason) from None
-        except zlib.error, EOFError, RuntimeError:
-            # A damaged deflate stream, a truncated member, an encrypted member. Anything else fails the attempt.
+        except _UNREADABLE:
             raise _ArchiveFallback("archive_not_zip") from None
         if len(data) > remaining:
             raise _ArchiveFallback("archive_html_too_large")

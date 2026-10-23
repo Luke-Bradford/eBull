@@ -183,6 +183,33 @@ def test_the_bytes_limit_holds_across_chunks() -> None:
         provider.fetch_document_bytes(_BASE + "a.htm", max_bytes=9)
 
 
+def _damaged(field: str) -> bytes:
+    """A one-member archive with one central-directory or end-record field corrupted (APPNOTE 4.3.12, 4.3.16)."""
+    archive = bytearray(_zip([("a.htm", b"<html>" + b"inline xbrl " * 50 + b"</html>")]))
+    central = archive.index(b"PK\x01\x02")
+    end = archive.index(b"PK\x05\x06")
+    if field == "version":  # version needed to extract: zipfile refuses one it cannot extract
+        archive[central + 6] = 0xFF
+    elif field == "flags":  # general purpose bit 5, compressed patched data
+        archive[central + 8] |= 0x20
+    else:  # the central directory's offset, past where it is: every local header offset turns negative
+        offset = int.from_bytes(archive[end + 16 : end + 20], "little") + 1000
+        archive[end + 16 : end + 20] = offset.to_bytes(4, "little")
+    return bytes(archive)
+
+
+@pytest.mark.parametrize(
+    ("field", "raised"),
+    [("version", NotImplementedError), ("flags", NotImplementedError), ("offset", ValueError)],
+)
+def test_a_damaged_archive_takes_the_listing_path_whatever_zipfile_raises(field: str, raised: type[Exception]) -> None:
+    damaged = _damaged(field)
+    with pytest.raises(raised):  # what zipfile raises for it, besides BadZipFile
+        with zipfile.ZipFile(io.BytesIO(damaged)) as archive:
+            archive.read("a.htm")
+    assert acquire_document_source(_Provider(damaged), _target()).fallback == "archive_not_zip"
+
+
 def test_the_response_limit_reads_at_the_limit_and_falls_back_one_byte_over(monkeypatch: pytest.MonkeyPatch) -> None:
     archive = _zip(_MEMBERS)
     monkeypatch.setattr(scan, "RESPONSE_MAX_BYTES", len(archive))
