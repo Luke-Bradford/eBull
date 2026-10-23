@@ -211,6 +211,8 @@ def oracle(by_category: Any, covers: list[Any], filers: Any, mode: str, doe: dic
         for m, k in decide(matched, reserved).items():
             res["f"][m] = (tier, _dig(m), _dig(k), str(tot[m]), cs[m], k)
     res["tot"], res["cand"] = tot, cand
+    # Pre-uniqueness matched sets by tier, for the (IM) A/B (``scripts.ab_3227_13f_included_managers``).
+    res["matched"] = {1: t1, 2: t2, 3: t3}
     return res
 
 

@@ -39,10 +39,11 @@ from __future__ import annotations
 import functools
 import logging
 import re
+from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
 from typing import Any, Final, Literal
 
@@ -4841,6 +4842,132 @@ def _read_13g_filers(
     return {a: tuple(rows) for a, rows in out.items()}
 
 
+@dataclass(frozen=True)
+class _IMEvidence:
+    """Tier (IM)'s evidence for one candidate M (included-managers spec § Rule 3-5), as
+    :func:`_read_13f_im_evidence` reads it. ``observations`` are the ``(shares, thirteen_f_segments)`` of every
+    current observation on § Rule 3's key; ``capture`` is A's capture record as ``(capture_id, status)``, or ``None``;
+    ``entries`` are A's list entries with a parsed sequence number, as ``(sequence_number, cik as filed)``."""
+
+    accession: str
+    observations: tuple[tuple[Decimal, Mapping[str, Any] | None], ...]
+    capture: tuple[str, str] | None
+    entries: tuple[tuple[int, str | None], ...]
+
+
+# § Rule 3's key for each candidate (canonical CIK, P, A), on this instrument. ``filer_cik`` is ten digits by
+# ``chk_institutions_obs_filer_cik``, so the canonical CIK is padded to it (:func:`_im_keys` passes none longer) and the
+# primary key serves the lookup; ``period_end = ANY`` gives plan-time partition pruning.
+_IM_OBSERVATIONS_SQL: Final = """
+    SELECT k.cik, k.period, k.acc, o.shares, o.thirteen_f_segments
+      FROM unnest(%(ciks)s::text[], %(periods)s::date[], %(accs)s::text[]) AS k(cik, period, acc)
+      JOIN ownership_institutions_observations o
+        ON o.instrument_id = %(iid)s AND o.period_end = k.period AND o.source_document_id = k.acc
+       AND o.filer_cik = lpad(k.cik, 10, '0')
+     WHERE o.period_end = ANY(%(periods)s::date[])
+       AND o.source = '13f' AND o.ownership_nature = 'economic' AND o.exposure_kind = 'EQUITY'
+       AND o.known_to IS NULL
+"""
+_IM_CAPTURES_SQL: Final = """
+    SELECT accession_number, capture_id::text, status
+      FROM institutional_13f_captures WHERE accession_number = ANY(%(accs)s::text[])
+"""
+_IM_ENTRIES_SQL: Final = """
+    SELECT accession_number, sequence_number, cik
+      FROM institutional_13f_other_managers
+     WHERE accession_number = ANY(%(accs)s::text[]) AND sequence_number IS NOT NULL
+     ORDER BY accession_number, entry_index
+"""
+
+
+def _im_keys(by_category: Mapping[SliceCategory, Sequence[Holder]]) -> dict[str, tuple[str, date, str]]:
+    """Candidate M → (canonical CIK, P, A) for each candidate tier (IM) could fold: M's kept rows all from one accession
+    A (§ Rule 2), and some co-filer node other than M with an owner total of T (a precondition of § Rule 6). A canonical
+    CIK above ten digits has no observation (``chk_institutions_obs_filer_cik``) and is not read. Pure."""
+    rows_by_identity, category_of = _cofiler_identities(by_category)
+    candidates = _13f_candidates(rows_by_identity, category_of)
+    if not candidates:
+        return {}
+    totals = {k: sum((h.shares for h in rows), Decimal(0)) for k, rows in rows_by_identity.items()}
+    node_totals: dict[Decimal, set[str]] = {}
+    for k, rows in rows_by_identity.items():
+        canon = _identity_canon(k)
+        if canon is not None and _is_cofiler_node(rows, totals[k], canon, _COFILER_EXCLUDED_SOURCES):
+            node_totals.setdefault(totals[k], set()).add(canon)
+    out: dict[str, tuple[str, date, str]] = {}
+    for m, period in candidates.items():
+        m_cik = _digit_cik(_identity_canon(m))
+        accessions = {h.winning_accession.strip() for h in rows_by_identity[m]}
+        if m_cik is None or len(m_cik) > 10 or len(accessions) != 1 or not node_totals.get(totals[m], set()) - {m_cik}:
+            continue
+        accession = next(iter(accessions))
+        if accession:
+            out[m] = (m_cik, period, accession)
+    return out
+
+
+def _read_13f_im_evidence(
+    conn: psycopg.Connection[Any], instrument_id: int, by_category: Mapping[SliceCategory, Sequence[Holder]]
+) -> dict[str, _IMEvidence]:
+    """Candidate M → :class:`_IMEvidence`, for the candidates :func:`_im_keys` selects. No such candidate, no query."""
+    keys = _im_keys(by_category)
+    if not keys:
+        return {}
+    # Distinct keys: two identity keys can share a canonical CIK (``CIK:0000000001`` and ``CIK:1``).
+    unique = sorted(set(keys.values()))
+    ciks, periods, accs = (list(x) for x in zip(*unique, strict=True))
+    observed: dict[tuple[str, date, str], list[tuple[Decimal, Mapping[str, Any] | None]]] = {}
+    entries: dict[str, list[tuple[int, str | None]]] = {}
+    with conn.cursor(row_factory=psycopg.rows.tuple_row) as cur:
+        cur.execute(_IM_OBSERVATIONS_SQL, {"iid": instrument_id, "ciks": ciks, "periods": periods, "accs": accs})
+        for cik, period, acc, shares, segments in cur.fetchall():
+            observed.setdefault((cik, period, acc), []).append((shares, segments))
+        distinct = sorted(set(accs))
+        cur.execute(_IM_CAPTURES_SQL, {"accs": distinct})
+        captures = {acc: (capture_id, status) for acc, capture_id, status in cur.fetchall()}
+        cur.execute(_IM_ENTRIES_SQL, {"accs": distinct})
+        for acc, sequence_number, cik in cur.fetchall():
+            entries.setdefault(acc, []).append((sequence_number, cik))
+    return {
+        m: _IMEvidence(acc, tuple(observed.get(key, ())), captures.get(acc), tuple(entries.get(acc, ())))
+        for m, key in keys.items()
+        for _, _, acc in [key]
+    }
+
+
+# Column 6 values that mark a line's discretion as shared (Form 13F Special Instruction 11.b.vi(B), (C)).
+_IM_SHARED_DISCRETION: Final[frozenset[str]] = frozenset({"DFND", "OTR"})
+
+
+def _im_named_ciks(evidence: _IMEvidence | None, t: Decimal) -> frozenset[str]:
+    """N (included-managers spec § Rule 3-5): the canonical CIKs of the included Managers that every line of M's
+    position names in Column 7, or empty when any condition fails. Pure.
+
+    The single observation on § Rule 3's key has shares T and captured, self-consistent segments whose ``capture_id``
+    is A's capture record's, and that record is ``complete``. Every line is ``DFND``/``OTR``; Q is the sequence numbers
+    every line names (a line with an invalid Column 7, ``null``, names none); each maps through A's list to a digit
+    CIK, or contributes nothing. A payload that is not of the stored shape refuses rather than raising."""
+    if evidence is None or evidence.capture is None or len(evidence.observations) != 1:
+        return frozenset()
+    shares, segments = evidence.observations[0]
+    capture_id, status = evidence.capture
+    if shares != t or not isinstance(segments, Mapping) or status != "complete":
+        return frozenset()
+    lines = segments.get("lines")
+    if segments.get("capture_id") != capture_id or not isinstance(lines, list) or not lines:
+        return frozenset()
+    try:
+        # Text shares (``canonical_shares``), so Decimal; the sum must be the observation's own shares.
+        if sum((Decimal(line["shares"]) for line in lines), Decimal(0)) != shares:
+            return frozenset()
+        if any(line["discretion"] not in _IM_SHARED_DISCRETION for line in lines):
+            return frozenset()
+        named = frozenset.intersection(*(frozenset(line["other_managers"] or ()) for line in lines))
+    except KeyError, TypeError, ValueError, InvalidOperation:
+        return frozenset()
+    return frozenset(cik for number, raw in evidence.entries if number in named if (cik := _digit_cik(raw)))
+
+
 def _13g_filer_of_record(blocks: Sequence[_CoverRow], observed: Sequence[_Observed13G]) -> str | None:
     """The 13G accession's filer of record (13G-covers spec § Rule), or ``None`` when undefined: every
     block has a NULL ``reporter_cik``, and the current observations are at least one, each a digit
@@ -4887,10 +5014,15 @@ def _fold_13f_duplicates(
     by_category: dict[SliceCategory, list[Holder]],
     covers: Sequence[_CoverRow],
     filers_13g: Mapping[str, Sequence[_Observed13G]],
+    im_evidence: Mapping[str, _IMEvidence] | None = None,
+    *,
+    matched_sets: dict[str, dict[str, list[str]]] | None = None,
 ) -> tuple[dict[SliceCategory, list[Holder]], list[CorrectionApplied]]:
     """Fold a manager's 13F figure onto its co-filer when the manager's own joint 13D/G reports the
     same block for both (#3227). Pure; runs on :func:`_reconcile_owner_once`'s output, before
-    :func:`_reconcile_cofiler_groups`. ``filers_13g`` is :func:`_read_13g_filers`'s output.
+    :func:`_reconcile_cofiler_groups`. ``filers_13g`` is :func:`_read_13g_filers`'s output and ``im_evidence``
+    :func:`_read_13f_im_evidence`'s. ``matched_sets``, when given, receives each tier's pre-uniqueness matched set
+    (``13d``, ``u``, ``o``, ``im``: candidate → twins), for tests and the A/B only.
 
     A declared policy, not a proof: no rule identifies a 13F position (investment discretion,
     Exchange Act §3(a)(35)) with a beneficial-ownership position (Rule 13d-3). The spec lists the
@@ -4937,6 +5069,17 @@ def _fold_13f_duplicates(
     * Duplicate: exactly one twin, no other (O) candidate's twin, and no twin of either earlier
       matched set.
 
+    Tier (IM) (docs/specs/ownership/2026-10-22-3227-13f-included-managers.md § Rule, frozen) runs after (O), and
+    nothing in it feeds back into an earlier tier. It reads M's own 13F, not a 13D/G:
+
+    * It considers candidates outside the three earlier matched sets whose kept rows all come from one 13F
+      accession A.
+    * N (:func:`_im_named_ciks`): M's one current observation on A has shares T and complete, coherent,
+      self-consistent captured segments; every line is ``DFND``/``OTR``; N maps the Column 7 numbers every line
+      names through A's List of Other Included Managers to digit CIKs.
+    * Twin k: a node whose canonical CIK is in N and is not M's, with an owner total of T.
+    * Duplicate: exactly one twin, no other (IM) candidate's twin, and no twin of an earlier matched set.
+
     For each duplicate, M's rows leave ``institutions`` and are appended to the dropped sources of
     k's largest row (shares, then the lowest ``winning_accession``, then input order), with one
     ``cofiler_group_collapse`` correction naming k. k keeps its rows and category here. M is not a
@@ -4944,6 +5087,8 @@ def _fold_13f_duplicates(
     rows_by_identity, category_of = _cofiler_identities(by_category)
     candidates = _13f_candidates(rows_by_identity, category_of)
     if not candidates:
+        if matched_sets is not None:
+            matched_sets.update({tier: {} for tier in ("13d", "u", "o", "im")})
         return by_category, []
     totals = {k: sum((h.shares for h in rows), Decimal(0)) for k, rows in rows_by_identity.items()}
     nodes_by_cik: dict[str, list[str]] = {}
@@ -5174,6 +5319,49 @@ def _fold_13f_duplicates(
                 "completeness of the stored blocks, overlap on that statement, across dates and in class "
                 "scope are not verified."
             ),
+        )
+
+    # Tier (IM). Its uniqueness count is its own; the three earlier matched sets' twins are reserved.
+    reserved |= {k for twins, *_ in o_matched.values() for k in twins}
+    considered = {m for m in candidates if m not in matched and m not in g13_matched and m not in o_matched}
+    im_matched: dict[str, list[str]] = {}
+    for m in sorted(considered & set(im_evidence or {})):
+        evidence = (im_evidence or {})[m]
+        t, m_cik = totals[m], _digit_cik(_identity_canon(m))
+        if {h.winning_accession.strip() for h in rows_by_identity[m]} != {evidence.accession}:
+            continue
+        twins = sorted(
+            k
+            for cik in _im_named_ciks(evidence, t)
+            if cik != m_cik
+            for k in nodes_by_cik.get(cik, ())
+            if totals[k] == t
+        )
+        if twins:
+            im_matched[m] = twins
+    im_count = Counter(k for twins in im_matched.values() for k in twins)
+    for m, twins in im_matched.items():
+        if len(twins) != 1 or im_count[twins[0]] != 1 or twins[0] in reserved:
+            continue
+        accession = (im_evidence or {})[m].accession
+        _fold(
+            m,
+            twins[0],
+            lambda manager, primary, t=totals[m], p=candidates[m], a=accession: (
+                f"13F duplicate counted once (#3227): {manager.filer_name} ({manager.filer_cik}) 13F {t} for "
+                f"{p.isoformat()}; its 13F {a} reports every line of the position as shared discretion with included "
+                f"manager {primary.filer_name} ({primary.filer_cik}), Column 7. Counted once by policy: that the "
+                "manager's own figure counts the same shares is not verified."
+            ),
+        )
+    if matched_sets is not None:
+        matched_sets.update(
+            {
+                "13d": {m: twins for m, (twins, _) in matched.items()},
+                "u": {m: twins for m, (twins, *_) in g13_matched.items()},
+                "o": {m: twins for m, (twins, *_) in o_matched.items()},
+                "im": dict(im_matched),
+            }
         )
     if not removed:
         return by_category, corrections
@@ -7106,10 +7294,14 @@ def get_ownership_rollup(conn: psycopg.Connection[Any], symbol: str, instrument_
         [h.winning_accession for c in _COFILER_CATEGORIES for h in by_category.get(c, []) if h.shares > 0],
     )
     # #3227 13F duplicates: a manager's 13F figure folded onto the co-filer its own joint 13D/G
-    # or 13G reports the same block for. Before the co-filer pass, which it leaves unchanged (M is no node).
+    # or 13G reports the same block for, or its own 13F names as an included manager. Before the
+    # co-filer pass, which it leaves unchanged (M is no node).
     covers_13f = _read_13f_covers(conn, instrument_id, by_category)
     by_category, f13_corrections = _fold_13f_duplicates(
-        by_category, covers_13f, _read_13g_filers(conn, instrument_id, covers_13f)
+        by_category,
+        covers_13f,
+        _read_13g_filers(conn, instrument_id, covers_13f),
+        _read_13f_im_evidence(conn, instrument_id, by_category),
     )
     by_category, cofiler_corrections = _reconcile_cofiler_groups(by_category, cofilers)
     for _cat, _fam_holders in family_by_category.items():
