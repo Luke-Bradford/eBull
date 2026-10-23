@@ -137,6 +137,15 @@ _BOMS = (
 )
 
 
+# XML 1.0 Appendix F: "<?" in each byte order, for a UTF-16 or UTF-32 document without a byte-order mark.
+_NO_BOM_ORDER = (
+    (b"\x00\x00\x00<\x00\x00\x00?", "utf-32-be"),
+    (b"<\x00\x00\x00?\x00\x00\x00", "utf-32-le"),
+    (b"\x00<\x00?", "utf-16-be"),
+    (b"<\x00?\x00", "utf-16-le"),
+)
+
+
 def _bom_codec(body: bytes) -> str | None:
     """The codec a byte-order mark names; these codecs consume the mark."""
     return next((codec for bom, codec in _BOMS if body.startswith(bom)), None)
@@ -145,8 +154,15 @@ def _bom_codec(body: bytes) -> str | None:
 def _text(body: bytes, encoding: str | None) -> str:
     """Decoded for the v1 parser's ``str`` input, without a second parse: by the BOM if there is one (lxml's
     ``docinfo.encoding`` reports UTF-8 for a UTF-16 file with a BOM and no declaration), else by the encoding the XML
-    parser reported in ``classify`` (declaration, else UTF-8)."""
-    return body.decode(_bom_codec(body) or encoding or "utf-8")
+    parser reported in ``classify`` (declaration, else UTF-8). With no BOM, a UTF-16 or UTF-32 declaration takes its
+    byte order from the first bytes, ``<`` and ``?`` (XML 1.0 Appendix F); an order it cannot read raises, so the
+    accession is reported failed, never silently mis-decoded."""
+    codec = _bom_codec(body)
+    if codec is None and encoding and encoding.upper().replace("-", "") in ("UTF16", "UTF32", "UCS2", "UCS4"):
+        codec = next((c for prefix, c in _NO_BOM_ORDER if body.startswith(prefix)), None)
+        if codec is None:
+            raise ValueError(f"cannot read the byte order of a {encoding} document without a BOM")
+    return body.decode(codec or encoding or "utf-8")
 
 
 def _looks_inline(body: bytes) -> bool:
