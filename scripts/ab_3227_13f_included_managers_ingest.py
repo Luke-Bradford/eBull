@@ -118,8 +118,11 @@ def _count(value: str | None) -> int | None:
     return int(text) if text.isascii() and text.isdigit() else None
 
 
-def _read_archive(path: Path, cusip_map: dict[str, int]) -> tuple[dict[str, dict[str, Any]], dict[tuple, dict]]:
-    """Expected capture per accession, and expected lines per observation key."""
+def _read_archive(
+    path: Path, cusip_map: dict[str, int], keep: set[str] | None = None
+) -> tuple[dict[str, dict[str, Any]], dict[tuple, dict]]:
+    """Expected capture per accession, and expected lines per observation key (only for accessions in ``keep``, when
+    given; the capture counts always cover every line)."""
     with zipfile.ZipFile(path) as zf:
         submissions = {r["ACCESSION_NUMBER"]: r for r in _rows(zf, "SUBMISSION.tsv")}
         covers = {r["ACCESSION_NUMBER"]: r for r in _rows(zf, "COVERPAGE.tsv")}
@@ -141,6 +144,8 @@ def _read_archive(path: Path, cusip_map: dict[str, int]) -> tuple[dict[str, dict
                 continue
             lines_by_acc[acc] += 1
             value_by_acc[acc] = value_by_acc.get(acc, Decimal(0)) + (_number(r.get("VALUE")) or Decimal(0))
+            if keep is not None and acc not in keep:
+                continue
             sub, cover = submissions.get(acc), covers.get(acc)
             cusip = (r.get("CUSIP") or "").strip().upper()
             kind = (r.get("SSHPRNAMTTYPE") or "").strip().upper()
