@@ -151,11 +151,23 @@ def _bom_codec(body: bytes) -> str | None:
     return next((codec for bom, codec in _BOMS if body.startswith(bom)), None)
 
 
+# IANA names XML allows that Python has no codec for: UCS-2 is the BMP subset of UTF-16, and UCS-4 has UTF-32's
+# code units, so each decodes as its UTF counterpart (byte order still from the BOM or Appendix F).
+_UCS = {
+    "ISO-10646-UCS-2": "utf-16",
+    "UCS-2": "utf-16",
+    "CSUNICODE": "utf-16",
+    "ISO-10646-UCS-4": "utf-32",
+    "UCS-4": "utf-32",
+    "CSUCS4": "utf-32",
+}
+
+
 def _canonical(encoding: str) -> str:
     """Python's canonical codec name, so every spelling (``UTF_16``, ``utf16``, ``UTF-16``) compares as one; an
     unknown name raises, and the accession is reported failed."""
     try:
-        return codecs.lookup(encoding).name
+        return _UCS.get(encoding.upper().replace("_", "-"), None) or codecs.lookup(encoding).name
     except LookupError as exc:
         raise ValueError(f"unknown declared encoding {encoding!r}") from exc
 
@@ -171,7 +183,7 @@ def _text(body: bytes, encoding: str | None) -> str:
         codec = next((c for prefix, c in _NO_BOM_ORDER if body.startswith(prefix)), None)
         if codec is None:
             raise ValueError(f"cannot read the byte order of a {encoding} document without a BOM")
-    return body.decode(codec or encoding or "utf-8")
+    return body.decode(codec or (_canonical(encoding) if encoding else "utf-8"))
 
 
 def _looks_inline(body: bytes) -> bool:
