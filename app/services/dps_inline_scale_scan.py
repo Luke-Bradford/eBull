@@ -139,8 +139,9 @@ class ScanResult:
     failed: int = 0
     superseded: int = 0
     deferred: int = 0
-    # B2.5, over the attempts whose acquisition completed: candidate files classified, sources by path, the listing
-    # path's fallbacks by reason, and requests. An attempt that fails during acquisition adds to none of them.
+    # B2.5, over the attempts whose acquisition completed, whatever followed (a failed read, a superseded publish):
+    # candidate files classified, sources by path, the listing path's fallbacks by reason, and requests. An attempt
+    # that fails during acquisition adds to none of them.
     documents: int = 0
     archive: int = 0
     listing: int = 0

@@ -55,6 +55,7 @@ from app.services.dps_inline_scale_scan import (
     parse_header_records,
 )
 from app.services.inline_xbrl_dps import (
+    _DECLARED_ENCODING,
     CONCEPT,
     IX_NS,
     XSI_NIL,
@@ -111,7 +112,6 @@ COALESCE((SELECT m.cik FROM sec_filing_manifest m WHERE m.accession_number = {ac
 _SGML_DOCUMENT = re.compile(r"<DOCUMENT>(.*?)</DOCUMENT>", re.S | re.I)
 _SGML_SEQUENCE = re.compile(r"<SEQUENCE>([^\n<]*)", re.I)
 _SGML_FILENAME = re.compile(r"<FILENAME>([^\n<]*)", re.I)
-_DECLARED_ENCODING = re.compile(rb"""\s*<\?xml[^>]*\bencoding\s*=\s*["']([A-Za-z0-9._-]+)["']""")
 
 
 def _jsonable(value: Any) -> Any:
@@ -306,11 +306,19 @@ def _replay(provider: SecFilingsProvider, accession: str, cik: str) -> dict[str,
     except _ArchiveFallback as exc:
         archive = None
         record["archive"] = str(exc.args[0])
+    except Exception as exc:
+        if _transient(exc):
+            raise  # retried for the whole accession (B4.4)
+        # Any other archive error fails a production attempt (B2.4); recorded per source so the listing still reads.
+        archive = None
+        record["archive"] = f"error:{exc!r}"[:500]
     try:
         listing: list[tuple[str, bytes]] | None = listing_candidates(provider, target)[0]
-    except DocumentSetError as exc:
+    except Exception as exc:
+        if _transient(exc):
+            raise
         listing = None
-        record["listing_error"] = str(exc)
+        record["listing_error"] = repr(exc)[:500] if not isinstance(exc, DocumentSetError) else str(exc)
     page = provider.fetch_document_text(f"{base}{accession}-index-headers.html")
     if page is None:
         record["error"] = "header_not_found"
@@ -417,7 +425,9 @@ def report(out: Path) -> int:
             counts["error"] += 1
             blocking.append(f"error {accession}: {record['error']}")
             continue
-        counts[f"archive:{record['archive']}"] += 1
+        counts[f"archive:{record['archive'].split(':', 1)[0]}"] += 1
+        if record["archive"].startswith("error:"):
+            blocking.append(f"archive error {accession}: {record['archive']}")
         archive, listing = record.get("read_archive"), record.get("read_listing")
         primary = archive or listing
 
