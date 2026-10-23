@@ -797,7 +797,8 @@ overrides; text it does not name stands.
   - This is an acquisition and classification benchmark. Both paths run the v1 extraction and are timed the same way:
     requests at the script's 0.15 s spacing, unzip, classification and occurrence parsing, with the two paths in
     alternating order. v2's extraction is not built yet.
-  - Mean seconds per accession by arm are 2.50 to 3.27 for v1's path and 0.63 to 0.92 for the proposed one.
+  - Mean seconds per accession by arm are 2.53 to 3.34 for v1's path and 0.57 to 0.72 for the proposed one
+    (network-dependent; a rerun moves these, not the counts).
   - The script does not share the jobs process's limiter; production pace is B4.5.
 - **[Z3] v1 leaves set members out.** v1 builds contexts, units and occurrences only from documents holding an
   `ix:header`.
@@ -857,8 +858,9 @@ The run was on 2026-10-23 after that day's 02:45 UTC retention sweep, which move
    - There is no byte-search prefilter, so neither an encoding nor a character reference can make a well-formed
      member a non-member.
 3. **Types.** Every attempt reads the SGML header (`{accession}-index-headers.html`). It must give exactly one
-   non-empty `<TYPE>` for every Inline XBRL document; a failed request, a missing or empty type, or a repeated
-   `<FILENAME>` fails the attempt.
+   non-empty `<TYPE>` for every Inline XBRL document. A failed request fails the attempt, and so does an Inline XBRL
+   document whose filename is absent, repeated, or carries an empty type or more than one type. Records of other
+   files are not checked.
 4. **The set** is every Inline XBRL document whose `<TYPE>` is not `EX-FILING FEES` or `EX-98`.
    - **An empty set is `not_inline`.** That covers no Inline XBRL document at all, and only excluded ones.
      - The outcome means "no primary set". It follows only from classifying every candidate of a source that holds

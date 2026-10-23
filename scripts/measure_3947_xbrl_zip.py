@@ -41,7 +41,9 @@ one JSON line per accession.
 from __future__ import annotations
 
 import argparse
+import codecs
 import collections
+import contextlib
 import hashlib
 import html
 import io
@@ -52,7 +54,8 @@ import statistics
 import time
 import zipfile
 from dataclasses import dataclass, field
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
+from typing import IO
 
 import httpx
 import lxml.etree as ET
@@ -74,6 +77,7 @@ XHTML_NS = "http://www.w3.org/1999/xhtml"
 _LINKBASES = ("_cal.xml", "_def.xml", "_lab.xml", "_pre.xml")
 # www.sec.gov's web front end appends this bot-detection script to served HTML; the archive holds the filer's bytes.
 _INJECTED = re.compile(rb'<script type="text/javascript"\s+src="/[^"<>]*"></script>(?=\s*</body>\s*</html>\s*$)')
+_DECLARED_ENCODING = re.compile(rb"""\s*<\?xml[^>]*\bencoding\s*=\s*["']([A-Za-z0-9._-]+)["']""")
 _TRAILING_BLANKS = re.compile(rb"[ \t]+\n")
 # Not lxml and not the app parser: the [Z3] census is an independent oracle for the header-less members.
 _CENSUS = re.compile(
@@ -85,6 +89,7 @@ _CONTROL = "0001628280-26-055148"
 _XSI_NIL = "{http://www.w3.org/2001/XMLSchema-instance}nil"
 _SGML_DOCUMENT = re.compile(r"<DOCUMENT>(.*?)</DOCUMENT>", re.S | re.I)
 _SGML_TAG = {k: re.compile(rf"<{k}>([^\n<]*)", re.I) for k in ("TYPE", "FILENAME")}
+_SGML_SEQUENCE = re.compile(r"<SEQUENCE>([^\n<]*)", re.I)
 
 _ARMS_SQL = (
     _POPULATION_SQL
@@ -124,7 +129,36 @@ def _normalised(body: bytes) -> tuple[bytes, bool]:
 def _text(body: bytes) -> str:
     """Decoded as the XML parser decodes it (declaration, BOM, else UTF-8), for the v1 parser's ``str`` input."""
     encoding = ET.fromstring(body, ET.XMLParser(huge_tree=True, resolve_entities=False, no_network=True)).getroottree()
-    return body.decode(encoding.docinfo.encoding or "utf-8")
+    # Python's UTF-16/32 codecs consume a BOM; a UTF-8 BOM survives decoding and would sit before the declaration.
+    return body.decode(encoding.docinfo.encoding or "utf-8").lstrip("\ufeff")
+
+
+def _looks_inline(body: bytes) -> bool:
+    """B1.2's guard for a file that does not parse as XML: its text (by BOM, else declared encoding, else UTF-8 with
+    replacement) contains ``inlineXBRL``, or a lenient HTML parse finds the namespace name in an attribute value."""
+    for bom, codec in (
+        (codecs.BOM_UTF32_LE, "utf-32"),
+        (codecs.BOM_UTF32_BE, "utf-32"),
+        (codecs.BOM_UTF8, "utf-8-sig"),
+        (codecs.BOM_UTF16_LE, "utf-16"),
+        (codecs.BOM_UTF16_BE, "utf-16"),
+    ):
+        if body.startswith(bom):
+            break
+    else:
+        declared = _DECLARED_ENCODING.match(body)
+        codec = declared.group(1).decode("ascii") if declared else "utf-8"
+    try:
+        text = body.decode(codec, "replace")
+    except LookupError:
+        text = body.decode("utf-8", "replace")
+    if "inlineXBRL" in text:
+        return True
+    try:
+        tree = lxml.html.fromstring(body)
+    except ET.ParserError, ValueError:
+        return False
+    return any(IX_NS in value for el in tree.iter() for value in el.attrib.values())
 
 
 def classify(body: bytes) -> _Doc:
@@ -133,9 +167,7 @@ def classify(body: bytes) -> _Doc:
     try:
         root = ET.fromstring(body, ET.XMLParser(huge_tree=True, resolve_entities=False, no_network=True))
     except ET.XMLSyntaxError, ValueError:
-        tree = lxml.html.fromstring(body) if body.strip() else None
-        declared = tree is not None and any(IX_NS in value for el in tree.iter() for value in el.attrib.values())
-        return _Doc("undecidable" if declared else "non_member", False, digest, injected, raw)
+        return _Doc("undecidable" if _looks_inline(body) else "non_member", False, digest, injected, raw)
     member = (
         root.tag == f"{{{XHTML_NS}}}html" and root.prefix is None and next(root.iter(f"{{{IX_NS}}}*"), None) is not None
     )
@@ -152,7 +184,7 @@ class _Path:
     other_members: list[str] = field(default_factory=list)
     docs: dict[str, _Doc] = field(default_factory=dict)
     bodies: dict[str, bytes] = field(default_factory=dict)  # Inline XBRL members only
-    types: dict[str, str] = field(default_factory=dict)
+    types: dict[str, list[str]] = field(default_factory=dict)
     parsed: list[Occurrence] | None = None
     listing: list[str] = field(default_factory=list)
 
@@ -222,41 +254,54 @@ def _archive(client: _Client, base: str, accession: str) -> _Path:
             else:
                 path.other_members.append(info.filename)
         path.types = _header_types(client, base, accession, path)
-        unmapped = sorted(n for n, d in path.docs.items() if d.state == "member" and n not in path.types)
+        unmapped = sorted(
+            n
+            for n, d in path.docs.items()
+            if d.state == "member" and (len(path.types.get(n, [])) != 1 or not path.types[n][0])
+        )
         if unmapped:
-            raise ValueError(f"Inline XBRL members missing from the SGML header in {accession}: {unmapped}")
+            raise ValueError(f"Inline XBRL members without exactly one SGML <TYPE> in {accession}: {unmapped}")
         path.parsed = path.occurrences()
     path.secs = time.monotonic() - started
     return path
 
 
-def _header_types(client: _Client, base: str, accession: str, path: _Path) -> dict[str, str]:
-    """``<FILENAME>`` → ``<TYPE>`` from the SGML header; a missing type or a repeated filename raises."""
+def _header_types(client: _Client, base: str, accession: str, path: _Path) -> dict[str, list[str]]:
+    """``<FILENAME>`` → every ``<TYPE>`` the SGML header gives it (one entry per ``<TYPE>`` tag of each
+    ``<DOCUMENT>``, empty ones included), and the sequence-1 (primary) filename under ``""``. B1.3's rule, exactly one
+    non-empty type, is checked for Inline XBRL members only, by the caller."""
     response = client.get(f"{base}/{accession}-index-headers.html", path)
     response.raise_for_status()
-    types: dict[str, str] = {}
+    types: dict[str, list[str]] = collections.defaultdict(list)
     for block in _SGML_DOCUMENT.findall(html.unescape(response.text)):
-        found = {k: m.group(1).strip() if (m := r.search(block)) else "" for k, r in _SGML_TAG.items()}
-        if not found["TYPE"] or found["FILENAME"] in types or len(_SGML_TAG["TYPE"].findall(block)) != 1:
-            raise ValueError(f"ambiguous SGML header in {accession}: {found}")
-        types[found["FILENAME"]] = found["TYPE"]
+        name = m.group(1).strip() if (m := _SGML_TAG["FILENAME"].search(block)) else ""
+        types[name].extend(t.strip() for t in _SGML_TAG["TYPE"].findall(block))
+        if (m := _SGML_SEQUENCE.search(block)) and m.group(1).strip() == "1":
+            types[""].append(name)
     return types
 
 
 def _instance_facts(client: _Client, base: str, names: list[str], path: _Path) -> set[tuple[str, str, Decimal]]:
-    """(contextRef, unitRef, value) of each non-nil fact of the concept in EDGAR's extracted instance (``*_htm.xml``,
-    PDS §2.3.7), SEC's own reading of the whole document set."""
-    instances = [n for n in names if n.endswith("_htm.xml")]
-    if len(instances) != 1:
-        raise ValueError(f"expected one *_htm.xml, found {instances}")
-    response = client.get(f"{base}/{instances[0]}", path)
+    """(contextRef, unitRef, value) of each non-nil fact of the concept in EDGAR's extracted instance, named after the
+    primary document (``xyz.htm`` → ``xyz_htm.xml``, PDS §2.3.7): SEC's own reading of the whole document set. A
+    value that is not a decimal raises, so the accession is reported failed rather than silently short."""
+    if len(names) != 1 or not names[0].lower().endswith(".htm"):
+        raise ValueError(f"expected one .htm primary document, found {names}")
+    response = client.get(f"{base}/{names[0][: -len('.htm')]}_htm.xml", path)
     response.raise_for_status()
     root = ET.fromstring(response.content, ET.XMLParser(huge_tree=True, resolve_entities=False, no_network=True))
     return {
-        (e.get("contextRef", ""), e.get("unitRef", ""), Decimal(e.text.strip()))
+        (e.get("contextRef", ""), e.get("unitRef", ""), _decimal(e.text))
         for e in root.iter()
         if isinstance(e.tag, str) and e.tag.endswith("}" + CONCEPT) and e.get(_XSI_NIL) != "true" and e.text
     }
+
+
+def _decimal(text: str) -> Decimal:
+    try:
+        return Decimal(text.strip())
+    except InvalidOperation as exc:
+        raise ValueError(f"instance value is not a decimal: {text!r}") from exc
 
 
 def _occurrence_facts(occurrences: list[Occurrence] | None) -> set[tuple[str, str, Decimal]]:
@@ -351,10 +396,11 @@ def _measure(
         stats["Z3_headerless_documents"] += 1
         stats["Z3_headerless_documents_with_dps"] += bool(census)
         stats["Z3_headerless_dps_occurrences"] += len(census)
-        notes.append(f"Z3 header-less {accession}/{name} type {new.types.get(name, '?')} dps {len(census)}")
+        notes.append(f"Z3 header-less {accession}/{name} type {(new.types.get(name) or ['?'])[0]} dps {len(census)}")
     if headerless or accession == _CONTROL:
         # SEC's extracted instance against v1's occurrences: what v1 leaves out of the set, as SEC reads it.
-        instance = _instance_facts(client, base, old.listing, _Path())
+        # Measurement-only request, deliberately outside the timed attempt and its request count ([Z2]).
+        instance = _instance_facts(client, base, new.types.get("", []), _Path())
         v1 = _occurrence_facts(new.parsed)
         stats["Z3_instance_facts"] += len(instance)
         stats["Z3_instance_facts_missing_from_v1"] += len(instance - v1)
@@ -368,7 +414,7 @@ def _measure(
         )
     if len(headers) >= 2:
         stats["Z4_multi_header_accessions"] += 1
-        notes.append(f"Z4 multi-header {accession} {[(n, new.types.get(n, '?')) for n in headers]}")
+        notes.append(f"Z4 multi-header {accession} {[(n, (new.types.get(n) or ['?'])[0]) for n in headers]}")
     stats["compared"] += 1
     return record
 
@@ -391,13 +437,18 @@ def main() -> None:
             arms[arm].append((accession, cik))
     sizes = dict(sorted((a, len(m)) for a, m in arms.items()))
     print(f"[Z0] {PARSER_VERSION} in-scope population by disjoint arm (with a CIK): {sizes}")
-    out = open(args.out, "w") if args.out else None  # noqa: SIM115 - closed at the end
+    with contextlib.ExitStack() as stack:
+        out = stack.enter_context(open(args.out, "w")) if args.out else None
+        _run(arms, args.per_arm, out)
+
+
+def _run(arms: dict[str, list[tuple[str, str]]], per_arm: int, out: IO[str] | None) -> None:
     rng = random.Random(3947)
     client = _Client()
     unique = 0
     control = [(a, c) for rows_ in arms.values() for a, c in rows_ if a == _CONTROL]
     for arm in ("inline", "not_inline", "unscanned_raw", "history", "8-K", "control"):
-        sample = control if arm == "control" else rng.sample(arms[arm], min(args.per_arm, len(arms[arm])))
+        sample = control if arm == "control" else rng.sample(arms[arm], min(per_arm, len(arms[arm])))
         unique += len(sample) if arm != "control" else 0
         stats: collections.Counter[str] = collections.Counter()
         timing: dict[str, list[float]] = {"listing": [], "archive": []}
@@ -424,8 +475,6 @@ def main() -> None:
         for line in notes:
             print("    ", line)
     print(f"[Z0] accessions sampled (arms are disjoint): {unique}")
-    if out:
-        out.close()
 
 
 if __name__ == "__main__":
