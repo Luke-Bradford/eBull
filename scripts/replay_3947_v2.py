@@ -273,14 +273,21 @@ def _primary(page: str) -> list[str]:
     return found
 
 
-def _instance(provider: SecFilingsProvider, base: str, primary: list[str]) -> list[list[str]] | str:
-    """(contextRef, unitRef, value) of each non-nil fact of the concept in SEC's extracted instance
-    (``{primary}_htm.xml``, PDS §2.3.7), or why it is unavailable."""
-    if len(primary) != 1 or not primary[0].lower().endswith(".htm"):
-        return f"oracle_unavailable:primary {primary}"
-    body = provider.fetch_document_bytes(f"{base}{primary[0][: -len('.htm')]}_htm.xml", max_bytes=RESPONSE_MAX_BYTES)
-    if body is None:
-        return "oracle_unavailable:instance_not_found"
+def _instance(provider: SecFilingsProvider, base: str, names: list[str]) -> tuple[str | None, list[list[str]] | str]:
+    """The instance read and the (contextRef, unitRef, value) of each non-nil fact of the concept in it, or why it is
+    unavailable. SEC's extracted instance (PDS §2.3.7) is ``{document}_htm.xml``, named after an Inline XBRL
+    document: the primary when it is one, else a set member (Brinker ``0000703351-19-000037``: a non-Inline 10-K
+    with an Inline EX-13, whose instance is ``eat20190626ex13_htm.xml``). ``names`` are tried in order."""
+    tried = [n for n in dict.fromkeys(names) if n.lower().endswith(".htm")]
+    for name in tried:
+        instance = f"{name[: -len('.htm')]}_htm.xml"
+        body = provider.fetch_document_bytes(f"{base}{instance}", max_bytes=RESPONSE_MAX_BYTES)
+        if body is not None:
+            return instance, _instance_facts(body)
+    return None, f"oracle_unavailable:instance_not_found for {tried}"
+
+
+def _instance_facts(body: bytes) -> list[list[str]] | str:
     root = ET.fromstring(body, ET.XMLParser(huge_tree=True, resolve_entities=False, no_network=True))
     facts = []
     for element in root.iter():
@@ -329,7 +336,7 @@ def _replay(provider: SecFilingsProvider, accession: str, cik: str) -> dict[str,
             record[f"read_{name}"] = _read(DocumentSource(name, None, tuple(candidates), header, 0))
     primary = record.get("read_archive") or record.get("read_listing")
     if primary is not None and primary["outcome"] == "inline":
-        record["instance"] = _instance(provider, base, _primary(page))
+        record["instance_name"], record["instance"] = _instance(provider, base, _primary(page) + primary["set"])
     return record
 
 
@@ -360,7 +367,15 @@ def run(out: Path) -> None:
     results_path = out / "results.jsonl"
     done = set()
     if results_path.exists():
-        done = {json.loads(line)["accession"] for line in results_path.read_text().splitlines() if line.strip()}
+        # An ``incomplete`` record, or one whose oracle was unavailable, is replayed again; the report reads each
+        # accession's last record.
+        done = {
+            r["accession"]
+            for line in results_path.read_text().splitlines()
+            if line.strip()
+            and "incomplete" not in (r := json.loads(line))
+            and not str(r.get("instance", "")).startswith("oracle_unavailable")
+        }
     work = _work(manifest)
     todo = [(a, w) for a, w in work.items() if a not in done]
     print(f"{len(work)} manifest accessions, {len(done)} done, {len(todo)} to replay", flush=True)
@@ -544,8 +559,21 @@ def report(out: Path) -> int:
                     for o in primary["occurrences"]
                     if o["unresolved"] is None and o["instance_value"] is not None
                 }
+                # An occurrence whose value the parser contract refuses to guess (e.g. ``ixt-sec:numwordsen``) is
+                # published unresolved; it is found, at SEC's (contextRef, unitRef), but carries no value to compare.
+                unresolved_keys = {
+                    ((o["context_ref_raw"] or "").strip(), (o["unit_ref_raw"] or "").strip())
+                    for o in primary["occurrences"]
+                    if o["unresolved"] is not None
+                }
                 if sec == ours:
                     counts["oracle_pass"] += 1
+                elif not ours - sec and all((c, u) in unresolved_keys for c, u, _ in sec - ours):
+                    counts["oracle_sec_only_at_unresolved"] += 1
+                    listed.append(
+                        f"oracle {accession}: SEC-only {sorted(map(str, sec - ours))} each at an unresolved"
+                        f" occurrence {sorted(unresolved_keys)}"
+                    )
                 else:
                     counts["oracle_fail"] += 1
                     unresolved = [
