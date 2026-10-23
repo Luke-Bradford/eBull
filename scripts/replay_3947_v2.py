@@ -384,6 +384,13 @@ def run(out: Path) -> None:
     results_path = out / "results.jsonl"
     done = set()
     if results_path.exists():
+        # A partial last line (a run killed mid-write) is cut back to the last newline, so the next record appended
+        # starts on a line of its own; that accession is replayed again.
+        body = results_path.read_bytes()
+        if body and not body.endswith(b"\n"):
+            with results_path.open("r+b") as sink:
+                sink.truncate(body.rfind(b"\n") + 1)
+            print(f"cut a partial last line of {results_path}: {body[body.rfind(b'\n') + 1 :][:80]!r}", flush=True)
         # An accession whose last record (the one the report reads) is ``incomplete``, or has an unavailable oracle,
         # is replayed again.
         last = _last_records(results_path)
