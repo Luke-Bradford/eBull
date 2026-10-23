@@ -241,7 +241,7 @@ def run_master_idx_quarterly_sweep(
                     continue
                 matched += 1
                 try:
-                    record_manifest_entry(
+                    if not record_manifest_entry(
                         conn,
                         row.accession_number,
                         cik=row.cik,
@@ -253,7 +253,8 @@ def run_master_idx_quarterly_sweep(
                         filed_at=row.filed_at,
                         primary_document_url=row.primary_document_url,
                         is_amendment=row.is_amendment,
-                    )
+                    ):
+                        continue  # #3973: Form 3/4/5 under a filer subject
                     upserted += 1
                 except ValueError as exc:
                     logger.warning(

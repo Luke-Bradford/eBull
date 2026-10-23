@@ -13856,3 +13856,23 @@ neighbouring container and match it.**
   else each set member in turn), never from the submission's sequence-1 document; a missing instance is a lookup to
   re-check before it is reported as SEC's.
 - Enforced in: `scripts/replay_3947_v2.py::_instance`.
+
+### An EDGAR index lists a Form 3/4/5 under every CIK on it, so its owner's line must not choose the subject (#3973, 2026-10-23)
+
+- First seen in: #3227 arm-2 A/B (WMT, SVV, KLRS, LFST ups), root-caused in #3973. master.idx, the daily index,
+  the getcurrent Atom feed and the reporting owner's submissions.json all list an insider filing under the issuer's
+  CIK and each reporting owner's CIK. The generic discovery writers resolved the subject from the line's own CIK,
+  so an owner that is a 13F or 13D/G filer produced a filer subject with `instrument_id` NULL; the parser can only
+  tombstone that `missing instrument_id`, and the last-discovery-wins `ON CONFLICT` let it replace the issuer
+  line's row (dev, 2026-10-23: 26,425 filer-subject Form 3/4/5 rows tombstoned `missing instrument_id`).
+- Second lesson, from the repair's A/B: the discovery instrument is not the issuer either. Re-subjecting from
+  `filing_events` put 187 filings on BAC, WFC, ARES and other universe issuers that were reporting owners, and the
+  #828 writer fails open onto that instrument when the document's issuer is outside the universe. Resolve the
+  issuer from the document's `issuerCik`.
+- Prevention: a form whose subject is fixed by the document (Form 3/4/5: `<issuer><issuerCik>`) is refused at the
+  manifest chokepoint for any other subject type, not filtered per writer; a writer list misses callers (the ticket
+  named three writers; thirteen call `record_manifest_entry`, and per-CIK poll and rebuild replay any seeded filer
+  triple).
+- Enforced in: `app/services/sec_manifest.py::manifest_subject_admits` (called first in `record_manifest_entry`);
+  `tests/test_3973_manifest_subject_admits.py`; `scripts/repair_3973_form345_filer_subjects.py` (issuer from the
+  document, `tests/test_3973_form345_filer_subject_repair.py`).
