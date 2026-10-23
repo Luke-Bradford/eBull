@@ -1,7 +1,9 @@
 """Inline XBRL reader for ``us-gaap:CommonStockDividendsPerShareDeclared`` occurrences (#3947).
 
-Spec: ``docs/specs/fundamentals/2026-10-21-3947-dps-inline-scale.md`` §Document set and §Parser contract. Pure:
-the caller fetches the documents; this module never touches the network or the DB.
+Spec: ``docs/specs/fundamentals/2026-10-21-3947-dps-inline-scale.md`` §Parser contract, with Amendment 2 B1's
+document set: :func:`classify` decides each candidate's membership, and :func:`parse_document_set` reads the set's
+members, ``ix:header`` or not. Pure: the caller fetches the documents and the attachment types; this module never
+touches the network or the DB.
 
 Every inline element of the concept is returned, scale 0 included, with its raw attributes and, when they resolve,
 its canonical key (entity CIK, period, dimensionality, unit) and instance value. The source rules:
@@ -27,6 +29,7 @@ by local name, not expanded QName.
 
 from __future__ import annotations
 
+import codecs
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -35,10 +38,12 @@ from decimal import Decimal, InvalidOperation
 from typing import Final
 
 import lxml.etree as ET
+import lxml.html
 
 CONCEPT: Final = "CommonStockDividendsPerShareDeclared"
 
 IX_NS: Final = "http://www.xbrl.org/2013/inlineXBRL"
+XHTML_NS: Final = "http://www.w3.org/1999/xhtml"
 XBRLI_NS: Final = "http://www.xbrl.org/2003/instance"
 ISO4217_NS: Final = "http://www.xbrl.org/2003/iso4217"
 XSI_NIL: Final = "{http://www.w3.org/2001/XMLSchema-instance}nil"
@@ -119,22 +124,96 @@ def _qname(text: str | None, nsmap: Mapping[str | None, str]) -> tuple[str, str]
     return namespace, local
 
 
-def might_be_inline(text: str) -> bool:
-    """False when the text cannot hold an ``ix:header``: no element is in the IX namespace without declaring it.
+def classify(name: str, body: bytes) -> ET._Element | None:
+    """Amendment 2 B1.2: the parsed root when the candidate is an Inline XBRL document, else ``None``.
 
-    Lets the caller skip non-inline HTML exhibits, which need not be well-formed XML, without parsing them.
+    The bytes go intact to the XML parser, which detects the encoding (BOM, declaration, else UTF-8). A document whose
+    root is an unprefixed ``html`` in the XHTML namespace and which holds any element in the Inline XBRL namespace is
+    one (EDGAR XBRL Guide §11). A file that is not well-formed XML has no root, so it is not one, unless it looks
+    Inline (:func:`_looks_inline`): then the attempt fails ``undecidable:<name>``.
     """
-    return IX_NS in text
-
-
-def _parse(name: str, text: str) -> ET._Element:
-    # lxml refuses a ``str`` carrying an encoding declaration; the text is already decoded.
-    body = _XML_DECLARATION.sub("", text, count=1)
     parser = ET.XMLParser(huge_tree=True, resolve_entities=False, no_network=True, recover=False)
     try:
-        return ET.fromstring(body, parser)
-    except (ET.XMLSyntaxError, ValueError) as exc:
-        raise DocumentSetError(f"parse:{name}: {exc}") from exc
+        root = ET.fromstring(body, parser)
+    except ET.XMLSyntaxError, ValueError:
+        if _looks_inline(body):
+            raise DocumentSetError(f"undecidable:{name}") from None
+        return None
+    if root.tag != f"{{{XHTML_NS}}}html" or root.prefix is not None:
+        return None
+    return root if next(root.iter(f"{{{IX_NS}}}*"), None) is not None else None
+
+
+# UTF-32 is tested before UTF-16, whose little-endian mark is a prefix of UTF-32's.
+_BOMS: Final = (
+    (codecs.BOM_UTF32_LE, "utf-32"),
+    (codecs.BOM_UTF32_BE, "utf-32"),
+    (codecs.BOM_UTF8, "utf-8-sig"),
+    (codecs.BOM_UTF16_LE, "utf-16"),
+    (codecs.BOM_UTF16_BE, "utf-16"),
+)
+# XML 1.0 Appendix F: "<?" in each byte order, for a UTF-16 or UTF-32 document without a byte-order mark.
+_NO_BOM_ORDER: Final = (
+    (b"\x00\x00\x00<\x00\x00\x00?", "utf-32-be"),
+    (b"<\x00\x00\x00?\x00\x00\x00", "utf-32-le"),
+    (b"\x00<\x00?", "utf-16-be"),
+    (b"<\x00?\x00", "utf-16-le"),
+)
+# IANA names XML allows that Python has no codec for: UCS-2 is the BMP subset of UTF-16, and UCS-4 has UTF-32's
+# code units, so each decodes as its UTF counterpart (byte order still from the BOM or Appendix F).
+_UCS: Final = {
+    "ISO-10646-UCS-2": "utf-16",
+    "UCS-2": "utf-16",
+    "CSUNICODE": "utf-16",
+    "ISO-10646-UCS-4": "utf-32",
+    "UCS-4": "utf-32",
+    "CSUCS4": "utf-32",
+}
+_DECLARED_ENCODING = re.compile(rb"""\s*<\?xml[^>]*\bencoding\s*=\s*["']([A-Za-z0-9._-]+)["']""")
+
+
+def _canonical(encoding: str) -> str:
+    """Python's canonical codec name, so every spelling (``UTF_16``, ``utf16``, ``UTF-16``) compares as one; an
+    unknown name raises ``ValueError``."""
+    try:
+        return _UCS.get(encoding.upper().replace("_", "-")) or codecs.lookup(encoding).name
+    except LookupError as exc:
+        raise ValueError(f"unknown declared encoding {encoding!r}") from exc
+
+
+def _codec(body: bytes, declared: str | None) -> str:
+    """The BOM; else the byte order of ``<?`` in the first bytes, for a UTF-16 or UTF-32 file without one (XML 1.0
+    Appendix F), whatever it declares; else the declared encoding by canonical name; else UTF-8. A UTF-16/32
+    declaration on a file that starts neither way raises, so it is never mis-decoded."""
+    codec = next((c for bom, c in _BOMS if body.startswith(bom)), None) or next(
+        (c for prefix, c in _NO_BOM_ORDER if body.startswith(prefix)), None
+    )
+    if codec:
+        return codec
+    if declared:
+        canonical = _canonical(declared)
+        if canonical in ("utf-16", "utf-32"):
+            raise ValueError(f"cannot read the byte order of a {declared} document without a BOM")
+        return canonical
+    return "utf-8"
+
+
+def _looks_inline(body: bytes) -> bool:
+    """B1.2's guard for a file that does not parse as XML: its text, decoded by :func:`_codec` from the declaration
+    (UTF-8 with replacement when that rule fails), contains ``inlineXBRL``, or a lenient HTML parse finds the namespace
+    name in an attribute value."""
+    declared = _DECLARED_ENCODING.match(body)
+    try:
+        text = body.decode(_codec(body, declared.group(1).decode("ascii") if declared else None), "replace")
+    except ValueError, LookupError:
+        text = body.decode("utf-8", "replace")
+    if "inlineXBRL" in text:
+        return True
+    try:
+        tree = lxml.html.fromstring(body)
+    except ET.LxmlError, ValueError:  # LxmlError is the base of every lxml parser error
+        return False
+    return any(IX_NS in value for el in tree.iter() for value in el.attrib.values())
 
 
 def _date(element: ET._Element | None) -> date | None:
@@ -342,23 +421,16 @@ def rendered_report_files(filing_summary: str) -> frozenset[str]:
     )
 
 
-def parse_document_set(documents: Sequence[tuple[str, str]]) -> list[Occurrence] | None:
-    """Read an accession's documents as one Inline XBRL Document Set.
+def parse_document_set(roots: Sequence[tuple[str, ET._Element]]) -> list[Occurrence]:
+    """Read the members of an Inline XBRL Document Set as one set (Amendment 2 B1.4, B1.5).
 
-    ``documents`` is ``(name, text)`` for every ``.htm``/``.html``/``.xhtml`` file of the accession's
-    ``index.json`` listing, in listing order. Returns ``None`` when none holds an ``ix:header`` (``not_inline``),
-    else every occurrence of the concept. Raises :class:`DocumentSetError` on an unparseable candidate document,
-    a context or unit id defined twice in the set, or an ix element carrying ``target``.
+    ``roots`` is ``(name, root)`` of every member, each classified by :func:`classify`, in source order; a member
+    need not hold an ``ix:header``. Returns every occurrence of the concept. Raises :class:`DocumentSetError` when no
+    member holds an ``ix:header`` (``no_ix_header``; Inline XBRL 1.1 Part 1 §8.1.3), a context or unit id is defined
+    twice in the set, or an ix element carries ``target``.
     """
-    roots: list[tuple[str, ET._Element]] = []
-    for name, text in documents:
-        if not might_be_inline(text):
-            continue
-        root = _parse(name, text)
-        if next(root.iter(f"{{{IX_NS}}}header"), None) is not None:
-            roots.append((name, root))
-    if not roots:
-        return None
+    if not any(next(root.iter(f"{{{IX_NS}}}header"), None) is not None for _, root in roots):
+        raise DocumentSetError("no_ix_header")
 
     contexts: dict[str, _Context] = {}
     units: dict[str, str | None] = {}

@@ -41,7 +41,6 @@ one JSON line per accession.
 from __future__ import annotations
 
 import argparse
-import codecs
 import collections
 import contextlib
 import hashlib
@@ -59,25 +58,26 @@ from typing import IO
 
 import httpx
 import lxml.etree as ET
-import lxml.html
 import psycopg
 
 from app.config import settings
 from app.services.dps_inline_scale_scan import _POPULATION_SQL, FILING_SUMMARY, PARSER_VERSION, SCOPE_START
 from app.services.inline_xbrl_dps import (
+    _XML_DECLARATION,
     CONCEPT,
     INLINE_SUFFIXES,
     IX_NS,
+    XHTML_NS,
     Occurrence,
+    _codec,
+    _looks_inline,
     parse_document_set,
     rendered_report_files,
 )
 
-XHTML_NS = "http://www.w3.org/1999/xhtml"
 _LINKBASES = ("_cal.xml", "_def.xml", "_lab.xml", "_pre.xml")
 # www.sec.gov's web front end appends this bot-detection script to served HTML; the archive holds the filer's bytes.
 _INJECTED = re.compile(rb'<script type="text/javascript"\s+src="/[^"<>]*"></script>(?=\s*</body>\s*</html>\s*$)')
-_DECLARED_ENCODING = re.compile(rb"""\s*<\?xml[^>]*\bencoding\s*=\s*["']([A-Za-z0-9._-]+)["']""")
 _TRAILING_BLANKS = re.compile(rb"[ \t]+\n")
 # Not lxml and not the app parser: the [Z3] census is an independent oracle for the header-less members.
 _CENSUS = re.compile(
@@ -127,66 +127,6 @@ def _normalised(body: bytes) -> tuple[bytes, bool]:
     return _TRAILING_BLANKS.sub(b"\n", stripped.replace(b"\r\n", b"\n")).rstrip(), bool(injected)
 
 
-# UTF-32 is tested before UTF-16, whose little-endian mark is a prefix of UTF-32's.
-_BOMS = (
-    (codecs.BOM_UTF32_LE, "utf-32"),
-    (codecs.BOM_UTF32_BE, "utf-32"),
-    (codecs.BOM_UTF8, "utf-8-sig"),
-    (codecs.BOM_UTF16_LE, "utf-16"),
-    (codecs.BOM_UTF16_BE, "utf-16"),
-)
-
-
-# XML 1.0 Appendix F: "<?" in each byte order, for a UTF-16 or UTF-32 document without a byte-order mark.
-_NO_BOM_ORDER = (
-    (b"\x00\x00\x00<\x00\x00\x00?", "utf-32-be"),
-    (b"<\x00\x00\x00?\x00\x00\x00", "utf-32-le"),
-    (b"\x00<\x00?", "utf-16-be"),
-    (b"<\x00?\x00", "utf-16-le"),
-)
-
-
-def _bom_codec(body: bytes) -> str | None:
-    """The codec a byte-order mark names; these codecs consume the mark."""
-    return next((codec for bom, codec in _BOMS if body.startswith(bom)), None)
-
-
-# IANA names XML allows that Python has no codec for: UCS-2 is the BMP subset of UTF-16, and UCS-4 has UTF-32's
-# code units, so each decodes as its UTF counterpart (byte order still from the BOM or Appendix F).
-_UCS = {
-    "ISO-10646-UCS-2": "utf-16",
-    "UCS-2": "utf-16",
-    "CSUNICODE": "utf-16",
-    "ISO-10646-UCS-4": "utf-32",
-    "UCS-4": "utf-32",
-    "CSUCS4": "utf-32",
-}
-
-
-def _canonical(encoding: str) -> str:
-    """Python's canonical codec name, so every spelling (``UTF_16``, ``utf16``, ``UTF-16``) compares as one; an
-    unknown name raises ``ValueError``."""
-    try:
-        return _UCS.get(encoding.upper().replace("_", "-")) or codecs.lookup(encoding).name
-    except LookupError as exc:
-        raise ValueError(f"unknown declared encoding {encoding!r}") from exc
-
-
-def _codec(body: bytes, declared: str | None) -> str:
-    """The one decoding rule for both readers: the BOM; else the byte order of ``<?`` in the first bytes, for a UTF-16
-    or UTF-32 file without one (XML 1.0 Appendix F), whatever it declares; else the declared encoding by canonical
-    name; else UTF-8. A UTF-16/32 declaration on a file that starts neither way raises, so it is never mis-decoded."""
-    codec = _bom_codec(body) or next((c for prefix, c in _NO_BOM_ORDER if body.startswith(prefix)), None)
-    if codec:
-        return codec
-    if declared:
-        canonical = _canonical(declared)
-        if canonical in ("utf-16", "utf-32"):
-            raise ValueError(f"cannot read the byte order of a {declared} document without a BOM")
-        return canonical
-    return "utf-8"
-
-
 def _text(body: bytes, encoding: str | None) -> str:
     """Decoded for the v1 parser's ``str`` input by :func:`_codec`, with the encoding the XML parser reported in
     ``classify`` as the declaration (lxml reports UTF-8 for a UTF-16 file with a BOM and no declaration, which the BOM
@@ -194,22 +134,10 @@ def _text(body: bytes, encoding: str | None) -> str:
     return body.decode(_codec(body, encoding))
 
 
-def _looks_inline(body: bytes) -> bool:
-    """B1.2's guard for a file that does not parse as XML: its text, decoded by :func:`_codec` from the declaration
-    (UTF-8 with replacement when that rule fails), contains ``inlineXBRL``, or a lenient HTML parse finds the namespace
-    name in an attribute value."""
-    declared = _DECLARED_ENCODING.match(body)
-    try:
-        text = body.decode(_codec(body, declared.group(1).decode("ascii") if declared else None), "replace")
-    except ValueError, LookupError:
-        text = body.decode("utf-8", "replace")
-    if "inlineXBRL" in text:
-        return True
-    try:
-        tree = lxml.html.fromstring(body)
-    except ET.LxmlError, ValueError:  # LxmlError is the base of every lxml parser error
-        return False
-    return any(IX_NS in value for el in tree.iter() for value in el.attrib.values())
+def _v1_root(text: str) -> ET._Element:
+    """v1's parse of a decoded document: lxml refuses a ``str`` carrying an encoding declaration."""
+    parser = ET.XMLParser(huge_tree=True, resolve_entities=False, no_network=True, recover=False)
+    return ET.fromstring(_XML_DECLARATION.sub("", text, count=1), parser)
 
 
 def classify(body: bytes) -> _Doc:
@@ -242,8 +170,14 @@ class _Path:
     listing: list[str] = field(default_factory=list)
 
     def occurrences(self) -> list[Occurrence] | None:
-        """The v1 parser's occurrences over this path's Inline XBRL documents, in listing order."""
-        return parse_document_set([(name, _text(body, self.docs[name].encoding)) for name, body in self.bodies.items()])
+        """v1's extraction over this path's Inline XBRL documents, in listing order: v1's set rule (only the documents
+        holding an ``ix:header``), each parsed from its decoded text as v1 parsed it. ``None`` when none holds one."""
+        roots = [
+            (name, _v1_root(_text(body, self.docs[name].encoding)))
+            for name, body in self.bodies.items()
+            if self.docs[name].header
+        ]
+        return parse_document_set(roots) if roots else None
 
     def inline(self) -> dict[str, str]:
         return {name: d.sha256 for name, d in self.docs.items() if d.state == "member"}

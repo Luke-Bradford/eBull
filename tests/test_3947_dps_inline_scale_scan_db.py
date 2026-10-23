@@ -6,6 +6,9 @@ These cover the scan's state machine and queue; draining and the normaliser lock
 
 from __future__ import annotations
 
+import io
+import re
+import zipfile
 from datetime import date, timedelta
 from typing import Any
 
@@ -37,21 +40,52 @@ def _doc(scale: int | None) -> str:
     )
 
 
-class _Provider:
-    """Every accession lists one ``a.htm``; ``body`` is its text, ``None`` a 404, an exception raised."""
+# The SGML header page (``-index-headers.html``): one ``<DOCUMENT>`` record typing ``a.htm`` (Amendment 2 B1.3).
+_HEADER = "&lt;DOCUMENT&gt;\n&lt;TYPE&gt;10-Q\n&lt;FILENAME&gt;a.htm\n&lt;/DOCUMENT&gt;\n"
+_ZIP_ACCESSION = re.compile(r"([0-9]{10}-[0-9]{2}-[0-9]{6})-xbrl\.zip$")
 
-    def __init__(self, body: str | None | Exception) -> None:
+
+def _zip(body: str) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("a.htm", body.encode())
+    return buffer.getvalue()
+
+
+class _Provider:
+    """Every accession's ``-xbrl.zip`` holds one ``a.htm``, typed ``10-Q`` by the header. ``body`` is its text, or a
+    dict of it by accession: ``None`` 404s the archive and the listed ``a.htm``; an exception is raised by the archive
+    request. ``archive=False`` 404s every archive, so the listing path serves ``a.htm``. ``fetched`` counts byte
+    requests."""
+
+    def __init__(
+        self, body: str | None | Exception | dict[str, str | None | Exception], *, archive: bool = True
+    ) -> None:
         self.body = body
+        self.archive = archive
         self.fetched = 0
 
     def fetch_filing_index(self, provider_filing_id: str, *, issuer_cik: str | None = None) -> dict[str, object] | None:
         return {"directory": {"item": [{"name": "a.htm", "size": "1"}]}}
 
     def fetch_document_text(self, absolute_url: str) -> str | None:
+        return _HEADER if absolute_url.endswith("-index-headers.html") else None
+
+    def fetch_document_bytes(self, absolute_url: str, *, max_bytes: int) -> bytes | None:
         self.fetched += 1
-        if isinstance(self.body, Exception):
-            raise self.body
-        return self.body
+        archive = _ZIP_ACCESSION.search(absolute_url)
+        if archive and not self.archive:
+            return None
+        body = self.body
+        if isinstance(body, dict):
+            # The archive URL names the accession; a listed file sits under its dashless folder.
+            key = (archive.group(1) if archive else absolute_url.split("/")[-2]).replace("-", "")
+            body = next(v for k, v in body.items() if k.replace("-", "") == key)
+        if isinstance(body, Exception):
+            raise body
+        if body is None:
+            return None
+        return _zip(body) if archive else body.encode()
 
 
 class _Facts:
@@ -173,15 +207,16 @@ def test_a_later_enqueue_takes_a_new_revision(ebull_test_conn: Conn, monkeypatch
 def test_a_failed_rescan_keeps_the_active_generation(ebull_test_conn: Conn, monkeypatch: pytest.MonkeyPatch) -> None:
     conn = ebull_test_conn
     _seed(conn)
+    first = scan.PARSER_VERSION
     _run(conn, _Provider(_doc(3)))
     conn.execute("DELETE FROM sec_inline_scale_renormalise")
     monkeypatch.setattr(scan, "PARSER_VERSION", "v-next")
-    result = _run(conn, _Provider(None))  # the document 404s
+    result = _run(conn, _Provider(None))  # the archive and the listed document 404
     assert (result.failed, result.succeeded) == (1, 0)
     row = _scan_row(conn)
     assert row is not None
     # The old generation stays in force; the work state at v-next records the failure.
-    assert row[:3] == ("inline", 1, "dps-inline-scale-v1")
+    assert row[:3] == ("inline", 1, first)
     assert row[3:] == ("v-next", 1, True, True)
     assert _occurrence_scales(conn) == [3]
     assert _queue(conn) == []
@@ -237,7 +272,7 @@ def test_not_inline_and_superseded(ebull_test_conn: Conn) -> None:
         (ACC,),
     )
     conn.commit()
-    assert scan.publish_success(conn, target, None, 1) is None
+    assert scan.publish_success(conn, target, None, 1, "archive") is None
     assert scan.record_failure(conn, target, "x") is False
     assert _scan_row(conn) == (None, None, None, "other", 1, True, False)
 
@@ -297,3 +332,41 @@ def test_each_attempt_ticks_the_progress_heartbeat(ebull_test_conn: Conn, monkey
     _run(conn, _Provider(RuntimeError("boom")))
     # Discovery's one instrument, then the two accessions.
     assert ticks == [(0, 1, False), (0, 2, False), (1, 2, False), (2, 2, True)]
+
+
+def test_each_generation_records_its_path_and_the_run_counts_fallbacks(
+    ebull_test_conn: Conn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = ebull_test_conn
+    _seed(conn)
+    result = _run(conn, _Provider(_doc(3)))
+    assert (result.archive, result.listing, result.fallbacks, result.documents, result.requests) == (1, 0, {}, 1, 2)
+    assert conn.execute("SELECT path FROM sec_inline_scale_scan").fetchall() == [("archive",)]
+
+    # B2.4: a gone archive takes the listing path (index.json, a.htm; no FilingSummary.xml listed), then the header.
+    monkeypatch.setattr(scan, "PARSER_VERSION", "v-next")
+    result = _run(conn, _Provider(_doc(3), archive=False))
+    assert (result.succeeded, result.archive, result.listing) == (1, 0, 1)
+    assert (result.fallbacks, result.requests) == ({"archive_not_found": 1}, 4)
+    assert "archive 0, listing 1 (fallbacks: archive_not_found 1)" in result.digest()
+    assert conn.execute("SELECT path FROM sec_inline_scale_scan").fetchall() == [("listing",)]
+
+
+def test_a_v2_rescan_of_a_clean_v1_accession_of_a_candidate_enqueues_it(
+    ebull_test_conn: Conn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B4.6: A4's candidate predicate at v2. Neither generation of ACC holds a positive-scale or unresolved
+    occurrence; the instrument is a candidate through another accession's active v1 generation."""
+    conn = ebull_test_conn
+    other = "0001411342-25-000002"
+    _seed(conn)
+    _seed(conn, accession=other)
+    v2 = scan.PARSER_VERSION
+    monkeypatch.setattr(scan, "PARSER_VERSION", "dps-inline-scale-v1")
+    _run(conn, _Provider({ACC: _doc(None), other: _doc(3)}))
+    conn.execute("DELETE FROM sec_inline_scale_renormalise")
+    monkeypatch.setattr(scan, "PARSER_VERSION", v2)
+    # The other accession's v2 attempt fails, so its scale-3 v1 generation stays active and makes the candidate.
+    result = _run(conn, _Provider({ACC: _doc(None), other: RuntimeError("boom")}))
+    assert (result.succeeded, result.failed, result.instruments_enqueued) == (1, 1, 1)
+    assert [i for i, _ in _queue(conn)] == [1]

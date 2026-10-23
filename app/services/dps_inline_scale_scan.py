@@ -14,11 +14,11 @@ Tables: sql/514, sql/515.
   and :data:`MAX_ATTEMPTS` failures exhaust it.
 * **Eligible:** ``parser_version`` is not the current one, and either ``attempt_version`` is not the current one
   (never attempted at this version) or fewer than :data:`MAX_ATTEMPTS` failures with the backoff elapsed.
-* **Attempt:** the ``index.json`` listing, then every ``.htm``/``.html``/``.xhtml`` file of it except the EDGAR
-  Renderer pages ``FilingSummary.xml`` names, through the provider's shared SEC limiter; the bodies are parsed
-  (:mod:`app.services.inline_xbrl_dps`) and discarded. Amendment 2's acquisition (:func:`acquire_document_source`:
-  the ``-xbrl.zip`` archive, else this listing path, then the SGML header) is built beside it and not yet called by
-  the run loop; it replaces this path together with the v2 parser and ``PARSER_VERSION`` bump (spec B1, B3).
+* **Attempt (Amendment 2):** :func:`acquire_document_source` reads the ``{accession}-xbrl.zip`` archive's HTML
+  members, else, for a B2.4 reason, every ``.htm``/``.html``/``.xhtml`` file of the ``index.json`` listing except the
+  EDGAR Renderer pages ``FilingSummary.xml`` names; then the SGML header. Every request goes through the provider's
+  shared SEC limiter. :func:`read_document_set` classifies each candidate (B1.2), types the Inline XBRL documents from
+  the header (B1.3), and reads the set (B1.4) with :mod:`app.services.inline_xbrl_dps`; the bodies are discarded.
 * **Success** replaces the accession's occurrences and active generation in one transaction, and enqueues the
   accession's instruments in ``sec_inline_scale_renormalise`` when the old or new generation holds a positive-scale
   or an unresolved occurrence, or, failing that, those instruments that are candidates (A4: any of their population
@@ -53,6 +53,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Final, Protocol
 
+import lxml.etree as ET
 import psycopg
 
 from app.providers.fundamentals import XbrlFact
@@ -63,6 +64,7 @@ from app.services.inline_xbrl_dps import (
     INLINE_SUFFIXES,
     DocumentSetError,
     Occurrence,
+    classify,
     parse_document_set,
     rendered_report_files,
 )
@@ -70,7 +72,7 @@ from app.services.sync_orchestrator.progress import report_progress
 
 logger = logging.getLogger(__name__)
 
-PARSER_VERSION: Final = "dps-inline-scale-v1"
+PARSER_VERSION: Final = "dps-inline-scale-v2"
 SCOPE_START: Final = date(2019, 6, 15)
 MAX_ATTEMPTS: Final = 5
 RECENT_DAYS: Final = 7
@@ -88,10 +90,6 @@ class ScanProvider(Protocol):
     ) -> dict[str, object] | None: ...
 
     def fetch_document_text(self, absolute_url: str) -> str | None: ...
-
-
-class ArchiveScanProvider(ScanProvider, Protocol):
-    """Amendment 2's acquisition adds the bytes method (B2.1)."""
 
     def fetch_document_bytes(self, absolute_url: str, *, max_bytes: int) -> bytes | None: ...
 
@@ -141,7 +139,13 @@ class ScanResult:
     failed: int = 0
     superseded: int = 0
     deferred: int = 0
-    documents_fetched: int = 0
+    # B2.5, over the attempts whose acquisition completed: candidate files classified, sources by path, the listing
+    # path's fallbacks by reason, and requests. An attempt that fails during acquisition adds to none of them.
+    documents: int = 0
+    archive: int = 0
+    listing: int = 0
+    fallbacks: dict[str, int] = field(default_factory=dict)
+    requests: int = 0
     instruments_enqueued: int = 0
     seeded: int = 0
     work_state: WorkState = field(default_factory=WorkState)
@@ -151,11 +155,13 @@ class ScanResult:
     def digest(self) -> str:
         drained = "drain off" if self.drain is None else self.drain.digest()
         discovered = "discovery none" if self.discovery is None else self.discovery.digest()
+        fallbacks = ", ".join(f"{k} {v}" for k, v in sorted(self.fallbacks.items())) or "none"
         return (
             f"{drained}; seeded {self.seeded}; {discovered}; "
             f"attempted {self.attempted} (ok {self.succeeded}, failed {self.failed}, superseded {self.superseded}),"
-            f" deferred {self.deferred}, documents {self.documents_fetched},"
-            f" enqueued {self.instruments_enqueued}; population: {self.work_state.digest()}"
+            f" deferred {self.deferred}; archive {self.archive}, listing {self.listing} (fallbacks: {fallbacks}),"
+            f" documents {self.documents}, requests {self.requests}; enqueued {self.instruments_enqueued};"
+            f" population: {self.work_state.digest()}"
         )
 
 
@@ -423,21 +429,6 @@ def _listed_html(provider: ScanProvider, target: Target) -> tuple[list[tuple[str
     return listed, requests
 
 
-def fetch_document_set(provider: ScanProvider, target: Target) -> list[tuple[str, str]]:
-    """``(name, text)`` of every HTML file the accession's ``index.json`` lists, in listing order (v1's acquisition).
-
-    Raises :class:`DocumentSetError` on a missing CIK, a 404 listing or document, or a listing with no entries;
-    other HTTP errors propagate from the provider. Either way the attempt fails.
-    """
-    documents: list[tuple[str, str]] = []
-    for name, url in _listed_html(provider, target)[0]:
-        text = provider.fetch_document_text(url)
-        if text is None:
-            raise DocumentSetError(f"document_not_found:{name}")
-        documents.append((name, text))
-    return documents
-
-
 @dataclass(frozen=True)
 class DocumentSource:
     """One attempt's acquisition (Amendment 2 B2): the candidate files of the path that produced them, and the
@@ -460,7 +451,7 @@ class _ArchiveFallback(Exception):
     """The archive cannot be used (B2.4); ``args[0]`` is the counted reason."""
 
 
-def acquire_document_source(provider: ArchiveScanProvider, target: Target) -> DocumentSource:
+def acquire_document_source(provider: ScanProvider, target: Target) -> DocumentSource:
     """Amendment 2 B2: ``{accession}-xbrl.zip``, else v4's listing path for a B2.4 reason; then the SGML header.
 
     Raises :class:`DocumentSetError` on a missing or non-numeric CIK, a listing-path failure, or a 404 header; any
@@ -481,14 +472,8 @@ def acquire_document_source(provider: ArchiveScanProvider, target: Target) -> Do
     # before anything else is read (B2.3).
     requests = 1
     if fallback is not None:
-        listed, listing_requests = _listed_html(provider, target)
+        candidates, listing_requests = listing_candidates(provider, target)
         requests += listing_requests
-        for name, url in listed:
-            body = provider.fetch_document_bytes(url, max_bytes=RESPONSE_MAX_BYTES)
-            requests += 1
-            if body is None:
-                raise DocumentSetError(f"document_not_found:{name}")
-            candidates.append((name, body))
     page = provider.fetch_document_text(f"{base}{target.accession_number}-index-headers.html")
     requests += 1
     if page is None:
@@ -497,7 +482,21 @@ def acquire_document_source(provider: ArchiveScanProvider, target: Target) -> Do
     return DocumentSource(path, fallback, tuple(candidates), parse_header_records(page), requests)
 
 
-def _archive_candidates(provider: ArchiveScanProvider, url: str) -> list[tuple[str, bytes]]:
+def listing_candidates(provider: ScanProvider, target: Target) -> tuple[list[tuple[str, bytes]], int]:
+    """v4's listing path (B2.4): ``(name, bytes)`` of every file :func:`_listed_html` names, in listing order, and the
+    requests made. Raises :class:`DocumentSetError` as :func:`_listed_html` does, and on a 404 file."""
+    listed, requests = _listed_html(provider, target)
+    candidates: list[tuple[str, bytes]] = []
+    for name, url in listed:
+        body = provider.fetch_document_bytes(url, max_bytes=RESPONSE_MAX_BYTES)
+        requests += 1
+        if body is None:
+            raise DocumentSetError(f"document_not_found:{name}")
+        candidates.append((name, body))
+    return candidates, requests
+
+
+def _archive_candidates(provider: ScanProvider, url: str) -> list[tuple[str, bytes]]:
     """The archive's HTML members, read in memory with their CRCs verified (B2.2, B2.3); other members are not read.
 
     Raises :class:`_ArchiveFallback` for each B2.4 reason; any other error of the request propagates.
@@ -597,6 +596,28 @@ def member_types(header: Mapping[str, tuple[tuple[str, ...], ...]], members: Ite
     return types
 
 
+# B1.4: attachments EDGAR processes as their own instance, outside the primary set (EDGAR XBRL Guide §11).
+SEPARATE_SET_TYPES: Final = frozenset({"EX-FILING FEES", "EX-98"})
+
+
+def document_set(source: DocumentSource) -> list[tuple[str, ET._Element]]:
+    """Amendment 2 B1: every candidate classified (an ``undecidable`` one fails the attempt, whatever its type),
+    every Inline XBRL document typed from the SGML header, and the set: ``(name, root)`` of each Inline XBRL document
+    not of a :data:`SEPARATE_SET_TYPES` type, in source order. Raises :class:`DocumentSetError` as :func:`classify`
+    and :func:`member_types` do."""
+    members = [(name, root) for name, body in source.candidates if (root := classify(name, body)) is not None]
+    types = member_types(source.header, [name for name, _ in members])
+    return [(name, root) for name, root in members if types[name] not in SEPARATE_SET_TYPES]
+
+
+def read_document_set(source: DocumentSource) -> list[Occurrence] | None:
+    """The occurrences of :func:`document_set`'s members, read as one set; ``None`` when the set is empty
+    (``not_inline``): the source holds every Inline XBRL document of the submission, so no primary set exists.
+    Raises :class:`DocumentSetError` as :func:`document_set` and :func:`parse_document_set` do."""
+    members = document_set(source)
+    return parse_document_set(members) if members else None
+
+
 def _locked_state_matches(cur: psycopg.Cursor[tuple], target: Target) -> bool:
     row = cur.execute(
         "SELECT attempt_version, attempts FROM sec_inline_scale_scan WHERE accession_number = %s FOR UPDATE",
@@ -615,8 +636,10 @@ def publish_success(
     target: Target,
     occurrences: Sequence[Occurrence] | None,
     documents: int,
+    path: str,
 ) -> int | None:
-    """Replace the accession's active generation. ``None`` when superseded; else the instruments enqueued."""
+    """Replace the accession's active generation, recording the acquisition ``path`` that produced it (B2.4).
+    ``None`` when superseded; else the instruments enqueued."""
     with conn.transaction(), conn.cursor() as cur:
         if not _locked_state_matches(cur, target):
             return None
@@ -628,17 +651,18 @@ def publish_success(
         cur.execute(
             """
             INSERT INTO sec_inline_scale_scan (accession_number, outcome, documents, parser_version, scanned_at,
-                                               attempt_version, attempts, next_attempt_at, last_error)
-            VALUES (%(a)s, %(outcome)s, %(documents)s, %(version)s, now(), %(version)s, 0, NULL, NULL)
+                                               path, attempt_version, attempts, next_attempt_at, last_error)
+            VALUES (%(a)s, %(outcome)s, %(documents)s, %(version)s, now(), %(path)s, %(version)s, 0, NULL, NULL)
             ON CONFLICT (accession_number) DO UPDATE SET
                 outcome = EXCLUDED.outcome, documents = EXCLUDED.documents,
-                parser_version = EXCLUDED.parser_version, scanned_at = EXCLUDED.scanned_at,
+                parser_version = EXCLUDED.parser_version, scanned_at = EXCLUDED.scanned_at, path = EXCLUDED.path,
                 attempt_version = EXCLUDED.attempt_version, attempts = 0, next_attempt_at = NULL, last_error = NULL
             """,
             {
                 "a": target.accession_number,
                 "outcome": "not_inline" if occurrences is None else "inline",
                 "documents": documents,
+                "path": path,
                 "version": PARSER_VERSION,
             },
         )
@@ -887,9 +911,7 @@ def run_dps_inline_scale_scan(
         # protected from a dev reload.
         report_progress(index, len(targets))
         try:
-            documents = fetch_document_set(provider, target)
-            result.documents_fetched += len(documents)
-            occurrences = parse_document_set(documents)
+            occurrences, documents, path = _attempt(provider, target, result)
         except Exception as exc:  # noqa: BLE001 — any fetch/parse failure is one counted attempt, bounded by MAX_ATTEMPTS
             logger.info("dps inline scale scan: %s failed: %r", target.accession_number, exc)
             if record_failure(conn, target, repr(exc)):
@@ -897,7 +919,7 @@ def run_dps_inline_scale_scan(
             else:
                 result.superseded += 1
             continue
-        enqueued = publish_success(conn, target, occurrences, len(documents))
+        enqueued = publish_success(conn, target, occurrences, documents, path)
         if enqueued is None:
             result.superseded += 1
         else:
@@ -906,6 +928,21 @@ def run_dps_inline_scale_scan(
     report_progress(result.attempted, len(targets), force=True)
     result.work_state = work_state(conn)
     return result
+
+
+def _attempt(provider: ScanProvider, target: Target, result: ScanResult) -> tuple[list[Occurrence] | None, int, str]:
+    """One accession's acquisition and read: the occurrences (``None`` for ``not_inline``), the candidate count and
+    the path. Counts the acquisition into ``result`` (B2.5). The bodies and parsed trees are this frame's only, so they
+    are released when it returns, before the next accession is fetched."""
+    source = acquire_document_source(provider, target)
+    result.documents += len(source.candidates)
+    result.requests += source.requests
+    if source.fallback is None:
+        result.archive += 1
+    else:
+        result.listing += 1
+        result.fallbacks[source.fallback] = result.fallbacks.get(source.fallback, 0) + 1
+    return read_document_set(source), len(source.candidates), source.path
 
 
 class RefillFailed(Exception):
