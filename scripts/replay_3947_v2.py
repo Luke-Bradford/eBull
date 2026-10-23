@@ -367,14 +367,15 @@ def run(out: Path) -> None:
     results_path = out / "results.jsonl"
     done = set()
     if results_path.exists():
-        # An ``incomplete`` record, or one whose oracle was unavailable, is replayed again; the report reads each
-        # accession's last record.
+        # An accession whose last record (the one the report reads) is ``incomplete``, or has an unavailable oracle,
+        # is replayed again.
+        last = {
+            (r := json.loads(line))["accession"]: r for line in results_path.read_text().splitlines() if line.strip()
+        }
         done = {
-            r["accession"]
-            for line in results_path.read_text().splitlines()
-            if line.strip()
-            and "incomplete" not in (r := json.loads(line))
-            and not str(r.get("instance", "")).startswith("oracle_unavailable")
+            accession
+            for accession, r in last.items()
+            if "incomplete" not in r and not str(r.get("instance", "")).startswith("oracle_unavailable")
         }
     work = _work(manifest)
     todo = [(a, w) for a, w in work.items() if a not in done]
