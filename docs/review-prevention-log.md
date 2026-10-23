@@ -13829,3 +13829,19 @@ neighbouring container and match it.**
   normalisation and count what it removed.
 - Enforced in: `scripts/measure_3947_xbrl_zip.py` ([Z1]); `docs/specs/fundamentals/2026-10-21-3947-dps-inline-scale.md`
   (Amendment 2, B4.2).
+
+### Buffering chunks then joining them holds two copies at the peak (#3947, 2026-10-23)
+
+- First seen in: #3947 PR #3971 bot review. The archive reader appended each member's chunks to a list and then
+  `b"".join(chunks)`: at the join both the chunks and the joined copy are live, so the peak was the zip, the members
+  already read, and twice the current member, not the limits the spec states.
+- Prevention: when a read is bounded by a byte limit, read once to at most one byte past the remaining limit
+  (`stream.read(remaining + 1)`), or append into one `bytearray`; state the peak as the sum of the buffers that are
+  live together, and check it against the stated limit.
+- Two more ways a stated byte limit fails to bound memory (Codex checkpoint 3 on the same PR): appending a chunk
+  before checking the limit buffers up to one chunk past it, so check `len(buf) + len(chunk)` first; and CPython's
+  `zipfile.ZipExtFile` passes the requested size to the decompressor only for DEFLATE, so a BZIP2, LZMA or Zstandard
+  member inflates its compressed bytes without a limit whatever `read(n)` asks for. Read only STORED and DEFLATED
+  members under a limit.
+- Enforced in: `app/services/dps_inline_scale_scan.py::_html_members` (`_BOUNDED_METHODS`);
+  `SecFilingsProvider.fetch_document_bytes` (one `bytearray`, checked before each append).

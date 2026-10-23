@@ -69,6 +69,7 @@ _ALLOWED_CALLER_FILES: frozenset[str] = frozenset(
         "app/services/dps_inline_scale_scan.py",
         "tests/test_3947_dps_inline_scale_scan.py",
         "tests/test_3947_dps_inline_scale_scan_db.py",
+        "tests/test_3947_dps_archive_acquisition.py",
         # Manifest-worker adapters (#1126 / #1128 / #1129 / #1130 /
         # #1133 / #1134 / #1151). Each one wraps a legacy service-layer
         # ingester whose SQL normalisation already lives on this allow-
@@ -235,10 +236,23 @@ _ALLOWED_CALLER_FILES: frozenset[str] = frozenset(
 )
 
 
-def _all_caller_files() -> set[str]:
-    """Scan app/ and tests/ for ``fetch_document_text`` occurrences,
+# Every file that references ``SecFilingsProvider.fetch_document_bytes`` (#3947 Amendment 2 B2.1): the same
+# contract as ``fetch_document_text``, pinned separately so a bytes caller cannot hide behind the text allow-list.
+_ALLOWED_BYTES_CALLER_FILES: frozenset[str] = frozenset(
+    {
+        "app/providers/implementations/sec_edgar.py",
+        # #3947 — the DPS scan's archive and listing-path HTML → sec_inline_dps_occurrence; bytes are not retained.
+        "app/services/dps_inline_scale_scan.py",
+        "tests/test_3947_dps_archive_acquisition.py",
+        "tests/test_fetch_document_text_callers.py",
+    }
+)
+
+
+def _all_caller_files(method: str = "fetch_document_text") -> set[str]:
+    """Scan app/ and tests/ for occurrences of ``method``,
     returning repo-relative forward-slash paths."""
-    pattern = re.compile(r"\bfetch_document_text\b")
+    pattern = re.compile(rf"\b{method}\b")
     hits: set[str] = set()
     for root_name in ("app", "tests"):
         root = _REPO_ROOT / root_name
@@ -288,4 +302,14 @@ def test_caller_scan_finds_expected_minimum() -> None:
         f"Scanner returned only {len(hits)} files matching "
         f"fetch_document_text; expected >= 9. Scanner or repository "
         "layout changed — re-audit before relaxing this bound."
+    )
+
+
+def test_fetch_document_bytes_caller_set_is_pinned() -> None:
+    """Every file that references ``fetch_document_bytes`` is on its allow-list, under the same #448 / #453
+    contract as ``fetch_document_text``."""
+    actual = _all_caller_files("fetch_document_bytes")
+    assert actual == _ALLOWED_BYTES_CALLER_FILES, (
+        f"unexpected: {sorted(actual - _ALLOWED_BYTES_CALLER_FILES)}; "
+        f"missing: {sorted(_ALLOWED_BYTES_CALLER_FILES - actual)}"
     )

@@ -16,7 +16,9 @@ Tables: sql/514, sql/515.
   (never attempted at this version) or fewer than :data:`MAX_ATTEMPTS` failures with the backoff elapsed.
 * **Attempt:** the ``index.json`` listing, then every ``.htm``/``.html``/``.xhtml`` file of it except the EDGAR
   Renderer pages ``FilingSummary.xml`` names, through the provider's shared SEC limiter; the bodies are parsed
-  (:mod:`app.services.inline_xbrl_dps`) and discarded.
+  (:mod:`app.services.inline_xbrl_dps`) and discarded. Amendment 2's acquisition (:func:`acquire_document_source`:
+  the ``-xbrl.zip`` archive, else this listing path, then the SGML header) is built beside it and not yet called by
+  the run loop; it replaces this path together with the v2 parser and ``PARSER_VERSION`` bump (spec B1, B3).
 * **Success** replaces the accession's occurrences and active generation in one transaction, and enqueues the
   accession's instruments in ``sec_inline_scale_renormalise`` when the old or new generation holds a positive-scale
   or an unresolved occurrence, or, failing that, those instruments that are candidates (A4: any of their population
@@ -38,9 +40,15 @@ Tables: sql/514, sql/515.
 
 from __future__ import annotations
 
+import html
+import io
 import logging
+import re
 import time
-from collections.abc import Callable, Mapping, Sequence
+import zipfile
+import zlib
+from collections import defaultdict
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import Final, Protocol
@@ -48,6 +56,7 @@ from typing import Final, Protocol
 import psycopg
 
 from app.providers.fundamentals import XbrlFact
+from app.providers.implementations.sec_edgar import ResponseTooLarge, archive_dir_url
 from app.services.filing_documents import parse_filing_index
 from app.services.inline_xbrl_dps import (
     CONCEPT,
@@ -67,6 +76,10 @@ MAX_ATTEMPTS: Final = 5
 RECENT_DAYS: Final = 7
 START_CAP: Final = timedelta(minutes=45)
 FILING_SUMMARY: Final = "FilingSummary.xml"
+# Amendment 2 B2.3: policy limits on what one attempt buffers, about six times the largest unpacked archive measured
+# ([Z5], 41,505,764 bytes); not a memory bound on the parser.
+RESPONSE_MAX_BYTES: Final = 256 * 1024 * 1024
+ARCHIVE_HTML_MAX_BYTES: Final = 256 * 1024 * 1024
 
 
 class ScanProvider(Protocol):
@@ -75,6 +88,12 @@ class ScanProvider(Protocol):
     ) -> dict[str, object] | None: ...
 
     def fetch_document_text(self, absolute_url: str) -> str | None: ...
+
+
+class ArchiveScanProvider(ScanProvider, Protocol):
+    """Amendment 2's acquisition adds the bytes method (B2.1)."""
+
+    def fetch_document_bytes(self, absolute_url: str, *, max_bytes: int) -> bytes | None: ...
 
 
 class FactsProvider(Protocol):
@@ -375,15 +394,16 @@ def select_targets(conn: psycopg.Connection[tuple], *, today: date) -> list[Targ
     return [Target(r[0], r[1], r[3], tuple(r[2]), r[4], r[5]) for r in rows]
 
 
-def fetch_document_set(provider: ScanProvider, target: Target) -> list[tuple[str, str]]:
-    """``(name, text)`` of every HTML file the accession's ``index.json`` lists, in listing order.
+def _listed_html(provider: ScanProvider, target: Target) -> tuple[list[tuple[str, str]], int]:
+    """``(name, url)`` of every ``.htm``/``.html``/``.xhtml`` file the accession's ``index.json`` lists, in listing
+    order, except the EDGAR Renderer pages ``FilingSummary.xml`` names; and the requests made.
 
-    Raises :class:`DocumentSetError` on a missing CIK, a 404 listing or document, or a listing with no entries;
-    other HTTP errors propagate from the provider. Either way the attempt fails.
+    Raises :class:`DocumentSetError` on a missing CIK, a 404 listing, or a listing with no entries.
     """
     if target.issuer_cik is None:
         raise DocumentSetError("no_issuer_cik")
     index = provider.fetch_filing_index(target.accession_number, issuer_cik=target.issuer_cik)
+    requests = 1
     if index is None:
         raise DocumentSetError("index_not_found")
     listing = parse_filing_index(index, accession_number=target.accession_number, cik=target.issuer_cik)
@@ -393,16 +413,188 @@ def fetch_document_set(provider: ScanProvider, target: Target) -> list[tuple[str
     rendered: frozenset[str] = frozenset()
     if FILING_SUMMARY in urls:
         summary = provider.fetch_document_text(urls[FILING_SUMMARY])
+        requests += 1
         rendered = rendered_report_files(summary) if summary is not None else frozenset()
+    listed = [
+        (entry.document_name, entry.document_url)
+        for entry in listing
+        if entry.document_name.lower().endswith(INLINE_SUFFIXES) and entry.document_name not in rendered
+    ]
+    return listed, requests
+
+
+def fetch_document_set(provider: ScanProvider, target: Target) -> list[tuple[str, str]]:
+    """``(name, text)`` of every HTML file the accession's ``index.json`` lists, in listing order (v1's acquisition).
+
+    Raises :class:`DocumentSetError` on a missing CIK, a 404 listing or document, or a listing with no entries;
+    other HTTP errors propagate from the provider. Either way the attempt fails.
+    """
     documents: list[tuple[str, str]] = []
-    for entry in listing:
-        if not entry.document_name.lower().endswith(INLINE_SUFFIXES) or entry.document_name in rendered:
-            continue
-        text = provider.fetch_document_text(entry.document_url)
+    for name, url in _listed_html(provider, target)[0]:
+        text = provider.fetch_document_text(url)
         if text is None:
-            raise DocumentSetError(f"document_not_found:{entry.document_name}")
-        documents.append((entry.document_name, text))
+            raise DocumentSetError(f"document_not_found:{name}")
+        documents.append((name, text))
     return documents
+
+
+@dataclass(frozen=True)
+class DocumentSource:
+    """One attempt's acquisition (Amendment 2 B2): the candidate files of the path that produced them, and the
+    accession's SGML header records.
+
+    ``candidates`` is ``(name, bytes)`` of every ``.htm``/``.html``/``.xhtml`` file, in archive or listing order,
+    as served. ``header`` maps each ``<FILENAME>`` to the ``<TYPE>`` values of every ``<DOCUMENT>`` record naming it
+    (B1.3 is checked by :func:`member_types`, for Inline XBRL documents only). ``fallback`` is why the listing path
+    was taken, ``None`` on the archive path.
+    """
+
+    path: str
+    fallback: str | None
+    candidates: tuple[tuple[str, bytes], ...]
+    header: Mapping[str, tuple[tuple[str, ...], ...]]
+    requests: int
+
+
+class _ArchiveFallback(Exception):
+    """The archive cannot be used (B2.4); ``args[0]`` is the counted reason."""
+
+
+def acquire_document_source(provider: ArchiveScanProvider, target: Target) -> DocumentSource:
+    """Amendment 2 B2: ``{accession}-xbrl.zip``, else v4's listing path for a B2.4 reason; then the SGML header.
+
+    Raises :class:`DocumentSetError` on a missing or non-numeric CIK, a listing-path failure, or a 404 header; any
+    other error of the archive, listing or header request propagates. Either way the attempt fails.
+    """
+    if target.issuer_cik is None:
+        raise DocumentSetError("no_issuer_cik")
+    if not target.issuer_cik.isdigit():
+        raise DocumentSetError("issuer_cik_not_numeric")
+    base = archive_dir_url(target.accession_number.replace("-", ""), int(target.issuer_cik))
+    fallback: str | None = None
+    candidates: list[tuple[str, bytes]] = []
+    try:
+        candidates = _archive_candidates(provider, f"{base}{target.accession_number}-xbrl.zip")
+    except _ArchiveFallback as exc:
+        fallback = str(exc.args[0])
+    # Outside the handler: the handled exception's traceback, and the archive buffers its frames hold, are released
+    # before anything else is read (B2.3).
+    requests = 1
+    if fallback is not None:
+        listed, listing_requests = _listed_html(provider, target)
+        requests += listing_requests
+        for name, url in listed:
+            body = provider.fetch_document_bytes(url, max_bytes=RESPONSE_MAX_BYTES)
+            requests += 1
+            if body is None:
+                raise DocumentSetError(f"document_not_found:{name}")
+            candidates.append((name, body))
+    page = provider.fetch_document_text(f"{base}{target.accession_number}-index-headers.html")
+    requests += 1
+    if page is None:
+        raise DocumentSetError("header_not_found")
+    path = "archive" if fallback is None else "listing"
+    return DocumentSource(path, fallback, tuple(candidates), parse_header_records(page), requests)
+
+
+def _archive_candidates(provider: ArchiveScanProvider, url: str) -> list[tuple[str, bytes]]:
+    """The archive's HTML members, read in memory with their CRCs verified (B2.2, B2.3); other members are not read.
+
+    Raises :class:`_ArchiveFallback` for each B2.4 reason; any other error of the request propagates.
+    """
+    try:
+        body = provider.fetch_document_bytes(url, max_bytes=RESPONSE_MAX_BYTES)
+    except ResponseTooLarge:
+        raise _ArchiveFallback("archive_too_large") from None
+    if body is None:
+        raise _ArchiveFallback("archive_not_found")
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(body))
+    except _UNREADABLE:
+        raise _ArchiveFallback("archive_not_zip") from None
+    with archive:
+        return _html_members(archive)
+
+
+# ``ZipExtFile`` bounds decompression by the requested size only for these; it inflates a BZIP2, LZMA or Zstandard
+# member's compressed bytes without a limit, so B2.3's HTML total could not hold and such a member takes the listing
+# path (CPython 3.14 ``zipfile.ZipExtFile._read1``).
+_BOUNDED_METHODS: Final = frozenset({zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED})
+# What ``zipfile`` raises on a damaged archive besides ``BadZipFile``, from a mutation census of STORED and DEFLATE
+# archives (byte flips and truncations; the census script is on #3947 PR #3971): a damaged deflate stream
+# (``zlib.error``), a corrupted version, method or flag (``NotImplementedError``, itself a ``RuntimeError``), and a
+# corrupted offset (``ValueError``, "negative seek value"); plus a truncated member (``EOFError``) and an encrypted one
+# (``RuntimeError``). Anything else fails the attempt.
+_UNREADABLE: Final = (zipfile.BadZipFile, zlib.error, EOFError, RuntimeError, NotImplementedError, ValueError)
+
+
+def _html_members(archive: zipfile.ZipFile) -> list[tuple[str, bytes]]:
+    members = archive.infolist()
+    names = [m.filename for m in members]
+    if not members:
+        raise _ArchiveFallback("archive_empty")
+    if len(set(names)) != len(names):
+        raise _ArchiveFallback("archive_duplicate_name")
+    # B2.4 names every member, not only the HTML ones read.
+    if any("/" in n or "\\" in n for n in names):
+        raise _ArchiveFallback("archive_directory_member")
+    candidates: list[tuple[str, bytes]] = []
+    remaining = ARCHIVE_HTML_MAX_BYTES
+    for member in members:
+        if not member.filename.lower().endswith(INLINE_SUFFIXES):
+            continue
+        if member.compress_type not in _BOUNDED_METHODS:
+            raise _ArchiveFallback("archive_compression")
+        try:
+            # One read of at most one byte past the limit: a member is buffered once, never as chunks plus a joined
+            # copy, and inflates to at most ``remaining + 1`` bytes before the check below, inside B2.3's HTML total.
+            # A read that reaches the member's end checks its CRC (``ZipExtFile``).
+            with archive.open(member) as stream:
+                data = stream.read(remaining + 1)
+        except zipfile.BadZipFile as exc:
+            reason = "archive_bad_crc" if str(exc).startswith("Bad CRC-32") else "archive_not_zip"
+            raise _ArchiveFallback(reason) from None
+        except _UNREADABLE:
+            raise _ArchiveFallback("archive_not_zip") from None
+        if len(data) > remaining:
+            raise _ArchiveFallback("archive_html_too_large")
+        remaining -= len(data)
+        candidates.append((member.filename, data))
+    return candidates
+
+
+_SGML_DOCUMENT = re.compile(r"<DOCUMENT>(.*?)</DOCUMENT>", re.S | re.I)
+_SGML_TYPE = re.compile(r"<TYPE>([^\n<]*)", re.I)
+_SGML_FILENAME = re.compile(r"<FILENAME>([^\n<]*)", re.I)
+
+
+def parse_header_records(page: str) -> dict[str, tuple[tuple[str, ...], ...]]:
+    """``<FILENAME>`` → the ``<TYPE>`` values of each ``<DOCUMENT>`` record naming it, empty ones kept, from
+    ``{accession}-index-headers.html`` (PDS Technical Specification Table 9; the page escapes the SGML inside a
+    ``<PRE>``). The submission's own ``<TYPE>`` sits in the header outside every ``<DOCUMENT>`` and is not read."""
+    records: defaultdict[str, list[tuple[str, ...]]] = defaultdict(list)
+    for block in _SGML_DOCUMENT.findall(html.unescape(page)):
+        types = tuple(t.strip() for t in _SGML_TYPE.findall(block))
+        for name in _SGML_FILENAME.findall(block):
+            records[name.strip()].append(types)
+    return {name: tuple(r) for name, r in records.items()}
+
+
+def member_types(header: Mapping[str, tuple[tuple[str, ...], ...]], members: Iterable[str]) -> dict[str, str]:
+    """B1.3: each Inline XBRL document's one ``<TYPE>``. Raises :class:`DocumentSetError` when a document's filename
+    is absent from the header or repeated in it, or its record carries an empty type or more than one."""
+    types: dict[str, str] = {}
+    for name in members:
+        records = list(header.get(name, ()))
+        if not records:
+            raise DocumentSetError(f"header_missing:{name}")
+        if len(records) > 1:
+            raise DocumentSetError(f"header_repeated:{name}")
+        record = records[0]
+        if len(record) != 1 or not record[0]:
+            raise DocumentSetError(f"header_type:{name}")
+        types[name] = record[0]
+    return types
 
 
 def _locked_state_matches(cur: psycopg.Cursor[tuple], target: Target) -> bool:

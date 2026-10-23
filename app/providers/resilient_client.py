@@ -155,9 +155,14 @@ class ResilientClient:
         *,
         params: Mapping[str, str | int | float | bool] | None = None,
         headers: dict[str, str] | None = None,
+        stream: bool = False,
     ) -> httpx.Response:
-        """Throttled, retried GET request."""
-        return self._request("GET", url, params=params, headers=headers)
+        """Throttled, retried GET request.
+
+        ``stream=True`` returns the response with its body unread (``httpx`` ``send(stream=True)``); the caller
+        reads it with ``iter_bytes`` and must close it. A retried or raised streamed response is closed here.
+        """
+        return self._request("GET", url, params=params, headers=headers, stream=stream)
 
     def post(
         self,
@@ -265,6 +270,7 @@ class ResilientClient:
         params: Mapping[str, str | int | float | bool] | None = None,
         headers: dict[str, str] | None = None,
         json: object | None = None,
+        stream: bool = False,
     ) -> httpx.Response:
         """Execute a request with throttle + retry.
 
@@ -291,7 +297,8 @@ class ResilientClient:
             # recorded when ``build_request`` or the gate raises: no request went out.
             issued_at = datetime.now(UTC)
             try:
-                response = self._client.send(request)
+                # Unstreamed calls keep the plain ``send(request)`` every existing caller and fake relies on.
+                response = self._client.send(request, stream=True) if stream else self._client.send(request)
             except Exception as exc:
                 self._record_attempt(method, url, None, type(exc).__name__, wait_s, attempt, issued_at)
                 raise
@@ -303,6 +310,8 @@ class ResilientClient:
                     self._on_429()
                 if attempt >= self._max_retries:
                     # Final attempt — raise unconditionally and exit.
+                    if stream:
+                        response.close()
                     response.raise_for_status()
                     # Unreachable for real httpx.Response, but guard against
                     # mocks that swallow raise_for_status.
@@ -327,6 +336,8 @@ class ResilientClient:
                     diag["correlation_id"],
                     diag["body_preview"],
                 )
+                if stream:
+                    response.close()
                 time.sleep(sleep_s)
                 continue
 
