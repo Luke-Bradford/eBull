@@ -118,6 +118,7 @@ class _Doc:
     sha256: str  # of the bytes normalised by ``_normalised`` (informational: [Z1] gates on occurrences)
     injected: bool
     raw_sha256: str
+    encoding: str | None = None  # the XML parser's detected encoding, for members
 
 
 def _normalised(body: bytes) -> tuple[bytes, bool]:
@@ -126,26 +127,33 @@ def _normalised(body: bytes) -> tuple[bytes, bool]:
     return _TRAILING_BLANKS.sub(b"\n", stripped.replace(b"\r\n", b"\n")).rstrip(), bool(injected)
 
 
-def _text(body: bytes) -> str:
-    """Decoded as the XML parser decodes it (declaration, BOM, else UTF-8), for the v1 parser's ``str`` input."""
-    encoding = ET.fromstring(body, ET.XMLParser(huge_tree=True, resolve_entities=False, no_network=True)).getroottree()
-    # Python's UTF-16/32 codecs consume a BOM; a UTF-8 BOM survives decoding and would sit before the declaration.
-    return body.decode(encoding.docinfo.encoding or "utf-8").lstrip("\ufeff")
+# UTF-32 is tested before UTF-16, whose little-endian mark is a prefix of UTF-32's.
+_BOMS = (
+    (codecs.BOM_UTF32_LE, "utf-32"),
+    (codecs.BOM_UTF32_BE, "utf-32"),
+    (codecs.BOM_UTF8, "utf-8-sig"),
+    (codecs.BOM_UTF16_LE, "utf-16"),
+    (codecs.BOM_UTF16_BE, "utf-16"),
+)
+
+
+def _bom_codec(body: bytes) -> str | None:
+    """The codec a byte-order mark names; these codecs consume the mark."""
+    return next((codec for bom, codec in _BOMS if body.startswith(bom)), None)
+
+
+def _text(body: bytes, encoding: str | None) -> str:
+    """Decoded for the v1 parser's ``str`` input, without a second parse: by the BOM if there is one (lxml's
+    ``docinfo.encoding`` reports UTF-8 for a UTF-16 file with a BOM and no declaration), else by the encoding the XML
+    parser reported in ``classify`` (declaration, else UTF-8)."""
+    return body.decode(_bom_codec(body) or encoding or "utf-8")
 
 
 def _looks_inline(body: bytes) -> bool:
     """B1.2's guard for a file that does not parse as XML: its text (by BOM, else declared encoding, else UTF-8 with
     replacement) contains ``inlineXBRL``, or a lenient HTML parse finds the namespace name in an attribute value."""
-    for bom, codec in (
-        (codecs.BOM_UTF32_LE, "utf-32"),
-        (codecs.BOM_UTF32_BE, "utf-32"),
-        (codecs.BOM_UTF8, "utf-8-sig"),
-        (codecs.BOM_UTF16_LE, "utf-16"),
-        (codecs.BOM_UTF16_BE, "utf-16"),
-    ):
-        if body.startswith(bom):
-            break
-    else:
+    codec = _bom_codec(body)
+    if codec is None:
         declared = _DECLARED_ENCODING.match(body)
         codec = declared.group(1).decode("ascii") if declared else "utf-8"
     try:
@@ -172,7 +180,8 @@ def classify(body: bytes) -> _Doc:
         root.tag == f"{{{XHTML_NS}}}html" and root.prefix is None and next(root.iter(f"{{{IX_NS}}}*"), None) is not None
     )
     header = member and next(root.iter(f"{{{IX_NS}}}header"), None) is not None
-    return _Doc("member" if member else "non_member", header, digest, injected, raw)
+    encoding = root.getroottree().docinfo.encoding
+    return _Doc("member" if member else "non_member", header, digest, injected, raw, encoding)
 
 
 @dataclass
@@ -191,7 +200,7 @@ class _Path:
 
     def occurrences(self) -> list[Occurrence] | None:
         """The v1 parser's occurrences over this path's Inline XBRL documents, in listing order."""
-        return parse_document_set([(name, _text(body)) for name, body in self.bodies.items()])
+        return parse_document_set([(name, _text(body, self.docs[name].encoding)) for name, body in self.bodies.items()])
 
     def inline(self) -> dict[str, str]:
         return {name: d.sha256 for name, d in self.docs.items() if d.state == "member"}

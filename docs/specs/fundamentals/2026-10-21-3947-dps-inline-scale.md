@@ -797,7 +797,7 @@ overrides; text it does not name stands.
   - This is an acquisition and classification benchmark. Both paths run the v1 extraction and are timed the same way:
     requests at the script's 0.15 s spacing, unzip, classification and occurrence parsing, with the two paths in
     alternating order. v2's extraction is not built yet.
-  - Mean seconds per accession by arm are 2.53 to 3.34 for v1's path and 0.57 to 0.72 for the proposed one
+  - Mean seconds per accession by arm are 2.49 to 3.32 for v1's path and 0.57 to 0.73 for the proposed one
     (network-dependent; a rerun moves these, not the counts).
   - The script does not share the jobs process's limiter; production pace is B4.5.
 - **[Z3] v1 leaves set members out.** v1 builds contexts, units and occurrences only from documents holding an
