@@ -165,37 +165,43 @@ _UCS = {
 
 def _canonical(encoding: str) -> str:
     """Python's canonical codec name, so every spelling (``UTF_16``, ``utf16``, ``UTF-16``) compares as one; an
-    unknown name raises, and the accession is reported failed."""
+    unknown name raises ``ValueError``."""
     try:
-        return _UCS.get(encoding.upper().replace("_", "-"), None) or codecs.lookup(encoding).name
+        return _UCS.get(encoding.upper().replace("_", "-")) or codecs.lookup(encoding).name
     except LookupError as exc:
         raise ValueError(f"unknown declared encoding {encoding!r}") from exc
 
 
+def _codec(body: bytes, declared: str | None) -> str:
+    """The one decoding rule for both readers: the BOM; else the byte order of ``<?`` in the first bytes, for a UTF-16
+    or UTF-32 file without one (XML 1.0 Appendix F), whatever it declares; else the declared encoding by canonical
+    name; else UTF-8. A UTF-16/32 declaration on a file that starts neither way raises, so it is never mis-decoded."""
+    codec = _bom_codec(body) or next((c for prefix, c in _NO_BOM_ORDER if body.startswith(prefix)), None)
+    if codec:
+        return codec
+    if declared:
+        canonical = _canonical(declared)
+        if canonical in ("utf-16", "utf-32"):
+            raise ValueError(f"cannot read the byte order of a {declared} document without a BOM")
+        return canonical
+    return "utf-8"
+
+
 def _text(body: bytes, encoding: str | None) -> str:
-    """Decoded for the v1 parser's ``str`` input, without a second parse: by the BOM if there is one (lxml's
-    ``docinfo.encoding`` reports UTF-8 for a UTF-16 file with a BOM and no declaration), else by the encoding the XML
-    parser reported in ``classify`` (declaration, else UTF-8). With no BOM, a UTF-16 or UTF-32 declaration takes its
-    byte order from the first bytes, ``<`` and ``?`` (XML 1.0 Appendix F); an order it cannot read raises, so the
-    accession is reported failed, never silently mis-decoded."""
-    codec = _bom_codec(body)
-    if codec is None and encoding and _canonical(encoding) in ("utf-16", "utf-32"):
-        codec = next((c for prefix, c in _NO_BOM_ORDER if body.startswith(prefix)), None)
-        if codec is None:
-            raise ValueError(f"cannot read the byte order of a {encoding} document without a BOM")
-    return body.decode(codec or (_canonical(encoding) if encoding else "utf-8"))
+    """Decoded for the v1 parser's ``str`` input by :func:`_codec`, with the encoding the XML parser reported in
+    ``classify`` as the declaration (lxml reports UTF-8 for a UTF-16 file with a BOM and no declaration, which the BOM
+    overrides). No second parse; a decode error raises, and the accession is reported failed."""
+    return body.decode(_codec(body, encoding))
 
 
 def _looks_inline(body: bytes) -> bool:
-    """B1.2's guard for a file that does not parse as XML: its text (by BOM, else declared encoding, else UTF-8 with
-    replacement) contains ``inlineXBRL``, or a lenient HTML parse finds the namespace name in an attribute value."""
-    codec = _bom_codec(body)
-    if codec is None:
-        declared = _DECLARED_ENCODING.match(body)
-        codec = declared.group(1).decode("ascii") if declared else "utf-8"
+    """B1.2's guard for a file that does not parse as XML: its text, decoded by :func:`_codec` from the declaration
+    (UTF-8 with replacement when that rule fails), contains ``inlineXBRL``, or a lenient HTML parse finds the namespace
+    name in an attribute value."""
+    declared = _DECLARED_ENCODING.match(body)
     try:
-        text = body.decode(codec, "replace")
-    except LookupError:
+        text = body.decode(_codec(body, declared.group(1).decode("ascii") if declared else None), "replace")
+    except ValueError, LookupError:
         text = body.decode("utf-8", "replace")
     if "inlineXBRL" in text:
         return True
