@@ -713,9 +713,9 @@ class SecFilingsProvider(FilingsProvider):
             resp.raise_for_status()
             body = bytearray()
             for chunk in resp.iter_bytes():
-                body += chunk
-                if len(body) > max_bytes:
+                if len(body) + len(chunk) > max_bytes:
                     raise ResponseTooLarge(f"{absolute_url}: more than {max_bytes} bytes")
+                body += chunk
             return bytes(body)
 
     def fetch_submission_header(self, absolute_url: str) -> tuple[int, str]:

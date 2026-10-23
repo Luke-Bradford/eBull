@@ -154,16 +154,33 @@ def test_each_b2_4_reason_takes_the_listing_path(archive: bytes | Exception | No
     assert source.requests == 6
 
 
-@pytest.mark.parametrize("compression", [zipfile.ZIP_DEFLATED, zipfile.ZIP_BZIP2, zipfile.ZIP_LZMA])
-def test_a_corrupt_member_of_any_compression_method_takes_the_listing_path(compression: int) -> None:
+def test_a_corrupt_deflated_member_takes_the_listing_path() -> None:
     body = b"<html>" + b"inline xbrl " * 400 + b"</html>"
-    archive = bytearray(_zip([("a.htm", body)], compression=compression))
+    archive = bytearray(_zip([("a.htm", body)]))
     start = archive.index(b"a.htm") + len("a.htm")  # the local header's name; the compressed data follows it
     archive[start + 8 : start + 40] = bytes(32)
-    assert acquire_document_source(_Provider(bytes(archive)), _target()).fallback in (
-        "archive_not_zip",
-        "archive_bad_crc",
-    )
+    assert acquire_document_source(_Provider(bytes(archive)), _target()).fallback == "archive_not_zip"
+
+
+@pytest.mark.parametrize("compression", [zipfile.ZIP_BZIP2, zipfile.ZIP_LZMA])
+def test_an_html_member_whose_inflation_is_unbounded_takes_the_listing_path(compression: int) -> None:
+    archive = _zip([("a.htm", b"<html>" + bytes(1_000_000) + b"</html>")], compression=compression)
+    assert acquire_document_source(_Provider(archive), _target()).fallback == "archive_compression"
+    # Only HTML members are read, so another member's method does not matter.
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as mixed:
+        mixed.writestr("efc.htm", b"<html/>", compress_type=zipfile.ZIP_DEFLATED)
+        mixed.writestr("efc.xsd", b"<schema/>", compress_type=compression)
+    assert acquire_document_source(_Provider(buffer.getvalue()), _target()).candidates == (("efc.htm", b"<html/>"),)
+
+
+def test_the_bytes_limit_holds_across_chunks() -> None:
+    chunks = [b"a" * 5, b"b" * 5]
+    provider = _provider(httpx.MockTransport(lambda r: httpx.Response(200, content=iter(chunks))))
+    assert provider.fetch_document_bytes(_BASE + "a.htm", max_bytes=10) == b"a" * 5 + b"b" * 5
+    provider = _provider(httpx.MockTransport(lambda r: httpx.Response(200, content=iter(chunks))))
+    with pytest.raises(ResponseTooLarge):
+        provider.fetch_document_bytes(_BASE + "a.htm", max_bytes=9)
 
 
 def test_the_response_limit_reads_at_the_limit_and_falls_back_one_byte_over(monkeypatch: pytest.MonkeyPatch) -> None:

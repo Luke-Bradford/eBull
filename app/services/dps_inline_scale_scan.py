@@ -515,6 +515,12 @@ def _archive_candidates(provider: ArchiveScanProvider, url: str) -> list[tuple[s
         return _html_members(archive)
 
 
+# ``ZipExtFile`` bounds decompression by the requested size only for these; it inflates a BZIP2, LZMA or Zstandard
+# member's compressed bytes without a limit, so B2.3's HTML total could not hold and such a member takes the listing
+# path (CPython 3.14 ``zipfile.ZipExtFile._read1``).
+_BOUNDED_METHODS: Final = frozenset({zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED})
+
+
 def _html_members(archive: zipfile.ZipFile) -> list[tuple[str, bytes]]:
     members = archive.infolist()
     names = [m.filename for m in members]
@@ -530,6 +536,8 @@ def _html_members(archive: zipfile.ZipFile) -> list[tuple[str, bytes]]:
     for member in members:
         if not member.filename.lower().endswith(INLINE_SUFFIXES):
             continue
+        if member.compress_type not in _BOUNDED_METHODS:
+            raise _ArchiveFallback("archive_compression")
         try:
             # One read of at most one byte past the limit: a member is buffered once, never as chunks plus a joined
             # copy. A read that reaches the member's end checks its CRC (``ZipExtFile``).
@@ -539,8 +547,8 @@ def _html_members(archive: zipfile.ZipFile) -> list[tuple[str, bytes]]:
             reason = "archive_bad_crc" if str(exc).startswith("Bad CRC-32") else "archive_not_zip"
             raise _ArchiveFallback(reason) from None
         except Exception:  # noqa: BLE001 — B2.4: any member that cannot be read makes the archive unreadable
-            # zlib.error, bz2's OSError, LZMAError, ZstdError, a truncated member's EOFError, an encrypted member's
-            # RuntimeError, an unsupported method's NotImplementedError: the bytes are in memory, so none is transport.
+            # zlib.error, a truncated member's EOFError, an encrypted member's RuntimeError: the bytes are in memory,
+            # so none is transport.
             raise _ArchiveFallback("archive_not_zip") from None
         if len(data) > remaining:
             raise _ArchiveFallback("archive_html_too_large")
