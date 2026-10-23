@@ -79,7 +79,6 @@ FILING_SUMMARY: Final = "FilingSummary.xml"
 # ([Z5], 41,505,764 bytes); not a memory bound on the parser.
 RESPONSE_MAX_BYTES: Final = 256 * 1024 * 1024
 ARCHIVE_HTML_MAX_BYTES: Final = 256 * 1024 * 1024
-_MEMBER_CHUNK: Final = 1024 * 1024
 
 
 class ScanProvider(Protocol):
@@ -512,29 +511,30 @@ def _archive_candidates(provider: ArchiveScanProvider, url: str) -> list[tuple[s
         archive = zipfile.ZipFile(io.BytesIO(body))
     except zipfile.BadZipFile:
         raise _ArchiveFallback("archive_not_zip") from None
+    with archive:
+        return _html_members(archive)
+
+
+def _html_members(archive: zipfile.ZipFile) -> list[tuple[str, bytes]]:
     members = archive.infolist()
     names = [m.filename for m in members]
     if not members:
         raise _ArchiveFallback("archive_empty")
     if len(set(names)) != len(names):
         raise _ArchiveFallback("archive_duplicate_name")
+    # B2.4 names every member, not only the HTML ones read.
     if any("/" in n or "\\" in n for n in names):
         raise _ArchiveFallback("archive_directory_member")
     candidates: list[tuple[str, bytes]] = []
-    total = 0
+    remaining = ARCHIVE_HTML_MAX_BYTES
     for member in members:
         if not member.filename.lower().endswith(INLINE_SUFFIXES):
             continue
-        chunks: list[bytes] = []
         try:
-            with archive.open(member) as stream:  # ZipExtFile checks the CRC on reaching the end
-                while chunk := stream.read(_MEMBER_CHUNK):
-                    total += len(chunk)
-                    if total > ARCHIVE_HTML_MAX_BYTES:
-                        raise _ArchiveFallback("archive_html_too_large")
-                    chunks.append(chunk)
-        except _ArchiveFallback:
-            raise
+            # One read of at most one byte past the limit: a member is buffered once, never as chunks plus a joined
+            # copy. A read that reaches the member's end checks its CRC (``ZipExtFile``).
+            with archive.open(member) as stream:
+                data = stream.read(remaining + 1)
         except zipfile.BadZipFile as exc:
             reason = "archive_bad_crc" if str(exc).startswith("Bad CRC-32") else "archive_not_zip"
             raise _ArchiveFallback(reason) from None
@@ -542,7 +542,10 @@ def _archive_candidates(provider: ArchiveScanProvider, url: str) -> list[tuple[s
             # zlib.error, bz2's OSError, LZMAError, ZstdError, a truncated member's EOFError, an encrypted member's
             # RuntimeError, an unsupported method's NotImplementedError: the bytes are in memory, so none is transport.
             raise _ArchiveFallback("archive_not_zip") from None
-        candidates.append((member.filename, b"".join(chunks)))
+        if len(data) > remaining:
+            raise _ArchiveFallback("archive_html_too_large")
+        remaining -= len(data)
+        candidates.append((member.filename, data))
     return candidates
 
 

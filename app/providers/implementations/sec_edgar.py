@@ -25,6 +25,7 @@ Provider contract:
     populate external_identifiers during daily CIK refresh.
 """
 
+import contextlib
 import contextvars
 import hashlib
 import json
@@ -706,8 +707,7 @@ class SecFilingsProvider(FilingsProvider):
         **Contract:** the same as :meth:`fetch_document_text` (#448 / #453). Callers are pinned by
         ``tests/test_fetch_document_text_callers.py``.
         """
-        resp = self._http_tickers.get(absolute_url, stream=True)
-        try:
+        with contextlib.closing(self._http_tickers.get(absolute_url, stream=True)) as resp:
             if resp.status_code in (404, 410):
                 return None
             resp.raise_for_status()
@@ -717,8 +717,6 @@ class SecFilingsProvider(FilingsProvider):
                 if len(body) > max_bytes:
                     raise ResponseTooLarge(f"{absolute_url}: more than {max_bytes} bytes")
             return bytes(body)
-        finally:
-            resp.close()
 
     def fetch_submission_header(self, absolute_url: str) -> tuple[int, str]:
         """One GET of an archived ``<accession>.hdr.sgml`` (#3714): ``(status, body)``, no retry.
