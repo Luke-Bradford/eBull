@@ -156,7 +156,7 @@ def _looks_inline(body: bytes) -> bool:
         return True
     try:
         tree = lxml.html.fromstring(body)
-    except ET.ParserError, ValueError:
+    except ET.LxmlError, ValueError:  # LxmlError is the base of every lxml parser error
         return False
     return any(IX_NS in value for el in tree.iter() for value in el.attrib.values())
 
@@ -185,6 +185,7 @@ class _Path:
     docs: dict[str, _Doc] = field(default_factory=dict)
     bodies: dict[str, bytes] = field(default_factory=dict)  # Inline XBRL members only
     types: dict[str, list[str]] = field(default_factory=dict)
+    primary: list[str] = field(default_factory=list)
     parsed: list[Occurrence] | None = None
     listing: list[str] = field(default_factory=list)
 
@@ -253,7 +254,7 @@ def _archive(client: _Client, base: str, accession: str) -> _Path:
                     path.bodies[info.filename] = body
             else:
                 path.other_members.append(info.filename)
-        path.types = _header_types(client, base, accession, path)
+        path.types, path.primary = _header_types(client, base, accession, path)
         unmapped = sorted(
             n
             for n, d in path.docs.items()
@@ -266,19 +267,20 @@ def _archive(client: _Client, base: str, accession: str) -> _Path:
     return path
 
 
-def _header_types(client: _Client, base: str, accession: str, path: _Path) -> dict[str, list[str]]:
+def _header_types(client: _Client, base: str, accession: str, path: _Path) -> tuple[dict[str, list[str]], list[str]]:
     """``<FILENAME>`` → every ``<TYPE>`` the SGML header gives it (one entry per ``<TYPE>`` tag of each
-    ``<DOCUMENT>``, empty ones included), and the sequence-1 (primary) filename under ``""``. B1.3's rule, exactly one
-    non-empty type, is checked for Inline XBRL members only, by the caller."""
+    ``<DOCUMENT>``, empty ones included), and the sequence-1 (primary) filenames. B1.3's rule, exactly one non-empty
+    type, is checked for Inline XBRL members only, by the caller."""
     response = client.get(f"{base}/{accession}-index-headers.html", path)
     response.raise_for_status()
     types: dict[str, list[str]] = collections.defaultdict(list)
+    primary: list[str] = []
     for block in _SGML_DOCUMENT.findall(html.unescape(response.text)):
         name = m.group(1).strip() if (m := _SGML_TAG["FILENAME"].search(block)) else ""
         types[name].extend(t.strip() for t in _SGML_TAG["TYPE"].findall(block))
         if (m := _SGML_SEQUENCE.search(block)) and m.group(1).strip() == "1":
-            types[""].append(name)
-    return types
+            primary.append(name)
+    return types, primary
 
 
 def _instance_facts(client: _Client, base: str, names: list[str], path: _Path) -> set[tuple[str, str, Decimal]]:
@@ -400,7 +402,7 @@ def _measure(
     if headerless or accession == _CONTROL:
         # SEC's extracted instance against v1's occurrences: what v1 leaves out of the set, as SEC reads it.
         # Measurement-only request, deliberately outside the timed attempt and its request count ([Z2]).
-        instance = _instance_facts(client, base, new.types.get("", []), _Path())
+        instance = _instance_facts(client, base, new.primary, _Path())
         v1 = _occurrence_facts(new.parsed)
         stats["Z3_instance_facts"] += len(instance)
         stats["Z3_instance_facts_missing_from_v1"] += len(instance - v1)
