@@ -13805,3 +13805,27 @@ neighbouring container and match it.**
 - Enforced in: `app/services/sec_13f_dataset_ingest.py` (`capture_only` bypasses the retention gate only);
   `tests/test_thirteen_f_capture_db.py::test_capture_only_reaches_a_late_filing_behind_the_retention_cap`;
   `scripts/ab_3227_13f_included_managers_ingest.py`.
+
+### A set's membership rule is the spec's definition, not the element one member carries (#3947, 2026-10-23)
+
+- First seen in: #3947 Amendment 2. The DPS scan read an accession's Inline XBRL Document Set as the files holding an
+  `ix:header`. Inline XBRL 1.1 §8.1.3 requires one `ix:header` per *set*, and EDGAR treats any `.htm` attachment with
+  an XHTML root and any Inline XBRL element as a member (EDGAR XBRL Guide §11). 8-K recast exhibits
+  (`rcl-20200513_d2.htm`) carry facts and no header. In 30 sampled 8-Ks `scripts/measure_3947_xbrl_zip.py` found 21
+  such documents; EDGAR's extracted instances of their 19 accessions hold 148 DPS facts, 120 of them absent from v1.
+- Prevention: when code selects the members of a standard's set (a document set, a filing's exhibits, a holding
+  group), quote the standard's membership definition and test against it; a property most members share is not the
+  definition. Measure on the arm most likely to break it (here 8-K recasts), not only a random sample.
+- Enforced in: `docs/specs/fundamentals/2026-10-21-3947-dps-inline-scale.md` (Amendment 2, B1);
+  `scripts/measure_3947_xbrl_zip.py` ([Z3]).
+
+### A file served from www.sec.gov is not the filer's bytes (#3947, 2026-10-23)
+
+- First seen in: #3947 Amendment 2. Comparing an accession's `-xbrl.zip` members with the same files fetched one by
+  one, every served Inline XBRL document differed: the web front end appends a bot-detection `<script>` before
+  `</body>`, and serves LF line ends without trailing blanks where the filer's bytes have CRLF and blanks.
+- Prevention: never compare, hash or de-duplicate EDGAR documents by the bytes of a served copy. Compare parsed
+  content, or take the filer's bytes from the accession's archive; when bytes must be compared, name the exact
+  normalisation and count what it removed.
+- Enforced in: `scripts/measure_3947_xbrl_zip.py` ([Z1]); `docs/specs/fundamentals/2026-10-21-3947-dps-inline-scale.md`
+  (Amendment 2, B4.2).

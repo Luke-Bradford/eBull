@@ -767,6 +767,265 @@ and the A/B rework.
     exception, and the rollback is not complete until the list is empty or each exception is accepted on #3947.
   - **Step 5** also drops `sec_inline_scale_population` and `sec_inline_scale_discovery`.
 
+## Amendment 2: the document set comes from the accession's XBRL archive
+
+At the scan's v1 pace the `raw` backlog alone was about 42 daily runs (#3947, 2026-10-23: about 630 accessions per
+run against 26,762 pending; fetch was about 98% of an attempt). Measuring a faster acquisition found a second defect:
+v1 leaves members of the document set out of it. Figures marked [Z…] come from
+`PYTHONPATH=. uv run python -m scripts.measure_3947_xbrl_zip` (dev DB and EDGAR, 2026-10-23, at `PARSER_VERSION`
+v1). The script takes a seeded 30 accessions from each of five disjoint arms of the scan's own population
+(`_POPULATION_SQL`): form 8-K, else scanned `inline`, else scanned `not_inline`, else unscanned with the concept in raw,
+else history-only. That is 150 accessions; the seed selects from the population as it stands, so a rerun on a later
+day may select others. Every [Z] figure is a sample figure, not a population claim. Each subsection names the text it
+overrides; text it does not name stands.
+
+### Finding
+
+- **[Z1] The archive yields the same occurrences as the listing.** For each sampled accession the script reads the
+  Inline XBRL documents of `{accession}-xbrl.zip` and of the `index.json` listing, and runs the v1 extraction
+  (`parse_document_set`) over B1-classified, XML-decoded inputs from each.
+  - The members have the same names in 150 of 150, and the extraction outcome and occurrences are equal in 150 of 150
+    (449 occurrences). No candidate was `undecidable`.
+  - Bytes are reported, not gated: the served copy is not the filer's bytes. Of the 117 accessions with Inline XBRL
+    members, the raw bytes are equal in 0. Every served member (147) carries a `<script>` element that `www.sec.gov`
+    appends before `</body>`, and no archive member does. The served copy also has LF line ends and no blanks before
+    a line end where the archive's bytes have CRLF or blanks. With those three differences removed the bytes are equal
+    in 116 of 117; MCO `0001059556-19-000004` still differs and has equal occurrences.
+- **[Z2] Two requests instead of about ten.** v1's path makes 8.47 to 11.40 requests per accession by arm:
+  `index.json`, `FilingSummary.xml` and every listed HTML file, EDGAR's own `-index.html` and `-index-headers.html`
+  pages included. The proposed acquisition makes 2: the archive and the SGML header.
+  - This is an acquisition and classification benchmark. Both paths run the v1 extraction and are timed the same way:
+    requests at the script's 0.15 s spacing, unzip, classification and occurrence parsing, with the two paths in
+    alternating order. v2's extraction is not built yet.
+  - Mean seconds per accession by arm are 2.49 to 3.32 for v1's path and 0.57 to 0.73 for the proposed one
+    (network-dependent; a rerun moves these, not the counts).
+  - The script does not share the jobs process's limiter; production pace is B4.5.
+- **[Z3] v1 leaves set members out.** v1 builds contexts, units and occurrences only from documents holding an
+  `ix:header`.
+  - 21 sampled Inline XBRL documents hold none, all in the 8-K arm; their `<TYPE>`s are EX-99 exhibits and, in three
+    cases, `8-K`. An independent regex census (`_regex_census`, neither lxml nor the app parser; a lower bound, as it
+    reads only one lexical form) finds the concept in 16 of them, 125 occurrences.
+  - EDGAR's extracted instance (`*_htm.xml`, SEC's own reading of the whole set) of the 19 accessions holding such
+    documents carries 148 non-nil facts of the concept. 120 are missing from v1's occurrences, and v1 has none the
+    instance lacks; for example, 18 of 18 are missing for `0001020569-22-000169` and 17 of 20 for
+    `0001130310-20-000049`.
+  - Control: for EFC `0001628280-26-055148`, the stored v1 occurrences (4, read before any fetch), the census, the v1
+    extraction and the instance all give 4.
+  - A fact matched only by an omitted occurrence reads `no_match` under v1.
+- **[Z4] Two header-bearing documents.** 8 of the 30 sampled 8-Ks have an `ix:header` in the primary document and in
+  an EX-99.1; their `<TYPE>`s are `8-K` and `EX-99.1`, both of the primary set.
+- **[Z5] Archive contents.** All 30 sampled `not_inline` archives hold an `.xml` file other than the linkbases and no
+  HTML. The archives of the other arms held non-Inline HTML members in 29, 30, 30 and 25 of 30 (`inline`,
+  `unscanned_raw`, `history`, 8-K). The largest unpacked archive was 41,505,764 bytes.
+
+The run was on 2026-10-23 after that day's 02:45 UTC retention sweep, which moved accessions from the `raw` class to
+`history` (A1); the arm sizes the script prints are from that run.
+
+### Source rule
+
+| decision | rule | source |
+|---|---|---|
+| what an Inline XBRL document is | an attachment whose root element is `html`, with no prefix, in the XHTML namespace `http://www.w3.org/1999/xhtml`, and that contains any element in the Inline XBRL namespace `http://www.xbrl.org/2013/inlineXBRL`. A file that is not well-formed XML has no such root, so it is not one | EDGAR XBRL Guide (August 2026, https://www.sec.gov/files/edgar/filer-information/specifications/xbrl-guide.pdf) §11, "(Previously EFM § 5.2.5)": "EDGAR validates a file attachment with suffix .htm as an Inline XBRL document when its root element is html in namespace … (its namespace prefix must be empty) and it contains any element in namespace …"; "An .htm attachment that does not meet these two criteria … is not an Inline XBRL document". The Guide's PDF prints both namespace names with `https://`. The names are those of XHTML and of Inline XBRL 1.1 Part 1, which this scan already resolves (`IX_NS`, `app/services/inline_xbrl_dps.py`); no `https://` spelling is accepted |
+| which documents form the set | every Inline XBRL document of the submission except attachments EX-FILING FEES and EX-98, as one Inline XBRL Document Set. A document need not hold an `ix:header`; a set holds at least one | Guide §11: "Inline XBRL formatted attachments are processed and validated together as an Inline XBRL Document Set (IXDS)"; "Certain exhibit attachments are excluded from the primary IXDS … Attachment EX-FILING FEES … Attachment EX 98". Inline XBRL 1.1 Part 1 §3.1 (an Inline XBRL Document contains Inline XBRL Elements) and §8.1.3 ("There MUST be at least one ix:header element in the Inline XBRL Document Set") |
+| which attachment type a document has | the `<TYPE>` (CONFORMED DOCUMENT TYPE) of its `<DOCUMENT>` in the submission's SGML header | EDGAR Public Dissemination Service Technical Specification (https://www.sec.gov/files/info/edgar/specifications/pds_dissemination_spec.pdf), Table 9 |
+| where the documents are read from | `{accession}-xbrl.zip`, which holds every Inline XBRL document of the submission | PDS Technical Specification §2.3.7: the archive is in a dissemination with XBRL documents "Always", and "contains all filer-submitted XBRL, all Inline XBRL formatted documents, and all .jpg and .gif files referenced …" |
+
+- **The `<XBRL>` indicator.** PDS §2.3.2 says the document header of an Inline XBRL `.htm` carries the XBRL
+  indicator (Table 9, `<XBRL>`). It would be a structured membership field. `-index-headers.html` does not carry it:
+  each `<DOCUMENT>`'s `<TEXT>` there is replaced by a link (checked on `0000884887-20-000014` and
+  `0001411342-19-000100`, 2026-10-23). It sits only inside the full submission text, which holds every document's
+  body. Classification therefore applies Guide §11, the criterion EDGAR itself applies.
+- **The archive's other HTML.** Nothing documents that the archive also holds non-Inline HTML exhibits [Z5], and
+  nothing here relies on it.
+
+### B1. The document set (overrides "Construction → Document set", its PR (a) build note, and the parser's set rule)
+
+1. **Candidates** are the source's files with suffix `.htm`, `.html` or `.xhtml`. EDGAR's rule names `.htm`; the
+   other two are compatibility suffixes kept from v4.
+2. **Classification.** This replaces v4's parser-contract clause that "a document that does not parse" fails the
+   attempt, for candidates; a set member has parsed by definition. A candidate's bytes go intact to the XML parser,
+   which detects the encoding (BOM, declaration, else UTF-8).
+
+   | parse | evidence | result |
+   |---|---|---|
+   | succeeds | unprefixed XHTML `html` root and an element in the Inline XBRL namespace, by expanded names | Inline XBRL document |
+   | succeeds | otherwise | not one |
+   | fails (malformed or undecodable) | the text, decoded by its BOM (UTF-8, UTF-16 or UTF-32), else its declared encoding, else UTF-8 with replacement, contains `inlineXBRL`; or a lenient HTML parse finds the namespace name in an attribute value | the attempt fails, `undecidable:<name>` |
+   | fails | neither | not one |
+
+   - A file that is not well-formed XML has no root element, so EDGAR's rule already makes it a non-member. The
+     `undecidable` row is stricter than the rule: it refuses to decide a damaged file that looks Inline.
+   - There is no byte-search prefilter, so neither an encoding nor a character reference can make a well-formed
+     member a non-member.
+3. **Types.** Every attempt reads the SGML header (`{accession}-index-headers.html`). It must give exactly one
+   non-empty `<TYPE>` for every Inline XBRL document. A failed request fails the attempt, and so does an Inline XBRL
+   document whose filename is absent, repeated, or carries an empty type or more than one type. Records of other
+   files are not checked.
+4. **The set** is every Inline XBRL document whose `<TYPE>` is not `EX-FILING FEES` or `EX-98`.
+   - **An empty set is `not_inline`.** That covers no Inline XBRL document at all, and only excluded ones.
+     - The outcome means "no primary set". It follows only from classifying every candidate of a source that holds
+       every Inline XBRL document.
+     - No other evidence (a non-Inline primary document, an `.xml` file) is used, since the Guide allows an Inline
+       XBRL exhibit beside a non-Inline primary.
+   - Documents in the set but no `ix:header` among them: the attempt fails (`no_ix_header`).
+   - **Separate sets are out of scope.**
+     - What happens to them. EX-FILING FEES and EX-98 documents are classified like any candidate, so an
+       `undecidable` one fails the attempt. They take no part in resolution or extraction.
+     - Why. EDGAR processes each as its own instance (Guide §11), and nothing shows that companyfacts, the source of
+       the stored facts this scan matches, reads those instances.
+     - The consequence. A stored fact matched only by an occurrence in one of them reads `no_match`, so its group
+       stays at decisions-off (A3).
+     - B4 lists any v1 stored occurrence that lies in one, and each listed occurrence blocks until it is accepted
+       on #3947.
+5. **Resolution** runs within the set, as in v4:
+   - contexts and units resolve across its documents;
+   - a duplicate id fails the attempt;
+   - so does an Inline XBRL element with a `target` attribute (an HTML `<a target>` does not).
+
+   A header-less member cannot supply a context or a unit: they sit in `ix:resources`, which "MUST be a child of
+   the ix:header element" (Inline XBRL 1.1 Part 1 §14.1.1, content model Table 15). So including such members cannot
+   change how an existing occurrence resolves.
+
+### B2. How documents are obtained (overrides only acquisition: in "The scan → Attempt", in "Order and budget", and the module's "Attempt" rule)
+
+Attempt initialisation, failure accounting, backoff, exhaustion, conditional publication, the queue and the A4
+enqueue predicate are unchanged.
+
+1. **Requests.** Every request goes through the provider's shared SEC limiter.
+   - `FilingSummary.xml` and the SGML header use `fetch_document_text`, as now.
+   - The archive and the listing path's HTML files use a new provider method that returns bytes, `None` on 404 or
+     410.
+   - `tests/test_fetch_document_text_callers.py` pins the callers of both methods. This overrides "Order and
+     budget"'s statement that all requests use `fetch_document_text`.
+2. **Archive.** One GET of
+   `https://www.sec.gov/Archives/edgar/data/{cik}/{accession without dashes}/{accession}-xbrl.zip`. Members are read
+   in memory, never written to disk. Only HTML members are read, and the CRC of each one read is verified; other
+   members are not read.
+3. **Limits.** These are policy limits on what one attempt buffers, fixed by construction at about six times the
+   largest unpacked archive measured [Z5]. They are not a memory bound on the parser; v1 also holds every document
+   of an accession at once.
+   - The response may be at most 256 MiB. The new method streams it and stops at the first byte over.
+   - The HTML members may total at most 256 MiB, counted as bytes actually read and stopping at the first byte over.
+   - On either, the archive's buffers are released before anything else is read.
+4. **Listing path.** The scan takes v4's listing path when the archive does any of these:
+   - returns 404 or 410;
+   - exceeds a limit;
+   - is not a readable zip, fails a CRC check, or holds no member;
+   - holds two members with one name, or a member name with a directory part.
+
+   The listing path is `index.json`; then `FilingSummary.xml`, where a missing or unparseable summary excludes
+   nothing; then every listed HTML file except the rendered pages, as bytes. B1 then applies to the listed files.
+   Each fallback is counted by reason, and each generation records which path produced it. Any other failure of the
+   archive request fails the attempt. A failed attempt leaves the active generation in force, as in v4.
+5. **`documents`** (sql/514) counts the candidate files classified on the path that produced the generation. It is
+   not comparable with v1's counts, which included EDGAR's index pages and every listed HTML file. The run result
+   adds archive and listing-path counts and the request count.
+
+### B3. Version
+
+`PARSER_VERSION` becomes `dps-inline-scale-v2`.
+- **Eligibility.** Under v4's rule every accession in the population is eligible again: `raw`, `history`, prior
+  failures and the exhausted.
+- **Readiness.** `work_state` counts an accession done only at the current version, so the 1,690 accessions done at
+  v1 count as pending again, and Stage 1 readiness waits for their v2 scans.
+- **Until rescanned,** an accession's v1 generation stays the active one that decisions read (v4 "Version bump"). A v2
+  attempt that fails or exhausts leaves it so.
+- **On success,** a v2 scan enqueues by the unchanged rules, including A4's candidate predicate. The drain stays off
+  while the flag is off.
+
+### B4. Acceptance (corpus rung)
+
+1. **Manifest, before any network work.** In one snapshot the replay script writes, with the git SHA:
+   - every accession with an active generation, with its scan row and every stored occurrence field (the baseline);
+   - the seeded supplement: 100 accessions each from unscanned `raw`, `history`, and those with a failed attempt at
+     v1, disjoint from the baseline and each other, all of an arm when it has fewer.
+
+   Results are written per accession, so a run resumes. Every manifest accession ends with a result or an
+   `incomplete` mark.
+2. **Path invariance, every manifest accession.** The v2 code reads both sources and runs B1. Each accession records
+   the archive's status. It passes when both sources give the same set (names) and the same occurrences.
+   - Only an accession whose archive was read counts as invariance evidence.
+   - 404/410 accessions are listed apart, with their listing-path result.
+   - An accession with an `undecidable` candidate, on either source, is not counted as passing; it is listed.
+3. **Against v1, every baseline accession.**
+   - **No loss:** every stored occurrence is reproduced with the same document, element ordinal and every stored
+     field, and every outcome is unchanged.
+   - **Additions are the header-less members.** Every occurrence v2 adds lies in a set member with no `ix:header`.
+   - **SEC's instance is the completeness oracle.** EDGAR writes an extracted instance (`{primary document}_htm.xml`,
+     PDS §2.3.7) of every Inline submission: SEC's own reading of the whole set.
+     - **It passes when,** for every manifest accession with a set, two sets are equal. One is the (`contextRef`,
+       `unitRef`, value) of v2's resolved non-nil occurrences, with the instance value. The other is the concept's
+       non-nil facts in that instance.
+     - **A difference blocks.** Unresolved occurrences are listed beside it.
+     - **The oracle does not depend on the parser.** It fails an expansion that adds nothing where SEC's instance has
+       facts. It also fails an occurrence read with wrong fields.
+     - **The [Z3] accessions are frozen in the replay** with their instance counts (see [Z3]).
+   - **Any other difference blocks** unless it is one of these, each listed with its evidence:
+     - a document v1 read that B1 does not count as a member (a prefixed or non-XHTML root);
+     - a stored occurrence in an EX-FILING FEES or EX-98 document (B1.4);
+     - a stored field changed by decoding, listed with both values and the document's declared encoding. It passes
+       only if the v2 value is the text decoded by the declared encoding or BOM (XML 1.0 §4.3.3, Appendix F) and
+       the v1 value is not;
+     - an attempt that fails at v2 because a newly included member carries an Inline XBRL `target`.
+4. **Completeness.** A transport error (connection, timeout, 429 or 5xx) is retried up to 3 times. An accession
+   still failing is `incomplete`, and the replay passes only with none.
+
+   The replay reports:
+   - accessions with added occurrences;
+   - added occurrences with `scale` > 0 or unresolved;
+   - archive fallbacks by reason;
+   - end-to-end seconds per accession.
+5. **Pace, after deploy (monitoring with a decision rule).**
+   - **Post on #3947** the first two v2 runs' attempted, succeeded, failed and fallback counts and their duration
+     (`job_runs`).
+   - **Report the work state at v2.** `raw` clearance and Stage 1 readiness are reported separately, because
+     readiness also needs `history_candidate` and discovery.
+   - **Project runs to Stage 1** as (pending `raw` + pending `history_candidate`) ÷ succeeded per run, stating the
+     share that draining and discovery take once the flag is on. This is a lower bound. It omits population and
+     candidate growth, retry backoff, and exhaustion, and each run note re-measures it.
+   - **Decision rule.** If a run with draining off succeeds on fewer than 1,884 accessions, three times the 628 of the
+     2026-10-22 01:54 UTC v1 run, the cause is found and posted before any other pace lever (concurrency, a second
+     window) is considered.
+6. **Fixtures.**
+   - **The header-less case.** A multi-document archive whose header-less member holds two occurrences with known
+     fields. It must give exactly those, per-document ordinals, and the same result from the archive and from the
+     listing.
+   - **`not_inline`.** A `not_inline` archive.
+   - **Fallbacks to the listing path:**
+     - 404 and 410;
+     - a response and an HTML total each at the limit (read) and one byte over (fallback);
+     - a CRC failure and a response that is not a zip;
+     - an empty archive, duplicate names, and a directory member.
+   - **A 500 on the archive.** The attempt fails.
+   - **Classification:**
+     - a UTF-16 member with a BOM, which is a member;
+     - a malformed UTF-32 file with a BOM that contains `inlineXBRL` (`undecidable`);
+     - a namespace declared through a character reference, which is a member;
+     - an Inline XBRL prefix other than `ix`, which is a member;
+     - an `.xhtml` and an `.html` candidate;
+     - a malformed file that declares the namespace (`undecidable`), and one that does not (non-member);
+     - a prefixed root and a non-XHTML root (non-members);
+     - the namespace name in text with no Inline XBRL element (non-member);
+     - an HTML `<a target>` (allowed), and an Inline XBRL element with `target` (fails).
+   - **Types and sets:**
+     - a member typed `EX-FILING FEES` (dropped);
+     - members typed `8-K` and `EX-99.1` (both kept);
+     - a failed header request, a missing type, two types in one record, a repeated filename, and a member the
+       header does not list (each fails);
+     - an accession whose only Inline XBRL documents are typed `EX-98`, and one whose only ones are typed
+       `EX-FILING FEES` (each `not_inline`);
+     - members with no `ix:header` (`no_ix_header`).
+   - **Generation.** Every failure branch above leaves the active generation intact.
+   - **DB:**
+     - a v2 rescan of a v1-done accession of a candidate instrument enqueues it under A4's candidate predicate when
+       neither its old nor its new generation holds a positive-scale or unresolved occurrence;
+     - the existing revision-preservation and enqueue fixtures pass at v2;
+     - a v2 failure and a v2 exhaustion each keep the v1 generation active, `work_state` counts them retrying and
+       exhausted, and a flag-on normalisation reads the v1 occurrences;
+     - a v2 success: `work_state` counts it done, and a flag-on normalisation reads the v2 occurrences.
+7. **Cross-source check.** One [Z3] document's added occurrences are compared by hand with the document on EDGAR,
+   and the comparison is recorded with its figures.
+
 ## Checkpoint record
 
 - **Round 1** (Codex, 45 findings), applied in v2:
@@ -873,3 +1132,45 @@ and the A/B rework.
   - `discovered_at` is set only from a complete payload (7).
   - The A/B runs quiesced and retries a serialization failure (8).
   - v4's refusal fixture is replaced (9), and "permanently" became conditional (10).
+- **Amendment 2, round 1** (Codex, 27 findings, 3 blocking), applied in the second draft:
+  - Separate sets: EX-FILING FEES and EX-98 are separated by attachment type, not by duplicate ids (1, 2).
+  - Classification: exact namespace names (3), EDGAR's exact rule with compatibility suffixes named (4),
+    `not_inline` from classification alone (5), and no byte prefilter, with `undecidable` failing (6, 7).
+  - Measurement: classification errors kept apart (8); occurrences compared, not only names (9); unmeasured claims
+    removed (10); disjoint arms including history (11); timing labelled (12).
+  - Limits, fallbacks and archive validity (13–15). Overrides scoped to acquisition (16, 23).
+  - Acceptance: two-source path invariance (17); intended differences enumerated (18); completeness (19); a frozen
+    manifest (20); fixtures (21); `documents` defined (22); enqueue, readiness and projection (24–26). Wording (27).
+- **Amendment 2, round 2** (Codex, 17 new findings, 3 blocking; 14 of 27 judged resolved), applied in the third draft:
+  - Every attempt reads the SGML header and types every member; separation no longer depends on header count (29, 1).
+  - An unambiguous type map (31).
+  - `target` limited to Inline XBRL elements (32).
+  - Byte equality reported, not gated (33, 39).
+  - Archive provenance required (34).
+  - Pace given a decision rule (36).
+  - Supplement manifest (37).
+  - Measurement labels and accounting (38, 40, 43, 44).
+  - CRC scope (41).
+  - Sample wording (42).
+  - Finding 28, the `<XBRL>` indicator: `-index-headers.html` was checked and does not carry it, so classification
+    applies Guide §11, recorded under the source rule.
+- **Amendment 2, round 3** (Codex, the cap; 11 new findings, 1 blocking; round-1 and round-2 findings judged resolved
+  apart from 6, 8, 10, 12, 17, 20, 21, 24–26, 28, 30, 31, 35, 38, 39 and 40). Applied without a fourth round, as v4
+  and Amendment 1 did:
+  - The completeness oracle is EDGAR's extracted instance, not the regex census (45, 17, 35). The census stays a
+    lower-bound measurement. The script now reports the instance comparison and the EFC control with its stored
+    baseline (51).
+  - Classification is one table, replacing v4's parse-failure clause for candidates. A damaged file that looks Inline
+    is `undecidable` (6, 28, 55). Membership itself stays EDGAR's rule.
+  - An empty primary set is `not_inline`, with fixtures (49). Separate sets are classified but take no part in
+    resolution or extraction, with the reason and the matching consequence stated (30, 54).
+  - Measurement: undecidable accessions are excluded from equality (8, 40). Timing is symmetric and labelled an
+    acquisition benchmark (12, 46, 47). `None` is kept apart from `[]` (48). Script counts are per member (52), and
+    byte figures cover non-empty comparisons only (53). The summary's HTTP errors propagate (38). Every member must
+    map to exactly one type (31).
+  - Fixtures, enqueue, readiness and projection wording (21, 24, 25, 26).
+  - **Rebutted: 50.** A header-less member cannot change an existing occurrence's resolution: contexts and units sit in
+    `ix:resources`, which must be a child of `ix:header` (Inline XBRL 1.1 §14.1.1, Table 15). Recorded under B1.5. A
+    v2 failure on a new member's `target` is listed as an intended difference.
+  - **Not applied: 20 and 39, for the measurement script only.** Its figures are dated sample measurements,
+    reproducible by command and seed with the caveat stated; the replay's manifest (B4.1) is the frozen one.
