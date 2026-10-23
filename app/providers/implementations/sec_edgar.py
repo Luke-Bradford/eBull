@@ -189,6 +189,10 @@ def _zero_pad_cik(cik: str | int) -> str:
     return str(int(cik)).zfill(10)
 
 
+class ResponseTooLarge(Exception):
+    """:meth:`SecFilingsProvider.fetch_document_bytes` read more than its ``max_bytes``."""
+
+
 @dataclass(frozen=True)
 class CikMappingResult:
     """Result of a conditional-GET fetch of company_tickers.json.
@@ -691,6 +695,30 @@ class SecFilingsProvider(FilingsProvider):
             return None
         resp.raise_for_status()
         return strip_sec_edge_script(resp.text)
+
+    def fetch_document_bytes(self, absolute_url: str, *, max_bytes: int) -> bytes | None:
+        """The body of a ``www.sec.gov`` archive file as bytes, as served (#3947 Amendment 2 B2.1).
+
+        Streamed through the same shared limiter and retry as :meth:`fetch_document_text`. ``None`` on 404 / 410;
+        other HTTP errors raise. Raises :class:`ResponseTooLarge` once more than ``max_bytes`` have been read, and
+        stops reading there. The bytes are not decoded and not stripped: a caller that parses them owns the encoding.
+
+        **Contract:** the same as :meth:`fetch_document_text` (#448 / #453). Callers are pinned by
+        ``tests/test_fetch_document_text_callers.py``.
+        """
+        resp = self._http_tickers.get(absolute_url, stream=True)
+        try:
+            if resp.status_code in (404, 410):
+                return None
+            resp.raise_for_status()
+            body = bytearray()
+            for chunk in resp.iter_bytes():
+                body += chunk
+                if len(body) > max_bytes:
+                    raise ResponseTooLarge(f"{absolute_url}: more than {max_bytes} bytes")
+            return bytes(body)
+        finally:
+            resp.close()
 
     def fetch_submission_header(self, absolute_url: str) -> tuple[int, str]:
         """One GET of an archived ``<accession>.hdr.sgml`` (#3714): ``(status, body)``, no retry.

@@ -587,3 +587,43 @@ def test_shared_last_request_coordinates_throttle(_patch_time: MagicMock) -> Non
     _patch_time.sleep.assert_called()
     sleep_arg = _patch_time.sleep.call_args_list[0][0][0]
     assert sleep_arg > 0
+
+
+# ---------------------------------------------------------------------------
+# Streamed GET (#3947 Amendment 2 B2.3)
+# ---------------------------------------------------------------------------
+
+
+def _streamed(status_code: int) -> httpx.Response:
+    """A response whose body is unread, as ``send(stream=True)`` returns it."""
+    return httpx.Response(
+        status_code, stream=httpx.ByteStream(b"body"), request=httpx.Request("GET", "https://example.com/test")
+    )
+
+
+def test_streamed_get_returns_the_body_unread_and_closes_each_retried_response(_patch_time: MagicMock) -> None:
+    r503, r200 = _streamed(503), _streamed(200)
+    client, mock_httpx = _make_client([r503, r200])
+
+    result = client.get("/test", stream=True)
+
+    assert result is r200 and not r200.is_closed
+    assert r503.is_closed
+    assert all(call.kwargs == {"stream": True} for call in mock_httpx.send.call_args_list)
+    assert result.read() == b"body"
+
+
+def test_streamed_get_closes_the_final_retryable_response_before_raising(_patch_time: MagicMock) -> None:
+    responses = [_streamed(429) for _ in range(4)]
+    client, _ = _make_client(responses)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        client.get("/test", stream=True)
+
+    assert all(r.is_closed for r in responses)
+
+
+def test_unstreamed_get_sends_without_streaming() -> None:
+    client, mock_httpx = _make_client([_make_response(200)])
+    client.get("/test")
+    assert mock_httpx.send.call_args.kwargs == {}
