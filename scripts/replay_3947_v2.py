@@ -439,10 +439,14 @@ def report(out: Path) -> int:
         elif listing is None:
             counts["invariance_fail"] += 1
             blocking.append(f"invariance {accession}: listing path failed ({record.get('listing_error')})")
+        elif "error" in (archive["outcome"], listing["outcome"]):
+            # A failed read is not invariance evidence, even when both sources fail alike.
+            counts["invariance_read_failed"] += 1
+            blocking.append(f"read failed {accession}: archive {archive.get('error')}, listing {listing.get('error')}")
         elif (
-            archive.get("set") == listing.get("set")
+            # Membership by name, not order: the archive's member order need not be the listing's.
+            sorted(archive["set"]) == sorted(listing["set"])
             and archive["outcome"] == listing["outcome"]
-            and archive.get("error") == listing.get("error")
             and _canonical(archive.get("occurrences", [])) == _canonical(listing.get("occurrences", []))
         ):
             counts["invariance_pass"] += 1
@@ -455,6 +459,13 @@ def report(out: Path) -> int:
         if primary is None:
             blocking.append(f"no source {accession}: {record.get('listing_error')}")
             continue
+        if (
+            primary["outcome"] == "error"
+            and accession not in baseline  # B4.3 below decides a baseline accession's failed read
+            and not primary["error"].startswith("undecidable:")  # listed above (B4.2)
+            and not (archive and listing)  # both read: decided by the invariance check above
+        ):
+            blocking.append(f"read failed {accession}: {primary['error']}")
 
         # B4.3 against v1, baseline accessions.
         if accession in baseline:
