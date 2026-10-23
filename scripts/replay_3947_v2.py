@@ -362,6 +362,23 @@ def _replay_with_retries(provider: SecFilingsProvider, accession: str, cik: str)
     raise AssertionError("unreachable")
 
 
+def _last_records(path: Path) -> dict[str, dict[str, Any]]:
+    """Each accession's last record. A run killed mid-write can leave the final line truncated: it is dropped with a
+    note, so its accession is replayed again. Any other malformed line raises: the evidence file is damaged."""
+    lines = [line for line in path.read_text().splitlines() if line.strip()]
+    records: dict[str, dict[str, Any]] = {}
+    for index, line in enumerate(lines):
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            if index != len(lines) - 1:
+                raise
+            print(f"dropped a truncated last line of {path}: {line[:80]!r}", flush=True)
+            continue
+        records[record["accession"]] = record
+    return records
+
+
 def run(out: Path) -> None:
     manifest = json.loads((out / "manifest.json").read_text())
     results_path = out / "results.jsonl"
@@ -369,9 +386,7 @@ def run(out: Path) -> None:
     if results_path.exists():
         # An accession whose last record (the one the report reads) is ``incomplete``, or has an unavailable oracle,
         # is replayed again.
-        last = {
-            (r := json.loads(line))["accession"]: r for line in results_path.read_text().splitlines() if line.strip()
-        }
+        last = _last_records(results_path)
         done = {
             accession
             for accession, r in last.items()
@@ -417,11 +432,7 @@ def _canonical(occurrences: list[dict[str, Any]]) -> list[str]:
 
 def report(out: Path) -> int:
     manifest = json.loads((out / "manifest.json").read_text())
-    results = {}
-    for line in (out / "results.jsonl").read_text().splitlines():
-        if line.strip():
-            record = json.loads(line)
-            results[record["accession"]] = record
+    results = _last_records(out / "results.jsonl")  # a dropped truncated line reads as ``incomplete`` below
     work = _work(manifest)
     baseline = {row["accession"]: row for row in manifest["baseline"]}
     frozen = {row["accession"]: row["instance_facts"] for row in manifest["frozen"]}
