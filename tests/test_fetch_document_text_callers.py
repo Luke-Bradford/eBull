@@ -244,6 +244,8 @@ _ALLOWED_BYTES_CALLER_FILES: frozenset[str] = frozenset(
         # #3947 — the DPS scan's archive and listing-path HTML → sec_inline_dps_occurrence; bytes are not retained.
         "app/services/dps_inline_scale_scan.py",
         "tests/test_3947_dps_archive_acquisition.py",
+        "tests/test_3947_dps_inline_scale_scan.py",
+        "tests/test_3947_dps_inline_scale_scan_db.py",
         "tests/test_fetch_document_text_callers.py",
     }
 )

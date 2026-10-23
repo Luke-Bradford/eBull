@@ -13845,3 +13845,14 @@ neighbouring container and match it.**
   members under a limit.
 - Enforced in: `app/services/dps_inline_scale_scan.py::_html_members` (`_BOUNDED_METHODS`);
   `SecFilingsProvider.fetch_document_bytes` (one `bytearray`, checked before each append).
+
+### SEC's extracted instance is named after the Inline XBRL document, not the submission's primary (#3947, 2026-10-23)
+
+- First seen in: #3947 PR #3972 replay A/B. The oracle fetched `{sequence-1 document}_htm.xml` and found no instance
+  for Brinker `0000703351-19-000037`: its 10-K primary `eat2019062610k.htm` is not Inline XBRL, the Inline document
+  is the EX-13 `eat20190626ex13.htm`, and SEC's extracted instance is `eat20190626ex13_htm.xml` (index.json listing,
+  2026-10-23). The Guide allows an Inline XBRL exhibit beside a non-Inline primary (spec Amendment 2 B1.4).
+- Prevention: locate the extracted instance from the Inline XBRL documents themselves (the primary when it is one,
+  else each set member in turn), never from the submission's sequence-1 document; a missing instance is a lookup to
+  re-check before it is reported as SEC's.
+- Enforced in: `scripts/replay_3947_v2.py::_instance`.

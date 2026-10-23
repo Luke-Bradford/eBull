@@ -1,4 +1,5 @@
-"""#3947 parser contract (spec §Parser contract; acceptance 3, parser fixtures): one case per clause."""
+"""#3947 parser contract (spec §Parser contract; acceptance 3, parser fixtures): one case per clause; and Amendment 2
+B1.2's classification (B4.6, classification fixtures)."""
 
 from __future__ import annotations
 
@@ -10,6 +11,7 @@ import pytest
 
 from app.services.inline_xbrl_dps import (
     DocumentSetError,
+    classify,
     parse_document_set,
     rendered_report_files,
 )
@@ -56,9 +58,15 @@ def _fact(attrs: str = "", text: str = "0.39", name: str = "us-gaap:CommonStockD
     return f"<ix:nonFraction {base} {attrs}>{text}</ix:nonFraction>"
 
 
+def _set(*documents: tuple[str, str]) -> list[Any]:
+    """The occurrences of the documents' members, each classified from its UTF-8 bytes."""
+    roots = [(name, classify(name, text.encode())) for name, text in documents]
+    return parse_document_set([(name, root) for name, root in roots if root is not None])
+
+
 def _one(body: str, **kwargs: Any) -> Any:
-    occurrences = parse_document_set([("a.htm", _doc(body, **kwargs))])
-    assert occurrences is not None and len(occurrences) == 1
+    occurrences = _set(("a.htm", _doc(body, **kwargs)))
+    assert len(occurrences) == 1
     return occurrences[0]
 
 
@@ -191,55 +199,119 @@ def test_concept_resolved_by_namespace_not_prefix() -> None:
     wrong_namespace = _fact(name="x:CommonStockDividendsPerShareDeclared").replace(
         "<ix:nonFraction ", '<ix:nonFraction xmlns:x="http://example.com/ext" '
     )
-    assert parse_document_set([("a.htm", _doc(wrong_namespace))]) == []
+    assert _set(("a.htm", _doc(wrong_namespace))) == []
     assert _one(_fact(name="nope:CommonStockDividendsPerShareDeclared")).unresolved == "name_qname"
-    assert parse_document_set([("a.htm", _doc(_fact(name="us-gaap:EarningsPerShareBasic")))]) == []
+    assert _set(("a.htm", _doc(_fact(name="us-gaap:EarningsPerShareBasic")))) == []
 
 
 def test_hidden_facts_and_ordinals() -> None:
     body = _fact('id="f1"') + _fact('id="f2" scale="3"')
-    occurrences = parse_document_set([("a.htm", _doc(body))])
-    assert occurrences is not None
+    occurrences = _set(("a.htm", _doc(body)))
     assert [(o.element_ordinal, o.fact_id, o.scale) for o in occurrences] == [(0, "f1", 0), (1, "f2", 3)]
 
 
 def test_duplicate_context_or_unit_id_fails_the_attempt() -> None:
     with pytest.raises(DocumentSetError, match="duplicate_context:c1"):
-        parse_document_set(
-            [
-                ("a.htm", _doc(_fact())),
-                ("b.htm", _doc("", contexts=_DEFAULT_CONTEXTS.split('<xbrli:context id="c2"')[0], units="")),
-            ]
+        _set(
+            ("a.htm", _doc(_fact())),
+            ("b.htm", _doc("", contexts=_DEFAULT_CONTEXTS.split('<xbrli:context id="c2"')[0], units="")),
         )
     with pytest.raises(DocumentSetError, match="duplicate_unit:usd"):
-        parse_document_set([("a.htm", _doc(_fact(), units=_DEFAULT_UNITS + _DEFAULT_UNITS))])
+        _set(("a.htm", _doc(_fact(), units=_DEFAULT_UNITS + _DEFAULT_UNITS)))
 
 
 def test_ix_target_fails_the_attempt_but_html_target_does_not() -> None:
     with pytest.raises(DocumentSetError, match="target"):
-        parse_document_set([("a.htm", _doc(_fact('target="other"')))])
-    occurrences = parse_document_set([("a.htm", _doc('<a href="x" target="_blank">x</a>' + _fact()))])
-    assert occurrences is not None and len(occurrences) == 1
-
-
-def test_unparseable_inline_candidate_fails_but_plain_html_is_skipped() -> None:
-    plain = "<html><body><p>Exhibit 31 &nbsp; <br></body></html>"  # not XML, not inline
-    assert parse_document_set([("ex31.htm", plain)]) is None
-    with pytest.raises(DocumentSetError, match="parse:a.htm"):
-        parse_document_set([("a.htm", _doc(_fact()) + "<unclosed>")])
+        _set(("a.htm", _doc(_fact('target="other"'))))
+    assert len(_set(("a.htm", _doc('<a href="x" target="_blank">x</a>' + _fact())))) == 1
 
 
 def test_multi_document_set_resolves_contexts_across_documents() -> None:
     # Each member of the set carries its own ix:header; the contexts and units sit in the main document only.
     exhibit = _doc(_fact('scale="3"'), contexts="", units="")
-    occurrences = parse_document_set([("main.htm", _doc("")), ("ex13.htm", exhibit), ("r1.htm", "<p>rendered</p>")])
-    assert occurrences is not None
+    occurrences = _set(("main.htm", _doc("")), ("ex13.htm", exhibit), ("r1.htm", "<p>rendered</p>"))
     assert [(o.document, o.instance_value, o.unresolved) for o in occurrences] == [("ex13.htm", Decimal("390"), None)]
 
 
-def test_a_set_without_ix_header_is_not_inline() -> None:
-    assert parse_document_set([("a.htm", _doc(_fact(), header=False))]) is None
-    assert parse_document_set([]) is None
+def test_a_header_less_member_is_read_with_its_own_ordinals() -> None:
+    """B1.4/B1.5: a member need not hold an ``ix:header``; its facts resolve against the set's resources."""
+    exhibit = _doc(_fact('id="x1"') + _fact('id="x2" scale="3"', text="1.75"), header=False)
+    occurrences = _set(("main.htm", _doc(_fact('id="m1"'))), ("ex99.htm", exhibit))
+    assert [(o.document, o.element_ordinal, o.fact_id, o.instance_value) for o in occurrences] == [
+        ("main.htm", 0, "m1", Decimal("0.39")),
+        ("ex99.htm", 0, "x1", Decimal("0.39")),
+        ("ex99.htm", 1, "x2", Decimal("1750")),
+    ]
+
+
+def test_a_set_with_no_ix_header_fails_the_attempt() -> None:
+    with pytest.raises(DocumentSetError, match="no_ix_header"):
+        _set(("a.htm", _doc(_fact(), header=False)))
+
+
+_IX_DOC = (
+    '<html xmlns="http://www.w3.org/1999/xhtml" xmlns:ix="http://www.xbrl.org/2013/inlineXBRL"><body>'
+    "<ix:header/></body></html>"
+)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param(_IX_DOC.encode(), id="utf-8"),
+        pytest.param(_IX_DOC.encode("utf-16"), id="utf-16-bom"),
+        pytest.param(_IX_DOC.replace("inlineXBRL", "inline&#x58;BRL").encode(), id="namespace-by-character-reference"),
+        pytest.param(_IX_DOC.replace("ix:", "inl:").replace("xmlns:ix", "xmlns:inl").encode(), id="other-prefix"),
+        pytest.param(_IX_DOC.replace("<ix:header/>", "<ix:nonFraction/>").encode(), id="any-ix-element-no-header"),
+        pytest.param(
+            ('<?xml version="1.0" encoding="iso-8859-1"?>' + _IX_DOC.replace("<body>", "<body>\xe9")).encode("latin-1"),
+            id="declared-encoding",
+        ),
+    ],
+)
+def test_classify_members(body: bytes) -> None:
+    root = classify("a.htm", body)
+    assert root is not None and root.tag == "{http://www.w3.org/1999/xhtml}html"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param(b"<html><body><p>Exhibit 31 &nbsp; <br></body></html>", id="malformed-plain-html"),
+        pytest.param(
+            _IX_DOC.replace(
+                '<html xmlns="http://www.w3.org/1999/xhtml"', '<h:html xmlns:h="http://www.w3.org/1999/xhtml"'
+            )
+            .replace("</html>", "</h:html>")
+            .encode(),
+            id="prefixed-root",
+        ),
+        pytest.param(_IX_DOC.replace(' xmlns="http://www.w3.org/1999/xhtml"', "").encode(), id="non-xhtml-root"),
+        pytest.param(
+            _IX_DOC.replace("<ix:header/>", "<p>http://www.xbrl.org/2013/inlineXBRL</p>").encode(),
+            id="namespace-name-in-text-no-ix-element",
+        ),
+        pytest.param(b"", id="empty"),
+    ],
+)
+def test_classify_non_members(body: bytes) -> None:
+    assert classify("a.htm", body) is None
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param((_IX_DOC + "<unclosed>").encode(), id="malformed-declaring-the-namespace"),
+        pytest.param((_IX_DOC + "<unclosed>").encode("utf-32"), id="malformed-utf-32-bom"),
+        pytest.param(
+            b'<html><body><div data-ns="http://www.xbrl.org/2013/inline&#88;BRL">&nbsp;</div></body></html>',
+            id="namespace-name-in-an-attribute-only",
+        ),
+    ],
+)
+def test_classify_refuses_a_damaged_file_that_looks_inline(body: bytes) -> None:
+    with pytest.raises(DocumentSetError, match="undecidable:a.htm"):
+        classify("a.htm", body)
 
 
 def test_rendered_report_files_reads_html_file_names_only() -> None:

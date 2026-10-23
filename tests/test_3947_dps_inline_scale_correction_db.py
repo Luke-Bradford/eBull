@@ -399,3 +399,47 @@ def test_an_unexpected_error_still_finishes_the_drains_ingestion_run(
     conn.rollback()
     assert status is not None and status[0] == "failed" and "unexpected" in status[1]
     assert [i for i, _ in _queue(conn)] == [1]  # the refill rolled back; the row stays queued
+
+
+def test_the_v1_generation_serves_until_a_v2_success(ebull_test_conn: Conn, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Amendment 2 B3 and B4.6 (DB): a v2 failure and a v2 exhaustion each keep the v1 generation active, and a
+    flag-on normalisation reads its occurrences; a v2 success replaces them."""
+    conn = ebull_test_conn
+    _seed(conn)
+    v2 = scan.PARSER_VERSION
+    monkeypatch.setattr(scan, "PARSER_VERSION", "dps-inline-scale-v1")
+    scan_run(conn, _Provider(_doc(3)))
+    conn.execute("UPDATE sec_inline_scale_scan SET path = NULL")  # a v1 generation predates the column (sql/517)
+    conn.commit()
+    monkeypatch.setattr(scan, "PARSER_VERSION", v2)
+
+    def flag_on() -> list[tuple[Any, ...]]:
+        fundamentals.normalize_financial_periods(conn, [1], dps_inline_scale=True)
+        conn.commit()
+        return _dps(conn)
+
+    def raw_state(result: scan.ScanResult) -> dict[str, int]:
+        return result.work_state.classes["raw"]
+
+    restored = [(2025, "Q3", Decimal("0.3900"))]  # the v1 occurrence's scale 3 restores 390 to 0.39
+    assert flag_on() == restored
+
+    result = scan_run(conn, _Provider(RuntimeError("boom")))
+    assert raw_state(result) == {"done": 0, "pending": 0, "retrying": 1, "exhausted": 0}
+    assert flag_on() == restored
+    for _ in range(scan.MAX_ATTEMPTS - 1):
+        conn.execute("UPDATE sec_inline_scale_scan SET next_attempt_at = now() - interval '1 second'")
+        result = scan_run(conn, _Provider(RuntimeError("boom")))
+    assert raw_state(result) == {"done": 0, "pending": 0, "retrying": 0, "exhausted": 1}
+    assert conn.execute("SELECT parser_version, path FROM sec_inline_scale_scan").fetchone() == (
+        "dps-inline-scale-v1",
+        None,
+    )
+    assert flag_on() == restored
+
+    # Re-admitted, the v2 scan finds scale 0: the stored value stands.
+    conn.execute("UPDATE sec_inline_scale_scan SET attempts = 0, next_attempt_at = now()")
+    result = scan_run(conn, _Provider(_doc(None)))
+    assert raw_state(result) == {"done": 1, "pending": 0, "retrying": 0, "exhausted": 0}
+    assert conn.execute("SELECT parser_version, path FROM sec_inline_scale_scan").fetchone() == (v2, "archive")
+    assert flag_on() == [(2025, "Q3", Decimal("390.0000"))]
