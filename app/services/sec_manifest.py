@@ -227,6 +227,24 @@ class ManifestRow:
     error: str | None
 
 
+# #3973 — Form 3/4/5 are issuer-keyed: the document's subject is its
+# ``<issuer><issuerCik>``. EDGAR's indexes (master.idx, the daily index,
+# the getcurrent Atom feed, the reporting owner's submissions.json) list
+# the accession under EVERY CIK on it, so the reporting owner's line
+# resolves to the owner's filer subject. A filer subject carries
+# ``instrument_id = NULL`` (DB CHECK), so the insider parsers can only
+# tombstone it ``missing instrument_id``; and since the upsert below is
+# last-discovery-wins, that row also replaced the issuer line's row. The
+# issuer's own line always carries the filing, so a filer-subject write
+# for these sources is refused.
+ISSUER_SUBJECT_ONLY_SOURCES: frozenset[ManifestSource] = frozenset({"sec_form3", "sec_form4", "sec_form5"})
+
+
+def manifest_subject_admits(subject_type: ManifestSubjectType, source: ManifestSource) -> bool:
+    """True when a ``subject_type`` manifest row may carry ``source`` (#3973)."""
+    return subject_type == "issuer" or source not in ISSUER_SUBJECT_ONLY_SOURCES
+
+
 def record_manifest_entry(
     conn: psycopg.Connection[Any],
     accession_number: str,
@@ -242,8 +260,12 @@ def record_manifest_entry(
     is_amendment: bool = False,
     amends_accession: str | None = None,
     initial_ingest_status: IngestStatus = "pending",
-) -> None:
+) -> bool:
     """UPSERT one manifest row keyed by ``accession_number``.
+
+    Returns ``False``, writing nothing, when ``manifest_subject_admits``
+    refuses the subject/source pair (#3973: a Form 3/4/5 seen under its
+    reporting owner's filer CIK); ``True`` when the row was written.
 
     Idempotent on re-discovery (Atom + daily-index + submissions.json
     all converge on the same accession). On conflict, refreshes the
@@ -265,6 +287,8 @@ def record_manifest_entry(
 
     ``accepted_at`` is not written here (#3714): its only writer is ``sec_acceptance_refill``, from the EDGAR header,
     and the table trigger holds the column against any other write."""
+    if not manifest_subject_admits(subject_type, source):
+        return False
     if subject_type == "issuer":
         if instrument_id is None:
             raise ValueError(
@@ -367,6 +391,7 @@ def record_manifest_entry(
         accession_number=accession_number,
         filed_at=filed_at,
     )
+    return True
 
 
 def transition_status(

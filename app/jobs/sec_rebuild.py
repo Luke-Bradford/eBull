@@ -323,7 +323,7 @@ def _discovery_pass(
             if row.source is None or row.source not in sources_set:
                 continue
             try:
-                record_manifest_entry(
+                if not record_manifest_entry(
                     conn,
                     row.accession_number,
                     cik=row.cik,
@@ -335,7 +335,8 @@ def _discovery_pass(
                     filed_at=row.filed_at,
                     primary_document_url=row.primary_document_url,
                     is_amendment=row.is_amendment,
-                )
+                ):
+                    continue  # #3973: Form 3/4/5 under a filer subject
                 new_rows += 1
             except ValueError as exc:
                 logger.warning("sec rebuild: rejected %s: %s", row.accession_number, exc)
@@ -429,7 +430,7 @@ def _walk_secondary_pages(
             if row.source is None or row.source not in sources_set:
                 continue
             try:
-                record_manifest_entry(
+                if not record_manifest_entry(
                     conn,
                     row.accession_number,
                     cik=row.cik,
@@ -441,7 +442,8 @@ def _walk_secondary_pages(
                     filed_at=row.filed_at,
                     primary_document_url=row.primary_document_url,
                     is_amendment=row.is_amendment,
-                )
+                ):
+                    continue  # #3973: Form 3/4/5 under a filer subject
                 new_rows += 1
             except ValueError as exc:
                 logger.warning("sec rebuild (secondary): rejected %s: %s", row.accession_number, exc)

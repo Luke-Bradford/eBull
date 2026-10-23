@@ -622,7 +622,7 @@ def _run_first_install_drain_inner(
             if row.source is None:
                 continue
             try:
-                record_manifest_entry(
+                if not record_manifest_entry(
                     conn,
                     row.accession_number,
                     cik=row.cik,
@@ -634,7 +634,8 @@ def _run_first_install_drain_inner(
                     filed_at=row.filed_at,
                     primary_document_url=row.primary_document_url,
                     is_amendment=row.is_amendment,
-                )
+                ):
+                    continue  # #3973: Form 3/4/5 under a filer subject
                 manifest_upserted += 1
                 inline_seeded_triples.add((subject.subject_type, subject.subject_id, row.source))
             except ValueError as exc:
@@ -746,7 +747,7 @@ def _drain_secondary_pages(
             if row.source is None:
                 continue
             try:
-                record_manifest_entry(
+                if not record_manifest_entry(
                     conn,
                     row.accession_number,
                     cik=row.cik,
@@ -758,7 +759,8 @@ def _drain_secondary_pages(
                     filed_at=row.filed_at,
                     primary_document_url=row.primary_document_url,
                     is_amendment=row.is_amendment,
-                )
+                ):
+                    continue  # #3973: Form 3/4/5 under a filer subject
                 if seeded_triples is not None:
                     seeded_triples.add((subject.subject_type, subject.subject_id, row.source))
             except ValueError as exc:

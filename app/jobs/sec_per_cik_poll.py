@@ -478,7 +478,7 @@ def _apply_delta_to_subject(
         if row.source is None:
             continue
         try:
-            record_manifest_entry(
+            if not record_manifest_entry(
                 conn,
                 row.accession_number,
                 cik=row.cik,
@@ -490,7 +490,8 @@ def _apply_delta_to_subject(
                 filed_at=row.filed_at,
                 primary_document_url=row.primary_document_url,
                 is_amendment=row.is_amendment,
-            )
+            ):
+                continue  # #3973: Form 3/4/5 under a filer subject
             recorded += 1
         except ValueError as exc:
             # #3111 slice 6 — counted as well as logged. Swallowing stays
