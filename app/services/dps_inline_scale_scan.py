@@ -46,6 +46,7 @@ import logging
 import re
 import time
 import zipfile
+import zlib
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -540,15 +541,15 @@ def _html_members(archive: zipfile.ZipFile) -> list[tuple[str, bytes]]:
             raise _ArchiveFallback("archive_compression")
         try:
             # One read of at most one byte past the limit: a member is buffered once, never as chunks plus a joined
-            # copy. A read that reaches the member's end checks its CRC (``ZipExtFile``).
+            # copy, and inflates to at most ``remaining + 1`` bytes before the check below, inside B2.3's HTML total.
+            # A read that reaches the member's end checks its CRC (``ZipExtFile``).
             with archive.open(member) as stream:
                 data = stream.read(remaining + 1)
         except zipfile.BadZipFile as exc:
             reason = "archive_bad_crc" if str(exc).startswith("Bad CRC-32") else "archive_not_zip"
             raise _ArchiveFallback(reason) from None
-        except Exception:  # noqa: BLE001 — B2.4: any member that cannot be read makes the archive unreadable
-            # zlib.error, a truncated member's EOFError, an encrypted member's RuntimeError: the bytes are in memory,
-            # so none is transport.
+        except zlib.error, EOFError, RuntimeError:
+            # A damaged deflate stream, a truncated member, an encrypted member. Anything else fails the attempt.
             raise _ArchiveFallback("archive_not_zip") from None
         if len(data) > remaining:
             raise _ArchiveFallback("archive_html_too_large")

@@ -716,6 +716,10 @@ class SecFilingsProvider(FilingsProvider):
                 if len(body) + len(chunk) > max_bytes:
                     raise ResponseTooLarge(f"{absolute_url}: more than {max_bytes} bytes")
                 body += chunk
+            # ⚠ ``bytes`` on purpose, despite this transient second copy (the ``bytearray`` is freed on return): the
+            # archive caller wraps the result in ``io.BytesIO``, which shares a ``bytes`` buffer but copies a
+            # ``bytearray`` (CPython 3.14, tracemalloc: +0 MB vs +50 MB for 50 MB), so returning the ``bytearray``
+            # would hold the second copy for the whole archive read instead (#3947 PR #3971, Codex checkpoint 3).
             return bytes(body)
 
     def fetch_submission_header(self, absolute_url: str) -> tuple[int, str]:
